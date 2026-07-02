@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# uv
+# (uv.lock is committed intentionally)
+
+# Environment / secrets
+.env
+
+# Local vector store
+.youtube_mcp_store/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
