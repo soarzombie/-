@@ -356,20 +356,37 @@ async function chartSettings(page, picks, shotName) {
   console.log(`after +3 dB calibration: now ${now1c}`);
   assert.ok(Math.abs(now1c - (expected1 + 3)) < 0.5, 'calibrated level');
 
-  // record 3 s -> stop -> the file analysis screen analyses the recording (with the new calibration)
+  // recording is separate from measuring: start it while paused, it does not resume measuring;
+  // resume measuring, the recording runs on; stop it, measuring goes on and the file opens on request
+  await page.getByRole('button', { name: '일시정지' }).click();
+  await page.waitForSelector('.analyzer[data-state="pause"]');
+  const frozen = await page.locator('#a-time').textContent();
   await page.getByRole('button', { name: '녹음 시작' }).click();
   await page.waitForSelector('.analyzer[data-rec="on"]');
-  await page.waitForTimeout(3200);
-  assert.match(await page.locator('#a-state').textContent(), /녹음 중/);
-  assert.match(await page.locator('#a-time').textContent(), /00:0[34]/, 'clock shows the recording length');
+  await page.waitForTimeout(1600);
+  assert.equal(await page.locator('.analyzer').getAttribute('data-state'), 'pause', 'recording does not resume measuring');
+  assert.equal(await page.locator('#a-time').textContent(), frozen, 'measuring clock stays still');
+  assert.match(await page.locator('#a-rec-time').textContent(), /00:0[12]/, 'recording clock runs while paused');
+  await page.getByRole('button', { name: '다시 측정' }).click();
+  await running(page);
+  await page.waitForTimeout(1800);
+  assert.equal(await page.locator('.analyzer').getAttribute('data-rec'), 'on', 'resuming leaves the recording on');
+  assert.match(await page.locator('#a-state').textContent(), /측정 중/);
+  assert.match(await page.locator('#a-rec-time').textContent(), /00:0[34]/);
   await shot(page, 'recording');
   await page.getByRole('button', { name: '녹음 정지' }).click();
+  await page.waitForSelector('.analyzer[data-rec="off"]');
+  await page.waitForSelector('#toast:not([hidden]) .toast-action');
+  assert.equal(await page.evaluate(() => location.hash), '#/', 'stopping the recording stays on the analyzer');
+  assert.equal(await page.locator('.analyzer').getAttribute('data-state'), 'run', 'measuring goes on');
+  await shot(page, 'recording-done');
+  await page.locator('#toast .toast-action').click();
   await page.waitForSelector('#fa-result .stats-grid', { timeout: 20000 });
   assert.match(await page.locator('.file-name').textContent(), /^녹음_\d{8}_\d{4}\.wav$/);
   const recLen = await page.evaluate(() => document.querySelector('#fa-audio').duration);
   const recLeq = await num(page, '#fa-result .stats-grid div:nth-child(1) b');
   console.log(`recording: ${recLen.toFixed(2)} s, Leq ${recLeq}`);
-  assert.ok(recLen > 2.8 && recLen < 4, 'recording length');
+  assert.ok(recLen > 3 && recLen < 4.8, 'recording length includes the paused part');
   assert.ok(Math.abs(recLeq - (expected1 + 3)) < 0.3, 'recording Leq');
   await browser.close();
 

@@ -1,8 +1,9 @@
 // AudioWorklet: frequency-weights the microphone signal sample by sample and reports
 // energy sums plus the Fast (125 ms) time-weighted level, so Leq, LAFmax and LAFmin
 // are computed from every sample rather than from sampled analyser frames.
-// It also keeps the last `ringSec` seconds of raw sound, so "save" can include what was just heard,
-// and while recording it posts the raw sound in chunks.
+// It also keeps the last `ringSec` seconds of raw sound, so "save" can include what was just heard
+// (held still while paused), and while recording it posts the raw sound in chunks (paused or not:
+// recording is separate from measuring).
 // Filter coefficients come from dsp.js via processorOptions, and again in a 'sos' message when
 // the weighting changes.
 
@@ -82,7 +83,7 @@ class LevelProcessor extends AudioWorkletProcessor {
     const sos = this.sos;
     const st = this.state;
     const ring = this.paused ? null : this.ring;
-    const rec = this.paused ? null : this.rec;
+    const rec = this.rec;
     for (let i = 0; i < ch.length; i++) {
       const x = ch[i];
       if (ring) {

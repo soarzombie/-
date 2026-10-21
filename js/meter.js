@@ -156,7 +156,7 @@ export class Meter {
     this.resetStats();
   }
 
-  // Records the raw microphone sound (not while paused) until stopRecording() or MAX_RECORD_SEC.
+  // Records the raw microphone sound until stopRecording() or MAX_RECORD_SEC, also while paused.
   startRecording() {
     if (!this.node || this.recording) return;
     this.recording = { chunks: [], samples: 0, done: null };

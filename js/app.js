@@ -62,12 +62,24 @@ function showFatal(err) {
 /* ---------- small UI helpers ---------- */
 
 let toastTimer;
-function toast(message) {
+// action: { label, run } adds a button and keeps the message up longer
+function toast(message, action = null) {
   const el = document.getElementById('toast');
   el.textContent = message;
+  if (action) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'toast-action';
+    b.textContent = action.label;
+    b.onclick = () => {
+      el.hidden = true;
+      action.run();
+    };
+    el.append(b);
+  }
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (el.hidden = true), 2600);
+  toastTimer = setTimeout(() => (el.hidden = true), action ? 8000 : 2600);
 }
 
 function openSheet(html) {
@@ -214,7 +226,8 @@ function helpSheet() {
         <dt>A · C · Z</dt><dd>주파수 가중치. <b>A</b> 보통 소음(사람 귀에 가깝게) · <b>C</b> 엔진·부밍음처럼 저음이 큰 소리 · <b>Z</b> 거르지 않은 소리. 그래프 오른쪽 위 설정 버튼에서 바꿉니다.</dd>
         <dt>그래프</dt><dd>가로는 주파수(20 Hz – 20 kHz), 세로는 소리 크기입니다. 누르면 십자선 커서가 그 주파수의 값을 보여 주고, 한 번 더 누르면 커서 B로 두 곳을 비교합니다. 끌어서 옮기고 × 로 지웁니다.</dd>
         <dt>보기</dt><dd>${MODES.map((m) => m.label).join(' · ')}. 맨 위 버튼으로 바꿉니다.</dd>
-        <dt>● 녹음</dt><dd>누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 위 시계가 녹음 길이), 정지하면 파일 분석 화면에서 녹음 전체를 분석합니다.</dd>
+        <dt>● 녹음</dt><dd>측정 버튼과 따로 움직입니다. 누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 그래프 위 빨간 시계가 녹음 길이), 측정을 일시정지해도 녹음은 계속됩니다. 정지해도 측정은 그대로 이어지고, 녹음은 파일 탭에 들어가 "분석 보기"로 바로 열 수 있습니다.</dd>
+        <dt>▶ ⏸ 측정</dt><dd>측정 시작과 일시정지(화면과 값 고정). 녹음에는 영향을 주지 않습니다.</dd>
         <dt>⬇ 저장</dt><dd>지금 그래프와 값, 방금 들린 소리를 차량번호·메모와 함께 기록에 남깁니다.</dd>
       </dl>
       <p class="fine">스마트폰 측정값은 참고값이며 정밀 소음계를 대신하지 않습니다.</p>
@@ -248,6 +261,7 @@ async function renderAnalyzer() {
         <div class="gauge-plot"><div class="gauge-host" id="a-gauge"></div>
           <p class="gauge-legend"><span class="gl-min">▲</span> 최소 <span class="gl-max">▲</span> 최대 · 주황색은 경고 기준 ${s.alertLevel} dB 이상</p></div>
         <div class="chart-tools">
+          <p class="rec-badge" id="a-rec-badge" hidden><i></i>녹음 <b id="a-rec-time">00:00</b></p>
           <p class="an-peak" id="a-peak">피크 –</p>
           <button type="button" class="tool-btn" data-act="chart-settings" aria-label="그래프 설정">${ICON.sliders}</button>
         </div>
@@ -258,9 +272,13 @@ async function renderAnalyzer() {
         </div>
       </div>
       <div class="an-controls">
-        <button type="button" class="ctl ctl-rec" data-act="rec" aria-label="녹음 시작"><i class="rec-mark"></i><span class="ctl-cap" id="a-rec-cap">녹음</span></button>
-        <button type="button" class="ctl ctl-main" data-act="toggle" aria-label="측정 시작">${ICON.play}<span class="ctl-cap" id="a-toggle-cap">시작</span></button>
-        <button type="button" class="ctl ctl-save" data-act="save" aria-label="저장">${ICON.save}<span class="ctl-cap">저장</span></button>
+        <div class="ctl-group rec-group" role="group" aria-label="녹음">
+          <button type="button" class="ctl ctl-rec" data-act="rec" aria-label="녹음 시작"><i class="rec-mark"></i><span class="ctl-cap" id="a-rec-cap">녹음</span></button>
+        </div>
+        <div class="ctl-group run-group" role="group" aria-label="측정">
+          <button type="button" class="ctl ctl-main" data-act="toggle" aria-label="측정 시작">${ICON.play}<span class="ctl-cap" id="a-toggle-cap">측정 시작</span></button>
+          <button type="button" class="ctl ctl-save" data-act="save" aria-label="저장">${ICON.save}<span class="ctl-cap">저장</span></button>
+        </div>
       </div>
       <nav class="an-nav" aria-label="메뉴">
         <a href="#/file" aria-label="파일 분석">${ICON.file}</a>
@@ -317,8 +335,8 @@ async function renderAnalyzer() {
     root.dataset.state = paused ? 'pause' : 'run';
     toggleBtn.firstElementChild.outerHTML = paused ? ICON.play : ICON.pause;
     toggleBtn.setAttribute('aria-label', paused ? '다시 측정' : '일시정지');
-    $('a-toggle-cap').textContent = paused ? '계속' : '일시정지';
-    $('a-state').textContent = paused ? '일시정지' : meter?.recording ? '녹음 중' : '측정 중';
+    $('a-toggle-cap').textContent = paused ? '측정 계속' : '일시정지';
+    $('a-state').textContent = paused ? '일시정지' : '측정 중';
   }
 
   function resetDisplays() {
@@ -395,8 +413,7 @@ async function renderAnalyzer() {
     $('a-leq').textContent = fmtDb(meter.leq);
     $('a-max').textContent = fmtDb(meter.lmax);
     $('a-min').textContent = fmtDb(meter.lmin);
-    // while recording the clock shows the length of the recording
-    $('a-time').textContent = fmtClock(meter.recording ? meter.recordedSec : meter.elapsed);
+    $('a-time').textContent = fmtClock(meter.elapsed);
     led.set(db, meter.lmax);
     gauge.set(db);
     gauge.marks(meter.lmin, meter.lmax);
@@ -434,21 +451,28 @@ async function renderAnalyzer() {
     return true;
   }
 
-  // Recorded sound -> a WAV file for the file analysis screen; `notice` instead of going there.
-  function openRecording(samples, rate, notice) {
+  // Recorded sound -> a WAV file in the file tab. Measuring goes on; the message offers to open it.
+  function keepRecording(samples, rate, leaving = false) {
     showRecording(false);
     if (samples.length < rate * 0.5) return toast('녹음이 너무 짧습니다');
     const ts = Date.now();
     openedFile = new File([encodeWav(samples, rate)], `녹음_${fileStamp(ts)}.wav`, { type: 'audio/wav', lastModified: ts });
-    if (notice) toast(notice);
-    else location.hash = '#/file';
+    const len = fmtClock(samples.length / rate);
+    if (leaving) toast(`녹음을 멈췄습니다 (${len}). 녹음한 소리는 파일 탭에 있습니다.`);
+    else toast(`녹음 완료 ${len}`, { label: '분석 보기', run: () => (location.hash = '#/file') });
   }
 
+  // The recording has its own clock (it runs on while measuring is paused).
+  let recTimer = 0;
   function showRecording(on) {
     root.dataset.rec = on ? 'on' : 'off';
     recBtn.setAttribute('aria-label', on ? '녹음 정지' : '녹음 시작');
-    $('a-rec-cap').textContent = on ? '정지' : '녹음';
-    if (meter) showRunning(meter.paused);
+    $('a-rec-cap').textContent = on ? '녹음 정지' : '녹음';
+    $('a-rec-badge').hidden = !on;
+    clearInterval(recTimer);
+    if (!on) return;
+    $('a-rec-time').textContent = '00:00';
+    recTimer = setInterval(() => meter?.recording && ($('a-rec-time').textContent = fmtClock(meter.recordedSec)), 250);
   }
 
   let stopping = false;
@@ -460,7 +484,7 @@ async function renderAnalyzer() {
     const samples = await meter.stopRecording();
     recBtn.disabled = false;
     stopping = false;
-    openRecording(samples, rate);
+    keepRecording(samples, rate);
   }
 
   function stopMic() {
@@ -468,7 +492,7 @@ async function renderAnalyzer() {
     if (meter?.recording) {
       // leaving mid-recording keeps what was recorded, ready in the file tab
       const rate = meter.sampleRate;
-      openRecording(meter.takeRecording(), rate, '녹음을 멈췄습니다. 녹음한 소리는 파일 탭에 있습니다.');
+      keepRecording(meter.takeRecording(), rate, true);
     }
     meter?.stop();
     meter = null;
@@ -477,7 +501,7 @@ async function renderAnalyzer() {
     root.dataset.state = 'off';
     toggleBtn.firstElementChild.outerHTML = ICON.play;
     toggleBtn.setAttribute('aria-label', '측정 시작');
-    $('a-toggle-cap').textContent = '시작';
+    $('a-toggle-cap').textContent = '측정 시작';
     $('a-state').textContent = '대기';
     $('a-now').textContent = '--.-';
     $('a-overlay').hidden = false;
@@ -597,10 +621,11 @@ async function renderAnalyzer() {
     meter.paused = !meter.paused;
     showRunning(meter.paused);
   };
+  // Recording is separate from measuring: it does not resume a paused measurement, pausing does not
+  // stop it, and stopping it leaves the measurement running. It only turns the microphone on if needed.
   recBtn.onclick = async () => {
     if (meter?.recording) return stopRecording();
     if (!(await startMic())) return;
-    meter.paused = false;
     meter.startRecording();
     showRecording(true);
   };

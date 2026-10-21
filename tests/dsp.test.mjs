@@ -384,7 +384,7 @@ test('worklet switches weighting on an sos message', () => {
   }
 });
 
-test('worklet streams the sound in chunks while recording, not while paused', () => {
+test('worklet streams the sound in chunks while recording, also while paused', () => {
   const fs = 1000; // chunks of 0.5 s = 500 samples
   const { Processor, messages } = loadWorklet(fs);
   const proc = new Processor({ processorOptions: { sos: [] } });
@@ -399,18 +399,22 @@ test('worklet streams the sound in chunks while recording, not while paused', ()
   assert.equal(chunks().length, 1);
   assert.equal(chunks()[0].samples.length, 500);
   assert.ok(Math.abs(chunks()[0].samples[0] - 300 / 10000) < 1e-6, 'starts where recording started');
+  // pausing the measurement holds the "save" buffer but not the recording
   proc.port.onmessage({ data: { type: 'pause', paused: true } });
   feed(400);
   proc.port.onmessage({ data: { type: 'pause', paused: false } });
   feed(100);
   proc.port.onmessage({ data: { type: 'record', on: false } });
   const all = chunks();
-  assert.equal(all.length, 2);
-  assert.equal(all[1].last, true);
-  assert.equal(all[1].samples.length, 300);
-  assert.ok(Math.abs(all[1].samples[199] - 999 / 10000) < 1e-6 && Math.abs(all[1].samples[200] - 1400 / 10000) < 1e-6, 'paused part skipped');
+  assert.equal(all.length, 3);
+  assert.equal(all[1].samples.length, 500);
+  assert.equal(all[2].last, true);
+  assert.equal(all[2].samples.length, 200);
+  const joined = all.flatMap((c) => Array.from(c.samples));
+  assert.equal(joined.length, 1200);
+  joined.forEach((v, i) => assert.ok(Math.abs(v - (300 + i) / 10000) < 1e-6, `sample ${i} kept in order`));
   feed(600);
-  assert.equal(chunks().length, 2, 'nothing after stop');
+  assert.equal(chunks().length, 3, 'nothing after stop');
 });
 
 test('analyzeSound with C and Z weighting', () => {

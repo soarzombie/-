@@ -119,7 +119,6 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 .rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); flex-shrink: 0; }
 .analyzer[data-state="run"] .rec-dot { background: #3ddc84; box-shadow: 0 0 0 3px rgb(61 220 132 / 18%); }
 .analyzer[data-state="pause"] .rec-dot { background: var(--amber); }
-.analyzer[data-rec="on"][data-state="run"] .rec-dot { background: var(--rec); box-shadow: 0 0 0 3px rgb(255 79 94 / 25%); }
 
 /* level panel: LED bar, big current value, min / average / max */
 .an-level {
@@ -182,6 +181,11 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
   white-space: nowrap;
   pointer-events: none;
 }
+/* recording has its own clock, apart from the measuring status */
+.rec-badge { display: flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: rgb(60 10 16 / 85%); border: 1px solid rgb(255 79 94 / 70%); color: #ffd6da; font-size: 14px; font-weight: 700; white-space: nowrap; pointer-events: none; }
+.rec-badge i { width: 8px; height: 8px; border-radius: 50%; background: var(--rec); animation: rec-blink 1s steps(2, start) infinite; }
+.rec-badge b { color: #fff; font-variant-numeric: tabular-nums; }
+@keyframes rec-blink { to { visibility: hidden; } }
 .tool-btn { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: rgb(36 40 48 / 92%); color: var(--ink); cursor: pointer; }
 .tool-btn svg { width: 24px; height: 24px; }
 .chart-overlay {
@@ -250,8 +254,10 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 .g-needle { stroke: var(--rec); stroke-width: 4; transform-origin: 150px 148px; transform-box: view-box; transition: transform 0.12s linear; }
 .g-hub { fill: var(--rec); stroke: none; }
 
-/* round buttons with a caption: record (red), start / pause (blue), save */
-.an-controls { grid-area: controls; display: flex; align-items: flex-start; justify-content: center; gap: 26px; padding-bottom: 18px; }
+/* round buttons with a caption, in two groups: record (red) | start / pause (blue), save */
+.an-controls { grid-area: controls; display: flex; align-items: flex-start; justify-content: center; padding-bottom: 18px; }
+.ctl-group { display: flex; align-items: flex-start; gap: 22px; }
+.rec-group { padding-right: 26px; margin-right: 26px; border-right: 1px solid var(--line); }
 .ctl {
   position: relative;
   display: grid;
@@ -320,7 +326,9 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
   .lv-now b { font-size: clamp(30px, 9vh, 42px); }
   .lv-now span { font-size: 16px; }
   .lv-stats { font-size: 13px; gap: 0 8px; }
-  .an-controls { align-items: center; gap: 10px; padding: 0; }
+  .an-controls { align-items: center; padding: 0; }
+  .ctl-group { align-items: center; gap: 10px; }
+  .rec-group { padding-right: 12px; margin-right: 12px; }
   .ctl { width: 48px; height: 48px; margin: 0; }
   .ctl-main, .ctl-rec { width: 54px; height: 54px; }
   .ctl-main svg { width: 26px; height: 26px; }
@@ -499,6 +507,9 @@ details .field { margin-top: 6px; }
 .chip-pick { border: 1px solid var(--line); background: var(--panel-2); color: var(--ink); border-radius: 999px; min-height: 38px; padding: 0 14px; font: inherit; font-size: 15px; cursor: pointer; }
 
 .toast {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   position: fixed;
   left: 50%;
   bottom: calc(var(--tabbar-h) + 20px + env(safe-area-inset-bottom, 0px));
@@ -517,7 +528,14 @@ details .field { margin-top: 6px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
+  .rec-badge i { animation: none; }
 }
+/* on the analyzer the message sits above the round buttons, not on them */
+body[data-view="home"] .toast { bottom: calc(var(--tabbar-h) + 112px + env(safe-area-inset-bottom, 0px)); }
+@media (orientation: landscape) and (min-width: 600px) {
+  body[data-view="home"] .toast { bottom: calc(74px + env(safe-area-inset-bottom, 0px)); }
+}
+.toast-action { flex-shrink: 0; min-height: 34px; padding: 0 12px; border: 0; border-radius: 9px; background: var(--accent); color: var(--accent-ink); font: inherit; font-size: 14px; font-weight: 800; cursor: pointer; }
 
 /* ---------- spectrogram, cursors, sound ---------- */
 
