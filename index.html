@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>차량 소음 측정</title>
+  <meta name="description" content="현장 기사님용 차량 소음 측정 앱: 한 번 눌러 측정하고, 바로 판정하고, 기록·공유·보고서까지.">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#131a22" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="소음측정">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body data-view="home">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#/">
+        <span class="brand-company" id="brand-company"></span>
+        <span class="brand-app">차량 소음 측정</span>
+      </a>
+      <nav class="topnav" aria-label="메뉴">
+        <a href="#/history">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>기록
+        </a>
+        <a href="#/settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg>설정
+        </a>
+      </nav>
+    </div>
+  </header>
+  <main id="view"></main>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <noscript><p style="padding:16px">이 앱은 자바스크립트가 켜져 있어야 동작합니다.</p></noscript>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

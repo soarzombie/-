@@ -2,76 +2,58 @@
 
 This file provides guidance to Claude Code (and other AI assistants) when working in this repository.
 
-> **Status: starter template.** This repository is currently empty (no source files or commit history yet). The sections below are scaffolding — fill them in with concrete details as the codebase takes shape, and delete this note once real content exists. Keep this file accurate: update it whenever structure, tooling, or conventions change.
-
 ## Project Overview
 
-_Describe what this project is and does in 2–3 sentences: its purpose, the primary language/framework, and who uses it._
+A company-internal vehicle noise measurement web app (PWA) for field drivers. Drivers pick a measurement type, tap once, and get an immediate pass / caution / over verdict in dB(A), with automatic saving, sharing (image card + text to KakaoTalk etc.), CSV export and a printable PDF report. UI text is Korean.
 
-- **Language / runtime:** _TBD_
-- **Framework(s):** _TBD_
-- **Package manager:** _TBD_
+- **Language / runtime:** Vanilla JavaScript ES modules in the browser; Node 22 for tests
+- **Framework(s):** None. Web Audio (AudioWorklet + AnalyserNode), IndexedDB, Service Worker
+- **Package manager:** npm (no runtime dependencies; `playwright` only for the e2e test)
 
 ## Repository Structure
 
-_Document the top-level layout once it exists. Example:_
-
 ```
-.
-├── src/            # Application source
-├── tests/          # Test suite
-├── docs/           # Documentation
-└── ...
+index.html, css/app.css     App shell and styles (light/dark tokens, print styles for the report)
+js/app.js                   Screens + hash router (#/, #/measure/<mode>, #/record/<id>, #/history, #/report, #/settings)
+js/meter.js                 Mic level meter: getUserMedia -> AudioWorklet (levels) + AnalyserNode (spectrum)
+js/level-processor.js       AudioWorklet: A-weighting biquads, energy sums, Fast (125 ms) detector
+js/dsp.js                   Pure DSP functions (A-weighting design, analyser bin -> power, octave bands, peak, judge)
+js/settings.js              MODES (measurement types, default criteria, guide text) + localStorage settings
+js/store.js                 IndexedDB records
+js/share.js                 Share card (canvas PNG), summary text, CSV, share/download helper
+js/charts.js, js/format.js  SVG/HTML charts; Korean labels and formatting
+sw.js, manifest.webmanifest, icons/   Offline cache and install
+tests/dsp.test.mjs          Unit tests (node:test), including the worklet run in a vm sandbox
+tests/e2e.cjs               Playwright run with a WAV file as fake microphone
+.github/workflows/pages.yml Tests, then deploys to GitHub Pages from the default branch
 ```
 
 ## Development Workflow
 
-### Setup
-
 ```bash
-# Commands to install dependencies and prepare a local environment
+npm start                                   # serve on http://localhost:8080 (mic works on localhost)
+npm test                                    # unit tests
+NODE_PATH=$(npm root -g) node tests/e2e.cjs [screenshot-dir]   # e2e; writes screenshots + report.pdf if a dir is given
 ```
 
-### Build
-
-```bash
-# Command(s) to build the project
-```
-
-### Run
-
-```bash
-# Command(s) to run the app locally
-```
-
-### Test
-
-```bash
-# Command(s) to run the test suite
-```
-
-### Lint / Format
-
-```bash
-# Linting and formatting commands
-```
+No build step. After changing any cached file, bump `VERSION` in `sw.js` (and add new files to its `FILES` list).
 
 ## Conventions
 
-_Capture project-specific conventions so they're applied consistently:_
-
-- **Code style:** _formatter/linter config, naming patterns, file organization_
-- **Commit messages:** _format and any required trailers_
-- **Branching:** _branch naming and PR expectations_
-- **Testing:** _what must be tested and how_
+- **Measurement chain:** levels come from the worklet (every sample), never from analyser frames. dB SPL = dBFS + per-device `offset` (calibration). The first 0.5 s of each measurement is discarded.
+- **Verdict:** `judge()` in `dsp.js`; each mode's `metric` decides whether Leq or LAFmax is judged. Records store a snapshot of the criteria used, so later settings changes don't alter old verdicts.
+- **Copy:** Korean, plain words for drivers (정상 / 주의 / 초과, 저음 / 중음 / 고음). Frequency explanations are framed as hints, never diagnoses.
+- **Escaping:** any user text (vehicle, driver, memo, company) goes through `esc()` before entering HTML; CSV cells are guarded against formula injection.
+- **Testing:** DSP changes need unit tests in `tests/dsp.test.mjs`; flow changes should keep `tests/e2e.cjs` passing.
 
 ## Git & Branching
 
-- Develop on feature branches; do not commit directly to the default branch.
+- Develop on feature branches; do not commit directly to the default branch (`claude/claude-md-docs-5ggcy7`).
 - Write clear, descriptive commit messages.
 - Open a pull request only when explicitly requested.
 
 ## Notes for AI Assistants
 
-- Verify commands and conventions against the actual codebase before relying on this file — it may lag behind reality while the project is young.
-- When you learn something durable about how this project is built, run, or structured, record it here.
+- Phone mic readings are reference values, not legal measurements; keep that disclaimer on results and reports.
+- Default criteria in `MODES` are examples; the company sets real ones in the admin screen (default PIN `0000`).
+- Settings and records live per device (localStorage / IndexedDB); there is no server yet.
