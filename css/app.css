@@ -358,39 +358,36 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 :root[data-layout="landscape"] body[data-view="home"] .tabbar { display: none; }
 :root[data-layout="landscape"] body[data-view="home"] main { padding: calc(6px + env(safe-area-inset-top, 0px)) var(--gutter-r) calc(6px + env(safe-area-inset-bottom, 0px)) var(--gutter-l); }
 :root[data-layout="landscape"] .analyzer {
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-rows: minmax(0, 1fr) auto;
-  grid-template-areas: "chart chart chart" "controls modes nav";
-  column-gap: 14px;
+  grid-template-columns: 176px auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas: "sub chart chart chart" "level chart chart chart" "controls controls modes nav";
+  column-gap: 10px;
   row-gap: 6px;
 }
 :root[data-layout="landscape"] .an-top { align-self: center; justify-self: center; width: min(100%, 340px); }
 :root[data-layout="landscape"] .an-modes { padding: 3px; }
 :root[data-layout="landscape"] .mode { height: 38px; }
 :root[data-layout="landscape"] .mode svg { width: 23px; height: 23px; }
-/* the status line sits in the top row of the floating level panel */
-:root[data-layout="landscape"] .an-sub { grid-area: chart; align-self: start; justify-self: start; z-index: 5; display: flex; align-items: center; gap: 10px; margin: 13px 0 0 52px; pointer-events: none; }
-:root[data-layout="landscape"] .an-preset { pointer-events: auto; min-height: 28px; }
+/* the level panel in its own column left of the chart, the status line above it */
+:root[data-layout="landscape"] .an-sub { grid-area: sub; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0; }
+:root[data-layout="landscape"] .an-preset { min-height: 28px; }
 :root[data-layout="landscape"] .an-mode-name { display: none; }
 :root[data-layout="landscape"] .an-level {
-  grid-area: chart;
   align-self: start;
-  justify-self: start;
-  z-index: 4;
-  width: clamp(290px, 44%, 330px);
-  margin: 8px 0 0 40px;
-  padding: 40px 4px 6px;
-  grid-template-columns: 38px minmax(0, 1fr) 38px;
-  column-gap: 2px;
-  background: var(--float-bg);
-  backdrop-filter: blur(6px);
+  grid-template-columns: 1fr 1fr;
+  grid-template-areas: "led led" "now now" "stats stats" "help reset";
+  row-gap: 4px;
+  padding: 8px 6px 2px;
 }
-:root[data-layout="landscape"] .led { height: 7px; margin-bottom: 4px; }
-:root[data-layout="landscape"] .round-btn { width: 38px; height: 38px; }
-:root[data-layout="landscape"] .round-btn svg { width: 25px; height: 25px; }
-:root[data-layout="landscape"] .lv-now b { font-size: clamp(30px, 9vh, 42px); }
-:root[data-layout="landscape"] .lv-now span { font-size: 16px; }
-:root[data-layout="landscape"] .lv-stats { font-size: 13px; gap: 0 8px; }
+:root[data-layout="landscape"] .led { height: 7px; gap: 1px; margin: 0 0 2px; }
+:root[data-layout="landscape"] .round-btn { width: 34px; height: 34px; }
+:root[data-layout="landscape"] .round-btn svg { width: 23px; height: 23px; }
+:root[data-layout="landscape"] .lv-now { flex-wrap: wrap; column-gap: 5px; row-gap: 0; }
+:root[data-layout="landscape"] .lv-now b { flex-basis: 100%; text-align: center; font-size: 40px; }
+:root[data-layout="landscape"] .lv-now span { font-size: 14px; }
+:root[data-layout="landscape"] .lv-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 2px; font-size: 11px; text-align: center; }
+:root[data-layout="landscape"] .lv-stats span { display: grid; }
+:root[data-layout="landscape"] .lv-stats b { font-size: 15px; }
 :root[data-layout="landscape"] .an-controls { align-items: center; padding: 0; }
 :root[data-layout="landscape"] .ctl-group { align-items: center; gap: 10px; }
 :root[data-layout="landscape"] .rec-group { padding-right: 12px; margin-right: 12px; }
@@ -401,8 +398,6 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 :root[data-layout="landscape"] .analyzer[data-rec="on"] .rec-mark { width: 18px; height: 18px; }
 :root[data-layout="landscape"] .ctl-cap { display: none; }
 :root[data-layout="landscape"] .an-nav { display: flex; }
-/* below the floating level panel */
-:root[data-layout="landscape"] .octave-plot { top: 124px; }
 
 /* ---------- pages (history, saved analysis, settings) ---------- */
 
