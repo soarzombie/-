@@ -25,6 +25,7 @@ import {
 } from '../js/dsp.js';
 import { analyzeSound, frameAt } from '../js/analysis.js';
 import { encodeWav, decodeWav } from '../js/audio.js';
+import { columnRange } from '../js/timeline.js';
 
 // IEC 61672-1 A-weighting (dB) at the exact base-10 octave frequencies 1000 * 10^(0.3n).
 const IEC_A = [
@@ -428,4 +429,16 @@ test('analyzeSound with C and Z weighting', () => {
     const top = Math.max(...r.avg);
     assert.ok(top < expected && top > expected - 6, `${w}: spectrum peak ${top}`);
   }
+});
+
+test('columnRange gives the lowest and highest level per pixel column without gaps', () => {
+  const values = Float32Array.from([50, 52, 70, 51, 49, 60, 55, 54, 53, 58]);
+  const { lo, hi } = columnRange(values, 0, 10, 5); // 2 samples per column, plus the one before
+  assert.deepEqual(Array.from(hi), [52, 70, 60, 60, 58]);
+  assert.deepEqual(Array.from(lo), [50, 51, 49, 54, 53]);
+  // every column overlaps the one before, so the strokes join up
+  for (let c = 1; c < 5; c++) assert.ok(lo[c] <= hi[c - 1] && hi[c] >= lo[c - 1], `column ${c}`);
+  const part = columnRange(values, 4, 10, 3);
+  assert.deepEqual(Array.from(part.hi), [60, 60, 58]);
+  assert.deepEqual(Array.from(part.lo), [49, 54, 53]);
 });

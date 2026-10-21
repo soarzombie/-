@@ -165,11 +165,17 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
     g.fillText(text, bx + 6 * k, by + 14.5 * k);
   });
 
-  // cursors: a crosshair at the curve, with the frequency and level next to the point
-  (opts.cursors || []).forEach((cur) => {
+  // cursors: a crosshair at the curve, with the frequency and level next to the point.
+  // The column read here is also what the read-out strip shows.
+  const colOf = (hz) => Math.max(0, Math.min(cols.n - 1, Math.floor(freqToX(hz, box, scale) - x0)));
+  const readings = (opts.cursors || []).map((cur) => ({
+    hz: cur.hz,
+    cur: data.cur ? cols.cur[colOf(cur.hz)] : NaN,
+    max: data.max ? cols.max[colOf(cur.hz)] : NaN,
+  }));
+  (opts.cursors || []).forEach((cur, i) => {
     const cx = Math.round(freqToX(cur.hz, box, scale)) + 0.5;
-    const col = Math.max(0, Math.min(cols.n - 1, Math.floor(cx - x0)));
-    const v = data.cur ? cols.cur[col] : NaN;
+    const v = readings[i].cur;
     g.strokeStyle = c.cursor;
     g.lineWidth = 1.2 * k;
     g.beginPath();
@@ -218,7 +224,7 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
     }
   });
 
-  return { box, cols };
+  return { box, cols, readings };
 }
 
 // Canvas that follows its host's size and redraws on update(). With `cursor`, tapping the chart
@@ -270,17 +276,9 @@ export class SpectrumView {
     g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     g.clearRect(0, 0, this.w, this.h);
     const cursors = this.cursors.map((c, i) => ({ hz: c.hz, name: 'AB'[i] }));
-    const { box, cols } = drawSpectrum(g, this.w, this.h, this.data, { ...this.opts, fontScale: this.fontScale, cache: this.cache, cursors });
+    const { box, readings } = drawSpectrum(g, this.w, this.h, this.data, { ...this.opts, fontScale: this.fontScale, cache: this.cache, cursors });
     this.box = box;
-    if (this.onCursor) {
-      const scale = this.opts.scale || 'log';
-      this.onCursor(
-        this.cursors.map((c) => {
-          const col = Math.max(0, Math.min(cols.n - 1, Math.floor(freqToX(c.hz, box, scale) - box.x0)));
-          return { hz: c.hz, cur: this.data.cur ? cols.cur[col] : NaN, max: this.data.max ? cols.max[col] : NaN };
-        }),
-      );
-    }
+    this.onCursor?.(readings);
   }
 
   clearCursors() {

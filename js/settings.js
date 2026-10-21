@@ -1,6 +1,6 @@
 // Per-device settings (kept in localStorage).
 
-export const APP_VERSION = '0.6.1';
+export const APP_VERSION = '0.7.0';
 
 const KEY = 'noise-meter:settings:v1';
 
@@ -9,7 +9,8 @@ const DEFAULTS = {
   vehicle: '',
   recentVehicles: [],
   // analyzer display
-  view: 'spectrum', // 'spectrum' | 'gram' (spectrogram) | 'both' | 'octave' (1/3-octave bars) | 'gauge'
+  view: 'spectrum', // 'spectrum' (with the level trace below) | 'gram' (spectrogram) | 'both' | 'octave' (1/3-octave bars)
+  traceSec: 30, // seconds of level history under the spectrum; 0 = hidden
   weighting: 'A', // frequency weighting 'A' | 'C' | 'Z', for levels and spectrum alike
   style: 'fill', // 'fill' | 'line'
   fftSize: 4096,
@@ -17,7 +18,7 @@ const DEFAULTS = {
   hold: true,
   audioSec: 10, // seconds of sound kept for "save"; 0 = off
   fileUnit: 'cal', // attached files: 'cal' = this phone's calibration, dB; 'fs' = digital level, dBFS
-  alertLevel: 85, // level bar and gauge turn red / orange from here, dB
+  alertLevel: 85, // the level bar turns red from here, dB
   // dBFS -> dB SPL. Phones differ by 10 dB or more, so each device should be calibrated.
   offset: 100,
   calibratedAt: null,

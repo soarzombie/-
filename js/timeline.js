@@ -1,5 +1,6 @@
-// Level over time: the Fast dB(A) every 0.1 s, the recording's Leq as a dashed line and the
-// playback position. Tap or drag to seek.
+// Level over time. TimelineView: a whole recording, the Fast level every 0.1 s, its Leq as a dashed
+// line and the playback position; tap or drag to seek. LiveTimelineView: the live Fast level over the
+// last 30 s – 5 min of measuring, newest at the right, under the spectrum.
 
 import { SPECTRUM_COLORS } from './spectrum.js';
 import { fmtClock } from './format.js';
@@ -128,6 +129,191 @@ export class TimelineView {
       g.moveTo(x(this.playhead), box.yTop);
       g.lineTo(x(this.playhead), box.yBot);
       g.stroke();
+    }
+  }
+
+  destroy() {
+    this.ro.disconnect();
+    this.canvas.remove();
+  }
+}
+
+// Lowest and highest value per column for samples [from, to) spread over `cols` columns.
+// Each column also takes the last sample of the one before, so the drawn band has no gaps.
+export function columnRange(values, from, to, cols) {
+  const lo = new Float32Array(cols).fill(Infinity);
+  const hi = new Float32Array(cols).fill(-Infinity);
+  const per = (to - from) / cols;
+  for (let c = 0; c < cols; c++) {
+    const a = Math.max(from, Math.floor(from + c * per) - (c ? 1 : 0));
+    const b = Math.min(to, Math.max(a + 1, Math.floor(from + (c + 1) * per)));
+    for (let i = a; i < b; i++) {
+      const v = values[i];
+      if (v < lo[c]) lo[c] = v;
+      if (v > hi[c]) hi[c] = v;
+    }
+  }
+  return { lo, hi };
+}
+
+const LIVE_COLOR = '#5aa2ff';
+
+export class LiveTimelineView {
+  // step: seconds between pushed values (the meter's 50 ms blocks); keeps up to maxSec of them.
+  constructor(host, { windowSec = 30, step = 0.05, maxSec = 300 } = {}) {
+    this.host = host;
+    this.step = step;
+    this.windowSec = windowSec;
+    this.cap = Math.ceil(maxSec / step);
+    this.values = new Float32Array(this.cap * 2);
+    this.len = 0; // values held
+    this.first = 0; // sample number of values[0]
+    this.stats = { leq: NaN, unit: 'dB(A)' };
+    this.canvas = document.createElement('canvas');
+    this.canvas.className = 'spectrum-canvas';
+    this.canvas.setAttribute('role', 'img');
+    this.canvas.setAttribute('aria-label', '시간별 소음도 그래프 (가로: 측정 시간, 세로: dB)');
+    host.prepend(this.canvas);
+    this.g = this.canvas.getContext('2d');
+    this.ro = new ResizeObserver(() => this.resize());
+    this.ro.observe(host);
+  }
+
+  resize() {
+    const r = this.host.getBoundingClientRect();
+    this.dpr = Math.min(3, window.devicePixelRatio || 1);
+    this.w = Math.max(1, Math.floor(r.width));
+    this.h = Math.max(1, Math.floor(r.height));
+    this.canvas.width = Math.round(this.w * this.dpr);
+    this.canvas.height = Math.round(this.h * this.dpr);
+    this.canvas.style.width = `${this.w}px`;
+    this.canvas.style.height = `${this.h}px`;
+    this.draw();
+  }
+
+  push(db) {
+    if (this.len === this.values.length) {
+      // drop the older half; only the last maxSec are ever shown
+      this.values.copyWithin(0, this.cap);
+      this.len -= this.cap;
+      this.first += this.cap;
+    }
+    this.values[this.len++] = Number.isFinite(db) ? db : -Infinity;
+  }
+
+  clear() {
+    this.len = 0;
+    this.first = 0;
+    this.draw();
+  }
+
+  configure({ windowSec = this.windowSec, leq = this.stats.leq, unit = this.stats.unit } = {}) {
+    this.windowSec = windowSec;
+    this.stats = { leq, unit };
+  }
+
+  draw() {
+    if (!this.w || this.host.offsetParent === null) return;
+    const { g, step } = this;
+    const c = SPECTRUM_COLORS;
+    const k = this.w < 360 ? 0.92 : 1;
+    g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    g.clearRect(0, 0, this.w, this.h);
+    // same left edge as the spectrum above
+    const box = { x0: 30 * k, x1: this.w - 6 * k, yTop: 8 * k, yBot: this.h - 22 * k };
+    const total = this.first + this.len; // samples measured so far
+    const tEnd = Math.max(total * step, this.windowSec);
+    const tStart = tEnd - this.windowSec;
+    const from = Math.max(0, Math.ceil(tStart / step) - this.first);
+    const to = this.len;
+    let vmin = Infinity;
+    let vmax = -Infinity;
+    for (let i = from; i < to; i++) {
+      const v = this.values[i];
+      if (Number.isFinite(v)) {
+        if (v < vmin) vmin = v;
+        if (v > vmax) vmax = v;
+      }
+    }
+    let lo = Number.isFinite(vmin) ? Math.floor((vmin - 3) / 10) * 10 : 30;
+    const hi = Number.isFinite(vmax) ? Math.ceil((vmax + 3) / 10) * 10 : 90;
+    if (hi - lo < 30) lo = hi - 30;
+    const y = (v) => box.yBot - (((Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : lo) - lo) / (hi - lo)) * (box.yBot - box.yTop);
+    const x = (t) => box.x0 + ((t - tStart) / this.windowSec) * (box.x1 - box.x0);
+
+    g.font = `500 ${11 * k}px ${c.font}`;
+    g.lineWidth = 1;
+    g.strokeStyle = c.grid;
+    g.fillStyle = c.axis;
+    g.textAlign = 'left';
+    const stepDb = (box.yBot - box.yTop) / ((hi - lo) / 10) < 18 * k ? 20 : 10;
+    for (let v = Math.ceil(lo / stepDb) * stepDb; v <= hi; v += stepDb) {
+      const yy = Math.round(y(v)) + 0.5;
+      g.beginPath();
+      g.moveTo(box.x0, yy);
+      g.lineTo(box.x1, yy);
+      g.stroke();
+      g.fillText(String(v), 2 * k, yy + 4 * k);
+    }
+    const tick = TICKS.find((s) => this.windowSec / s <= 6) || 600;
+    for (let t = Math.ceil(tStart / tick) * tick; t <= tEnd + 1e-6; t += tick) {
+      const xx = Math.round(x(t)) + 0.5;
+      g.beginPath();
+      g.moveTo(xx, box.yTop);
+      g.lineTo(xx, box.yBot);
+      g.stroke();
+      g.textAlign = xx < box.x0 + 16 * k ? 'left' : xx > box.x1 - 16 * k ? 'right' : 'center';
+      g.fillText(fmtClock(t), xx, this.h - 6 * k);
+    }
+    g.textAlign = 'left';
+    g.fillStyle = c.axis;
+    g.fillText(`시간별 소음도 · ${this.windowSec < 60 ? `${this.windowSec}초` : `${this.windowSec / 60}분`}`, box.x0 + 6 * k, box.yTop + 12 * k);
+
+    if (to - from >= 2) {
+      const t0 = (this.first + from + 1) * step;
+      const xEnd = x((this.first + to) * step);
+      g.save();
+      g.beginPath();
+      g.rect(box.x0, box.yTop, box.x1 - box.x0, box.yBot - box.yTop);
+      g.clip();
+      g.strokeStyle = LIVE_COLOR;
+      g.lineWidth = 1.5 * k;
+      g.lineJoin = 'round';
+      g.beginPath();
+      const cols = Math.max(1, Math.round(xEnd - x(t0)));
+      if (to - from <= cols * 2) {
+        for (let i = from; i < to; i++) g[i === from ? 'moveTo' : 'lineTo'](x((this.first + i + 1) * step), y(this.values[i]));
+      } else {
+        // more points than pixels: one vertical stroke per pixel from its lowest to highest value
+        const { lo: cl, hi: ch } = columnRange(this.values, from, to, cols);
+        for (let col = 0; col < cols; col++) {
+          const xx = x(t0) + col + 0.5;
+          g.moveTo(xx, y(ch[col]) - 0.5);
+          g.lineTo(xx, y(cl[col]) + 0.5);
+        }
+      }
+      g.stroke();
+      g.restore();
+      // the newest value
+      g.fillStyle = LIVE_COLOR;
+      g.beginPath();
+      g.arc(Math.min(box.x1, xEnd), y(this.values[to - 1]), 3.2 * k, 0, Math.PI * 2);
+      g.fill();
+    }
+
+    const { leq, unit } = this.stats;
+    if (Number.isFinite(leq) && to - from >= 2) {
+      g.setLineDash([6 * k, 4 * k]);
+      g.strokeStyle = 'rgba(255,255,255,0.55)';
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(box.x0, y(leq));
+      g.lineTo(box.x1, y(leq));
+      g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = 'rgba(255,255,255,0.85)';
+      g.textAlign = 'right';
+      g.fillText(`평균 ${leq.toFixed(1)} ${unit}`, box.x1 - 4 * k, Math.max(box.yTop + 11 * k, y(leq) - 5 * k));
     }
   }
 

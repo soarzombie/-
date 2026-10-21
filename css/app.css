@@ -13,7 +13,6 @@
   --accent-ink: #ffffff;
   --rec: #ff4f5e;
   --amber: #ffb547;
-  --gauge: #7f8ba0;
   --danger: #ff6b6b;
   --tabbar-h: 58px;
   --font: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Noto Sans KR", "Malgun Gothic", "Segoe UI", Roboto, sans-serif;
@@ -100,7 +99,7 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 .an-modes {
   grid-area: modes;
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 4px;
   padding: 4px;
   background: var(--panel-2);
@@ -161,13 +160,7 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
   border-radius: 16px;
   overflow: hidden;
 }
-.chart-plot, .gram-plot, .octave-plot { position: absolute; inset: 8px 8px 4px 4px; }
-.gauge-plot { position: absolute; inset: 60px 16px 12px; display: flex; flex-direction: column; gap: 8px; }
-.gauge-host { position: relative; flex: 1; min-height: 0; }
-.gauge-host .gauge-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-.gauge-legend { text-align: center; font-size: 13px; color: var(--ink-3); }
-.gl-min { color: #6fa8ff; }
-.gl-max { color: var(--amber); }
+.chart-plot, .gram-plot, .octave-plot, .trace-plot { position: absolute; inset: 8px 8px 4px 4px; }
 .spectrum-canvas { display: block; }
 .chart-tools { position: absolute; top: 8px; right: 8px; z-index: 3; display: flex; align-items: center; gap: 8px; }
 .an-peak {
@@ -241,18 +234,6 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 .opt span { font-size: 12px; color: var(--ink-3); font-weight: 600; }
 .opt b { font-weight: 700; }
 
-.gauge-svg { display: block; overflow: visible; }
-.g-arc { stroke: var(--gauge); stroke-width: 3; }
-.g-tick { stroke: var(--gauge); stroke-width: 2; }
-.g-tick.g-major { stroke-width: 3.2; }
-.g-label { fill: var(--gauge); stroke: none; font: 600 12px var(--font); }
-.g-alert { stroke: var(--amber); }
-.g-label.g-alert { fill: var(--amber); stroke: none; }
-.g-mark { stroke: none; }
-.g-mark-min { fill: #6fa8ff; }
-.g-mark-max { fill: var(--amber); }
-.g-needle { stroke: var(--rec); stroke-width: 4; transform-origin: 150px 148px; transform-box: view-box; transition: transform 0.12s linear; }
-.g-hub { fill: var(--rec); stroke: none; }
 
 /* round buttons with a caption, in two groups: record (red) | start / pause (blue), save */
 .an-controls { grid-area: controls; display: flex; align-items: flex-start; justify-content: center; padding-bottom: 18px; }
@@ -337,8 +318,6 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
   .ctl-cap { display: none; }
   .an-nav { display: flex; }
   /* below the floating level panel */
-  .gauge-plot { inset: 128px 16px 8px; }
-  .gauge-legend { display: none; }
   .octave-plot { top: 124px; }
 }
 
@@ -542,7 +521,11 @@ body[data-view="home"] .toast { bottom: calc(var(--tabbar-h) + 112px + env(safe-
 .an-chart:not([data-view="spectrum"]):not([data-view="both"]) .chart-plot,
 .an-chart:not([data-view="gram"]):not([data-view="both"]) .gram-plot,
 .an-chart:not([data-view="octave"]) .octave-plot,
-.an-chart:not([data-view="gauge"]) .gauge-plot { display: none; }
+.an-chart:not([data-view="spectrum"]) .trace-plot,
+.an-chart[data-trace="off"] .trace-plot { display: none; }
+/* spectrum with the level trace under it */
+.an-chart[data-view="spectrum"][data-trace="on"] .chart-plot { bottom: 39%; }
+.an-chart[data-view="spectrum"][data-trace="on"] .trace-plot { top: 62%; }
 .an-chart[data-view="both"] .chart-plot { bottom: 47%; }
 .an-chart[data-view="both"] .gram-plot { top: 55%; }
 .an-chart[data-view="gram"] .an-peak { display: none; }
@@ -569,7 +552,14 @@ body[data-view="home"] .toast { bottom: calc(var(--tabbar-h) + 112px + env(safe-
   pointer-events: none;
 }
 .an-chart[data-view="both"] .cursor-readout { bottom: calc(47% + 28px); }
-.an-chart:is([data-view="gram"], [data-view="octave"], [data-view="gauge"]) .cursor-readout { display: none; }
+.an-chart[data-view="spectrum"][data-trace="on"] .cursor-readout { bottom: calc(39% + 28px); }
+/* landscape: a lower trace leaves the spectrum more room under the level panel */
+@media (orientation: landscape) and (min-width: 600px) {
+  .an-chart[data-view="spectrum"][data-trace="on"] .chart-plot { bottom: 34%; }
+  .an-chart[data-view="spectrum"][data-trace="on"] .trace-plot { top: 67%; }
+  .an-chart[data-view="spectrum"][data-trace="on"] .cursor-readout { bottom: calc(34% + 28px); }
+}
+.an-chart:is([data-view="gram"], [data-view="octave"]) .cursor-readout { display: none; }
 .cr-lines { display: flex; flex-wrap: wrap; gap: 0 12px; min-width: 0; }
 .cr-lines span { white-space: nowrap; }
 .cr-lines b { color: #5cc8ff; margin-right: 1px; }

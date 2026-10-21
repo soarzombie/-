@@ -254,8 +254,14 @@ async function chartSettings(page, picks, shotName) {
   await page.locator('#a-cursor .cr-close').click();
   await page.waitForSelector('#a-cursor', { state: 'hidden' });
 
-  // views: time axis, both, 1/3 octave, gauge, back to the spectrum; each shows its own drawing
+  // the spectrum has the level trace under it
+  assert.ok(await page.locator('#a-trace canvas').isVisible(), 'level trace under the spectrum');
+  const specH = (await page.locator('#a-chart').boundingBox()).height;
+
+  // views: time axis, both, 1/3 octave, back to the spectrum; each shows its own drawing
+  assert.equal(await page.locator('.mode').count(), 4, 'no gauge view');
   await setMode(page, 'gram');
+  assert.ok(!(await page.locator('#a-trace canvas').isVisible()), 'trace only with the spectrum');
   await page.waitForTimeout(1500);
   assert.ok(await page.locator('#a-gram canvas').isVisible() && !(await page.locator('#a-chart canvas').isVisible()));
   await setMode(page, 'both');
@@ -264,9 +270,14 @@ async function chartSettings(page, picks, shotName) {
   await page.waitForTimeout(1500);
   assert.ok(await page.locator('#a-octave canvas').isVisible());
   await shot(page, 'tone-octave');
-  await setMode(page, 'gauge');
-  assert.ok(await page.locator('#a-gauge svg').isVisible());
   await setMode(page, 'spectrum');
+  // the trace can be hidden (the spectrum takes the whole chart) and set to 30 s / 1 min / 5 min
+  await chartSettings(page, { trace: '0' });
+  assert.ok(!(await page.locator('#a-trace canvas').isVisible()));
+  assert.ok((await page.locator('#a-chart').boundingBox()).height > specH * 1.4, 'spectrum grows');
+  await chartSettings(page, { trace: '60' });
+  assert.ok(await page.locator('#a-trace canvas').isVisible());
+  await chartSettings(page, { trace: '30' });
   assert.match(await page.locator('#a-mode-name').textContent(), /스펙트럼/);
 
   // graph settings: style, max hold, FFT size, axis
@@ -491,10 +502,12 @@ async function chartSettings(page, picks, shotName) {
     await setMode(page, 'octave');
     await page.waitForTimeout(2500);
     await shot(page, `main-${name}-octave`);
-    await setMode(page, 'gauge');
-    await page.waitForTimeout(500);
-    await shot(page, `main-${name}-gauge`);
     await setMode(page, 'spectrum');
+    await page.waitForTimeout(6000); // let the level trace fill up
+    await tapFrequency(page, 1250);
+    await page.waitForTimeout(300);
+    await shot(page, `main-${name}-trace`);
+    await page.locator('#a-cursor .cr-close').click();
     await page.getByRole('button', { name: '그래프 설정' }).click();
     await page.waitForTimeout(200);
     await shot(page, `settings-sheet-${name}`);
