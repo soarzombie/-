@@ -1,6 +1,6 @@
 // Getting results off the phone: text for messengers, a PNG result card, CSV for Excel.
 
-import { OCTAVES, zoneOfFrequency } from './dsp.js';
+import { BANDS, zoneOfFrequency } from './dsp.js';
 import {
   VERDICT,
   ZONE_INFO,
@@ -112,7 +112,7 @@ export function renderCard(rec, settings) {
     const x1 = W - 64;
     const yTop = 1050;
     const yBot = 1220;
-    const slot = (x1 - x0) / OCTAVES.length;
+    const slot = (x1 - x0) / BANDS.length;
     const peak = rec.bands.indexOf(Math.max(...values));
     text('주파수별 소리 크기 dB(A)', 64, 1028, 30, CARD.sub, 600);
     rec.bands.forEach((v, i) => {
@@ -120,9 +120,9 @@ export function renderCard(rec, settings) {
       if (Number.isFinite(v)) {
         const h = ((Math.max(bottom, Math.min(top, v)) - bottom) / (top - bottom)) * (yBot - yTop);
         g.fillStyle = i === peak ? CARD.barPeak : CARD.bar;
-        g.fillRect(cx - slot * 0.3, yBot - h, slot * 0.6, Math.max(2, h));
+        g.fillRect(cx - slot * 0.36, yBot - h, slot * 0.72, Math.max(2, h));
       }
-      text(OCTAVES[i].label, cx, yBot + 38, 26, CARD.sub, 500, 'center');
+      if (BANDS[i].major) text(BANDS[i].label, cx, yBot + 38, 26, CARD.sub, 500, 'center');
     });
   }
 
@@ -153,7 +153,7 @@ function fitText(g, s, font, maxWidth) {
 const CSV_HEAD = [
   '일시', '차량번호', '기사', '측정 항목', '판정', '판정값 dB(A)', '판정 방식', '주의 기준', '초과 기준',
   '평균 Leq dB(A)', '최대 Lmax dB(A)', '주요 소리 Hz', '저음 %', '중음 %', '고음 %',
-  ...OCTAVES.map((b) => `${b.label}Hz dB(A)`),
+  ...BANDS.map((b) => `${b.label}Hz dB(A)`),
   '측정 시간(초)', '위도', '경도', '메모', '마이크 보정', '과부하',
 ];
 
@@ -161,7 +161,7 @@ export function recordsCsv(records) {
   const rows = records.map((r) => [
     fmtDate(r.ts), r.vehicle, r.driver, r.modeName, VERDICT[r.verdict].label, r.value, METRIC_LABEL[r.metric],
     r.warn, r.limit, r.leq, r.lmax, r.peakHz, r.zones?.low, r.zones?.mid, r.zones?.high,
-    ...OCTAVES.map((_, i) => r.bands?.[i]),
+    ...BANDS.map((_, i) => r.bands?.[i]),
     r.durationSec, r.loc?.lat, r.loc?.lon, r.memo, r.calibrated ? 'O' : 'X', r.clipped ? 'O' : '',
   ]);
   const csv = [CSV_HEAD, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n');

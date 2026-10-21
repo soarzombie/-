@@ -6,6 +6,8 @@ import {
   analyserDbToPower,
   aWeightPower,
   bandPowers,
+  bandMap,
+  foldBands,
   zoneShares,
   findPeak,
   toDb,
@@ -13,7 +15,7 @@ import {
 
 const WARMUP_SEC = 0.5; // filter and Fast detector settle; also skips the tap on the screen
 const CLIP_LEVEL = 0.98;
-const FFT_SIZE = 8192;
+const FFT_SIZE = 16384; // ~3 Hz bins at 48 kHz, so the 25–40 Hz third-octave bands get several bins
 const SPECTRUM_MS = 100;
 
 export class MicError extends Error {
@@ -45,13 +47,14 @@ export class Meter {
     this.stopped = false;
   }
 
-  // Call from a tap handler: browsers only start audio from a user gesture.
+  // Best called from a tap handler; otherwise check `running` and call resume() on the next tap.
   async start() {
     if (!window.isSecureContext) throw micError('insecure');
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx || !navigator.mediaDevices?.getUserMedia) throw micError('unsupported');
     this.ctx = new Ctx();
-    const resumed = this.ctx.resume();
+    // Not awaited: without a recent tap the context stays suspended until resume() is called again.
+    this.ctx.resume().catch(() => {});
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
@@ -75,7 +78,6 @@ export class Meter {
       throw new MicError('cancelled', '측정을 취소했습니다.');
     }
     try {
-      await resumed;
       if (!this.ctx.audioWorklet) throw micError('unsupported');
       await this.ctx.audioWorklet.addModule(new URL('./level-processor.js', import.meta.url));
       const fs = this.ctx.sampleRate;
@@ -89,6 +91,9 @@ export class Meter {
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = FFT_SIZE;
       this.analyser.smoothingTimeConstant = 0;
+      this.map = bandMap(this.analyser.frequencyBinCount, fs / FFT_SIZE);
+      this.liveDb = new Float32Array(this.analyser.frequencyBinCount);
+      this.livePower = new Float64Array(this.map.size);
       // Both nodes must reach the destination to be rendered; the zero gain keeps it silent.
       const mute = this.ctx.createGain();
       mute.gain.value = 0;
@@ -108,6 +113,23 @@ export class Meter {
     return this.ctx?.sampleRate || 48000;
   }
 
+  // Browsers keep audio suspended until a tap; the screen shows a "tap to start" layer meanwhile.
+  get running() {
+    return this.ctx?.state === 'running';
+  }
+
+  resume() {
+    return this.ctx?.resume();
+  }
+
+  // Current A-weighted third-octave levels, dB(A), from the latest analyser frame.
+  liveBands() {
+    if (!this.analyser) return null;
+    this.analyser.getFloatFrequencyData(this.liveDb);
+    foldBands(this.liveDb, this.map, this.livePower);
+    return Array.from(this.livePower, (p) => toDb(p, this.offset));
+  }
+
   handleBlock(b) {
     this.samples += b.n;
     this.onLevel?.(toDb(b.fast, this.offset));
@@ -120,6 +142,7 @@ export class Meter {
     job.onProgress?.({
       elapsed: job.n / this.sampleRate,
       leq: toDb(job.sumA / job.n, this.offset),
+      lmax: toDb(job.fastMax, this.offset),
     });
     if (job.n >= job.seconds * this.sampleRate) this.finish();
   }
@@ -140,14 +163,18 @@ export class Meter {
         peak: 0,
         frames: 0,
         power: new Float64Array(bins),
+        bandMax: new Float64Array(this.map.size),
         scratchDb: new Float32Array(bins),
         scratchPower: new Float64Array(bins),
+        scratchBands: new Float64Array(this.map.size),
       };
       job.timer = setInterval(() => {
         if (job.n === 0) return; // still warming up
         this.analyser.getFloatFrequencyData(job.scratchDb);
         analyserDbToPower(job.scratchDb, job.scratchPower);
         for (let k = 0; k < bins; k++) job.power[k] += job.scratchPower[k];
+        foldBands(job.scratchDb, this.map, job.scratchBands);
+        for (let b = 0; b < job.bandMax.length; b++) job.bandMax[b] = Math.max(job.bandMax[b], job.scratchBands[b]);
         job.frames++;
       }, SPECTRUM_MS);
       this.job = job;
@@ -168,6 +195,7 @@ export class Meter {
       lmax: toDb(job.fastMax, this.offset),
       clipped: job.peak >= CLIP_LEVEL,
       bands: bandsA.map((p) => round1(toDb(p, this.offset))),
+      bandsMax: Array.from(job.bandMax, (p) => round1(toDb(p, this.offset))),
       zones: zoneShares(bandsA),
       peakHz: peak ? Math.round(peak.hz) : null,
       peakProminence: peak ? round1(peak.prominence) : null,

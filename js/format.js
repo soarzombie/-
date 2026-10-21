@@ -10,19 +10,19 @@ export const VERDICT = {
 export const ZONE_INFO = {
   low: {
     name: '저음',
-    range: '125Hz 이하',
+    range: '160Hz 이하',
     sound: '웅~, 우웅 하는 낮은 소리',
     causes: '엔진·배기, 타이어·노면, 차체 떨림에서 많이 나는 소리입니다.',
   },
   mid: {
     name: '중음',
-    range: '250Hz–1kHz',
+    range: '200Hz–1.25kHz',
     sound: '윙~, 그르륵 하는 소리',
     causes: '기어·베어링·펌프, 바람 소리에서 많이 나는 소리입니다.',
   },
   high: {
     name: '고음',
-    range: '2kHz 이상',
+    range: '1.6kHz 이상',
     sound: '삐~, 끼익, 쉬익 하는 높은 소리',
     causes: '브레이크, 벨트, 공기 새는 곳에서 많이 나는 소리입니다.',
   },

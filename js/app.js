@@ -1,9 +1,9 @@
 // Screens and navigation. Routes live in the URL hash so the phone's back button works:
-// #/ (home), #/measure/<mode>, #/record/<id>, #/history, #/report, #/settings
+// #/ (main screen: live spectrum + measuring), #/record/<id>, #/history, #/report, #/settings
 
-import { MODES, APP_VERSION, getSettings, saveSettings, modeConfig, rememberVehicle } from './settings.js';
+import { MODES, MODE_BY_ID, APP_VERSION, getSettings, saveSettings, modeConfig, rememberVehicle } from './settings.js';
 import { Meter } from './meter.js';
-import { judge, dominantZone, zoneOfFrequency } from './dsp.js';
+import { BANDS, judge, dominantZone, zoneOfFrequency } from './dsp.js';
 import * as store from './store.js';
 import {
   VERDICT,
@@ -22,7 +22,8 @@ import {
   mapUrl,
   fmtLoc,
 } from './format.js';
-import { octaveChart, gauge, zoneBar } from './charts.js';
+import { spectrumSvg, gauge, zoneBar } from './charts.js';
+import { SpectrumChart } from './spectrum.js';
 import { summaryText, renderCard, recordsCsv, deliverFile } from './share.js';
 
 const view = document.getElementById('view');
@@ -32,13 +33,6 @@ let adminUnlocked = false;
 let installPrompt = null;
 const historyFilter = { period: '7d', vehicle: '' };
 
-const ICONS = {
-  drive: '<svg viewBox="0 0 24 24" class="mode-icon" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/><path d="M3.5 10.5h6M14.5 10.5h6M12 14.5V21"/></svg>',
-  idle: '<svg viewBox="0 0 24 24" class="mode-icon" aria-hidden="true"><path d="M3 15.5v-3.5l2.2-5h10.6l3.2 5h2v3.5"/><circle cx="7" cy="16" r="2"/><circle cx="17" cy="16" r="2"/><path d="M9 16h6M5.5 12h13"/></svg>',
-  exhaust: '<svg viewBox="0 0 24 24" class="mode-icon" aria-hidden="true"><path d="M2 10h9v4H2"/><path d="M14.5 8.5c1.4 1.4 1.4 5.6 0 7M17.5 6c2.6 2.6 2.6 9.4 0 12M20.5 3.5c3.6 3.6 3.6 13.4 0 17"/></svg>',
-  inspect: '<svg viewBox="0 0 24 24" class="mode-icon" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M15.2 15.2 21 21"/><path d="M5.5 10h1.6l1.2-3 2.2 6 1.3-3h1.7"/></svg>',
-};
-
 const PERIODS = [
   { id: 'today', label: '오늘' },
   { id: '7d', label: '7일' },
@@ -47,8 +41,8 @@ const PERIODS = [
 ];
 
 const routes = {
-  home: renderHome,
-  measure: renderMeasure,
+  home: renderMeter,
+  measure: selectMode,
   record: renderRecord,
   history: renderHistory,
   report: renderReport,
@@ -148,80 +142,301 @@ function recordRow(rec, { showDay = false } = {}) {
   </a></li>`;
 }
 
-/* ---------- home ---------- */
+/* ---------- main screen: live spectrum + measurement ---------- */
 
-async function renderHome() {
-  const s = getSettings();
-  const recent = (await store.allRecords()).slice(0, 3);
-  const today = new Date().toDateString();
-  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
-  const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
-  let hideInstall = false;
+const NAV_ICONS = {
+  history: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>',
+  settings: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg>',
+  mic: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/></svg>',
+};
+
+function currentMode() {
+  const id = getSettings().lastMode;
+  return modeConfig(MODE_BY_ID[id] ? id : MODES[0].id);
+}
+
+async function micPermission() {
   try {
-    hideInstall = localStorage.getItem('noise-meter:install-hint') === 'hidden';
+    return (await navigator.permissions.query({ name: 'microphone' })).state;
+  } catch {
+    return 'prompt';
+  }
+}
+
+function shortCriterion(mode) {
+  return mode.limit != null ? `${METRIC_LABEL[mode.metric].replace(' 소음', '')} ${mode.limit} dB 이하` : '소리 종류 분석';
+}
+
+function showGuide(mode) {
+  openSheet(`
+    <div class="sheet-form">
+      <h2>${mode.name} 측정 방법</h2>
+      <ol class="guide">
+        ${mode.guide.map((g) => `<li>${g}</li>`).join('')}
+        <li>측정하는 동안에는 말하지 마세요.</li>
+      </ol>
+      ${mode.safety ? `<p class="safety">${mode.safety}</p>` : ''}
+      <p class="fine">판정 기준: ${criterionText(mode)} · ${mode.delay ? `시작 ${mode.delay}초 뒤부터 ` : ''}${mode.duration}초 측정</p>
+      <button type="button" class="btn btn-primary btn-wide" data-close>확인</button>
+    </div>`);
+}
+
+function installOffer() {
+  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  let hidden = false;
+  try {
+    hidden = localStorage.getItem('noise-meter:install-hint') === 'hidden';
   } catch {
     // ignore
   }
-  const installBox = !standalone && !hideInstall && (installPrompt || isIos)
-    ? `<div class="install-hint">
-        <p>${installPrompt ? '홈 화면에 추가하면 앱처럼 바로 열 수 있습니다.' : '사파리 아래쪽 공유 버튼 → <b>홈 화면에 추가</b>를 누르면 앱처럼 쓸 수 있습니다.'}</p>
-        <div>${installPrompt ? '<button class="btn btn-small btn-primary" data-act="install">추가</button>' : ''}
-        <button class="btn btn-small btn-quiet" data-act="hide-install">닫기</button></div>
-      </div>`
-    : '';
+  if (standalone || hidden) return '';
+  if (installPrompt) return '<p class="install-hint"><span>홈 화면에 추가하면 앱처럼 바로 열립니다.</span><button type="button" class="btn btn-small" data-act="install">추가</button></p>';
+  if (/iphone|ipad|ipod/i.test(navigator.userAgent)) return '<p class="install-hint"><span>사파리 공유 버튼 → <b>홈 화면에 추가</b>로 앱처럼 쓸 수 있습니다.</span></p>';
+  return '';
+}
 
+async function renderMeter() {
+  const s = getSettings();
+  let mode = currentMode();
   view.innerHTML = `
-    <section class="vehicle-bar">
-      <div class="vehicle-info">
-        <span class="eyebrow">차량번호</span>
-        <strong class="vehicle-no${s.vehicle ? '' : ' is-empty'}">${s.vehicle ? esc(s.vehicle) : '입력해 주세요'}</strong>
-        ${s.driver ? `<span class="driver">기사 ${esc(s.driver)}</span>` : ''}
+    <section class="meter" data-state="off">
+      <div class="meter-head">
+        <button type="button" class="vehicle-chip" data-act="vehicle">
+          <span class="eyebrow">차량</span>
+          <strong class="${s.vehicle ? '' : 'is-empty'}">${s.vehicle ? esc(s.vehicle) : '차량번호 입력'}</strong>
+          ${s.driver ? `<span class="driver">${esc(s.driver)}</span>` : ''}
+        </button>
+        <nav class="meter-nav" aria-label="메뉴">
+          <a href="#/history">${NAV_ICONS.history}<span>기록</span></a>
+          <a href="#/settings">${NAV_ICONS.settings}<span>설정</span></a>
+        </nav>
       </div>
-      <button class="btn btn-quiet" data-act="vehicle">${s.vehicle ? '변경' : '입력'}</button>
-    </section>
-    <h1 class="prompt">무엇을 측정할까요?</h1>
-    <div class="mode-grid">
-      ${MODES.map((m) => {
-        const c = modeConfig(m.id);
-        return `<a class="mode-tile" href="#/measure/${m.id}">
-          ${ICONS[m.id]}
-          <span class="mode-name">${m.name}</span>
-          <span class="mode-desc">${m.desc}</span>
-          <span class="mode-crit">${c.limit != null ? `${METRIC_LABEL[c.metric].replace(' 소음', '')} ${c.limit} dB 이하` : '소리 종류 분석'}</span>
-        </a>`;
-      }).join('')}
-    </div>
-    ${installBox}
-    ${recent.length
-      ? `<section class="recent">
-          <div class="section-head"><h2>최근 측정</h2><a href="#/history">전체 기록 보기</a></div>
-          <ul class="record-list">${recent.map((r) => recordRow(r, { showDay: new Date(r.ts).toDateString() !== today })).join('')}</ul>
-        </section>`
-      : '<p class="empty-hint">측정을 마치면 결과가 자동으로 저장됩니다.</p>'}
-  `;
+      <div class="readout">
+        <div class="readout-main" id="r-main">
+          <span class="readout-label">현재 소음</span>
+          <span class="readout-value"><b id="r-value">--.-</b><small>dB(A)</small></span>
+        </div>
+        <dl class="readout-stats">
+          <div><dt>평균</dt><dd id="r-leq">–</dd></div>
+          <div><dt>최대</dt><dd id="r-max">–</dd></div>
+          <div><dt>주요 소리</dt><dd id="r-peak">–</dd></div>
+        </dl>
+      </div>
+      <div class="status">
+        <p class="status-text" id="r-status"></p>
+        <div class="progress" id="r-progress" hidden><div class="progress-fill" id="r-progress-fill"></div></div>
+      </div>
+      <div class="chart-box">
+        <div class="chart-plot" id="r-chart"></div>
+        <div class="chart-overlay" id="r-overlay">
+          <button type="button" class="mic-button" data-act="mic">${NAV_ICONS.mic}<strong>눌러서 측정 화면 켜기</strong></button>
+          <p class="overlay-note" id="r-overlay-note">처음 한 번은 마이크 사용을 "허용"해 주세요.</p>
+          ${installOffer()}
+        </div>
+      </div>
+      <div class="controls">
+        <div class="mode-select" role="radiogroup" aria-label="측정 항목">
+          ${MODES.map((m) => `<button type="button" role="radio" data-mode="${m.id}" aria-checked="false">${m.short}</button>`).join('')}
+        </div>
+        <button type="button" class="btn btn-primary btn-start" id="r-start"></button>
+      </div>
+    </section>`;
 
-  view.querySelector('[data-act=vehicle]').onclick = () => editVehicle(() => route());
-  view.querySelectorAll('.mode-tile').forEach((a) =>
-    a.addEventListener('click', (e) => {
-      if (getSettings().vehicle) return;
-      e.preventDefault();
-      editVehicle(() => (location.hash = a.getAttribute('href')));
+  const $ = (id) => view.querySelector(`#${id}`);
+  const root = view.querySelector('.meter');
+  const chart = new SpectrumChart($('r-chart'));
+  let meter = null;
+  let wake = null;
+  let raf = 0;
+  let run = 0; // bumps on every start / cancel so a stale countdown stops itself
+  let laf = null;
+  let holds = null;
+  let lastPeakUpdate = 0;
+
+  const setState = (state) => (root.dataset.state = state);
+  const busy = () => ['countdown', 'recording'].includes(root.dataset.state);
+
+  function showIdle(message) {
+    $('r-start').innerHTML = `측정 시작<small>${mode.duration}초 · ${shortCriterion(mode)}</small>`;
+    $('r-start').classList.remove('is-cancel');
+    $('r-progress').hidden = true;
+    $('r-status').classList.toggle('is-error', !!message);
+    $('r-status').innerHTML = message
+      ? esc(message)
+      : `${mode.guide[0]} <button type="button" class="link" data-act="guide">측정 방법</button>`;
+    view.querySelectorAll('[data-mode]').forEach((b) => {
+      b.setAttribute('aria-checked', String(b.dataset.mode === mode.id));
+      b.disabled = false;
+    });
+  }
+
+  function frame(now) {
+    raf = requestAnimationFrame(frame);
+    if (!meter) return;
+    if (!meter.running) {
+      $('r-overlay').hidden = false;
+      return;
+    }
+    if (!$('r-overlay').hidden) {
+      $('r-overlay').hidden = true;
+      if (root.dataset.state === 'off') setState('live');
+    }
+    const levels = meter.liveBands();
+    if (holds) levels.forEach((v, i) => (holds[i] = Math.max(holds[i], v)));
+    chart.update({ levels, holds, overall: laf, verdict: judge(laf, mode.warn, mode.limit) });
+    if (now - lastPeakUpdate > 300) {
+      lastPeakUpdate = now;
+      let peak = 0;
+      levels.forEach((v, i) => v > levels[peak] && (peak = i));
+      $('r-peak').textContent = Number.isFinite(levels[peak]) ? `${BANDS[peak].label}Hz` : '–';
+    }
+  }
+
+  async function startMic() {
+    if (meter) {
+      if (!meter.running) await meter.resume();
+      return true;
+    }
+    meter = new Meter(getSettings().offset);
+    try {
+      await meter.start();
+    } catch (err) {
+      meter = null;
+      if (err.code !== 'cancelled') {
+        $('r-overlay').hidden = false;
+        $('r-overlay-note').textContent = err.message;
+        $('r-overlay-note').classList.add('is-error');
+      }
+      return false;
+    }
+    meter.onLevel = (db) => {
+      laf = db;
+      $('r-value').textContent = fmtDb(db);
+      $('r-main').dataset.verdict = judge(db, mode.warn, mode.limit);
+    };
+    $('r-overlay-note').textContent = '';
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(frame);
+    return true;
+  }
+
+  function stopMic() {
+    cancelAnimationFrame(raf);
+    meter?.stop();
+    meter = null;
+    laf = null;
+    $('r-value').textContent = '--.-';
+    $('r-main').dataset.verdict = '';
+    $('r-overlay').hidden = false;
+    setState('off');
+  }
+
+  function cancelMeasurement(message) {
+    run++;
+    meter?.cancel();
+    holds = null;
+    wake?.release?.().catch(() => {});
+    wake = null;
+    setState(meter ? 'live' : 'off');
+    showIdle(message);
+  }
+
+  async function startMeasurement() {
+    if (!getSettings().vehicle) {
+      editVehicle(() => route());
+      return;
+    }
+    const s = getSettings();
+    // Speak once inside the tap so the result can be announced later (iOS); silent when it would be recorded.
+    const talk = s.voice && mode.delay >= 3;
+    speak(talk ? '곧 측정을 시작합니다' : '', talk ? 1 : 0);
+    if (!(await startMic())) return;
+    const my = ++run;
+    setState('countdown');
+    view.querySelectorAll('[data-mode]').forEach((b) => (b.disabled = true));
+    $('r-start').innerHTML = '취소';
+    $('r-start').classList.add('is-cancel');
+    $('r-status').classList.remove('is-error');
+    $('r-leq').textContent = '–';
+    $('r-max').textContent = '–';
+    wake = await keepScreenOn();
+    const locating = s.location ? getLocation() : Promise.resolve(null);
+
+    for (let left = mode.delay; left > 0; left--) {
+      $('r-status').textContent = `${left}초 뒤 측정을 시작합니다. 휴대폰을 제자리에 두세요.`;
+      await sleep(1000);
+      if (run !== my) return;
+    }
+    setState('recording');
+    holds = new Array(BANDS.length).fill(-Infinity);
+    $('r-progress').hidden = false;
+    $('r-progress-fill').style.width = '0%';
+    $('r-status').textContent = '측정 중';
+    try {
+      const result = await meter.record(mode.duration, ({ elapsed, leq, lmax }) => {
+        $('r-progress-fill').style.width = `${Math.min(100, (elapsed / mode.duration) * 100)}%`;
+        $('r-status').textContent = `측정 중 · ${Math.max(0, Math.ceil(mode.duration - elapsed))}초 남음`;
+        $('r-leq').textContent = fmtDb(leq);
+        $('r-max').textContent = fmtDb(lmax);
+      });
+      if (run !== my) return;
+      $('r-status').textContent = '저장 중…';
+      const rec = buildRecord(mode, result, getSettings(), await withTimeout(locating, 3000));
+      await store.putRecord(rec);
+      announce(rec);
+      freshRecordId = rec.id;
+      location.hash = `#/record/${encodeURIComponent(rec.id)}`;
+    } catch (err) {
+      if (err?.code !== 'cancelled') cancelMeasurement(err?.message || '측정에 실패했습니다.');
+    }
+  }
+
+  const onVisibility = () => {
+    if (document.hidden) {
+      if (busy()) cancelMeasurement('화면이 꺼지거나 다른 앱으로 바뀌어 측정을 멈췄습니다. 다시 시작해 주세요.');
+      stopMic();
+    } else {
+      micPermission().then((p) => p === 'granted' && !meter && startMic());
+    }
+  };
+  document.addEventListener('visibilitychange', onVisibility);
+  cleanup = () => {
+    run++;
+    document.removeEventListener('visibilitychange', onVisibility);
+    wake?.release?.().catch(() => {});
+    cancelAnimationFrame(raf);
+    meter?.stop();
+    chart.destroy();
+  };
+
+  view.querySelector('[data-act=vehicle]').onclick = () => !busy() && editVehicle(() => route());
+  view.querySelector('[data-act=mic]').onclick = () => startMic();
+  $('r-start').onclick = () => (busy() ? cancelMeasurement() : startMeasurement());
+  $('r-status').addEventListener('click', (e) => e.target.closest('[data-act=guide]') && showGuide(mode));
+  view.querySelectorAll('[data-mode]').forEach((b) =>
+    b.addEventListener('click', () => {
+      if (busy()) return;
+      mode = modeConfig(b.dataset.mode);
+      saveSettings({ lastMode: mode.id });
+      showIdle();
     }),
   );
   view.querySelector('[data-act=install]')?.addEventListener('click', async () => {
     installPrompt.prompt();
     await installPrompt.userChoice.catch(() => null);
     installPrompt = null;
-    route();
+    view.querySelector('.install-hint')?.remove();
   });
-  view.querySelector('[data-act=hide-install]')?.addEventListener('click', () => {
-    try {
-      localStorage.setItem('noise-meter:install-hint', 'hidden');
-    } catch {
-      // ignore
-    }
-    view.querySelector('.install-hint').remove();
-  });
+
+  showIdle();
+  chart.update({ levels: null });
+  if ((await micPermission()) === 'granted') startMic();
+}
+
+// Old links (#/measure/<mode>) pick the mode on the main screen.
+function selectMode(modeId) {
+  if (MODE_BY_ID[modeId]) saveSettings({ lastMode: modeId });
+  location.replace('#/');
 }
 
 function editVehicle(after) {
@@ -254,115 +469,6 @@ function editVehicle(after) {
   };
 }
 
-/* ---------- measure ---------- */
-
-async function renderMeasure(modeId) {
-  const mode = modeConfig(modeId);
-  if (!mode) {
-    location.replace('#/');
-    return;
-  }
-  const s = getSettings();
-  view.innerHTML = `
-    <section class="measure">
-      <a class="back" href="#/">← 처음으로</a>
-      <p class="eyebrow">${mode.name} · ${esc(s.vehicle)}</p>
-      <div class="ready-panel" id="m-ready">
-        <div class="alert" id="m-error" hidden></div>
-        <h1>이렇게 준비해 주세요</h1>
-        <ol class="guide">
-          ${mode.guide.map((g) => `<li>${g}</li>`).join('')}
-          <li>측정하는 동안에는 말하지 마세요.</li>
-        </ol>
-        ${mode.safety ? `<p class="safety">${mode.safety}</p>` : ''}
-        <button class="btn btn-primary btn-xl" data-act="start">측정 시작<small>${mode.delay ? `${mode.delay}초 뒤 시작 · ` : ''}${mode.duration}초 측정</small></button>
-        <p class="fine center">판정 기준: ${criterionText(mode)}</p>
-      </div>
-      <div class="live-panel" id="m-live" hidden>
-        <p class="phase" id="m-phase">마이크 준비 중…</p>
-        <div class="live-level" id="m-level-box"><span id="m-level">--.-</span><span class="unit">dB(A)</span></div>
-        <p class="live-sub" id="m-sub">현재 소음</p>
-        <div class="progress"><div class="progress-fill" id="m-progress"></div></div>
-        <p class="live-hint" id="m-hint">${mode.guide[mode.guide.length - 1]}</p>
-        <button class="btn btn-quiet btn-wide" data-act="cancel">취소</button>
-      </div>
-    </section>`;
-
-  const $ = (id) => view.querySelector(`#${id}`);
-  let meter = null;
-  let wake = null;
-  let active = false;
-
-  const stopAll = () => {
-    active = false;
-    meter?.stop();
-    meter = null;
-    wake?.release?.().catch(() => {});
-    wake = null;
-    document.removeEventListener('visibilitychange', onHidden);
-  };
-  const backToReady = (message) => {
-    stopAll();
-    $('m-live').hidden = true;
-    $('m-ready').hidden = false;
-    $('m-error').hidden = !message;
-    $('m-error').textContent = message || '';
-  };
-  const onHidden = () => {
-    if (document.hidden && active) backToReady('화면이 꺼지거나 다른 앱으로 바뀌어 측정을 멈췄습니다. 다시 시작해 주세요.');
-  };
-  cleanup = stopAll;
-
-  view.querySelector('[data-act=cancel]').onclick = () => backToReady('');
-  view.querySelector('[data-act=start]').onclick = async () => {
-    $('m-ready').hidden = true;
-    $('m-live').hidden = false;
-    $('m-progress').style.width = '0%';
-    active = true;
-    // Speak once inside the tap so later announcements are allowed (iOS); silent if it would overlap the recording.
-    speak(mode.delay >= 3 && s.voice ? '곧 측정을 시작합니다' : '', mode.delay >= 3 && s.voice ? 1 : 0);
-    meter = new Meter(s.offset);
-    wake = await keepScreenOn();
-    try {
-      await meter.start();
-    } catch (err) {
-      if (active && err.code !== 'cancelled') backToReady(err.message);
-      return;
-    }
-    if (!active) return;
-    document.addEventListener('visibilitychange', onHidden);
-    const box = $('m-level-box');
-    meter.onLevel = (db) => {
-      $('m-level').textContent = fmtDb(db);
-      box.dataset.verdict = judge(db, mode.warn, mode.limit);
-    };
-    const locating = s.location ? getLocation() : Promise.resolve(null);
-
-    for (let left = mode.delay; left > 0 && active; left--) {
-      $('m-phase').textContent = `${left}초 뒤 측정을 시작합니다`;
-      await sleep(1000);
-    }
-    if (!active) return;
-    $('m-phase').textContent = '측정 중';
-    try {
-      const result = await meter.record(mode.duration, ({ elapsed, leq }) => {
-        $('m-progress').style.width = `${Math.min(100, (elapsed / mode.duration) * 100)}%`;
-        $('m-phase').textContent = `측정 중 · ${Math.max(0, Math.ceil(mode.duration - elapsed))}초 남음`;
-        $('m-sub').textContent = `지금까지 평균 ${fmtDb(leq)} dB(A)`;
-      });
-      stopAll();
-      $('m-phase').textContent = '저장 중…';
-      const rec = buildRecord(mode, result, getSettings(), await withTimeout(locating, 3000));
-      await store.putRecord(rec);
-      announce(rec);
-      freshRecordId = rec.id;
-      window.location.replace(`#/record/${encodeURIComponent(rec.id)}`);
-    } catch (err) {
-      if (err?.code !== 'cancelled') backToReady(err?.message || '측정에 실패했습니다.');
-    }
-  };
-}
-
 function buildRecord(mode, r, s, loc) {
   const value = mode.metric === 'lmax' ? r.lmax : r.leq;
   return {
@@ -380,6 +486,7 @@ function buildRecord(mode, r, s, loc) {
     limit: mode.limit,
     verdict: judge(value, mode.warn, mode.limit),
     bands: r.bands,
+    bandsMax: r.bandsMax,
     zones: r.zones,
     peakHz: r.peakHz,
     peakProminence: r.peakProminence,
@@ -425,10 +532,10 @@ async function renderRecord(id) {
   const dz = dominantZone(rec.zones);
   const tonal = rec.peakHz && rec.peakProminence >= TONAL_PROMINENCE;
   const photoUrl = rec.photo ? URL.createObjectURL(rec.photo) : null;
-  cleanup = () => photoUrl && URL.revokeObjectURL(photoUrl);
 
   view.innerHTML = `
-    <a class="back" href="${fresh ? '#/' : '#/history'}">← ${fresh ? '처음으로' : '기록 목록'}</a>
+    <a class="back" href="${fresh ? '#/' : '#/history'}">← ${fresh ? '측정 화면' : '기록 목록'}</a>
+    <div class="result-layout">
     <section class="verdict" data-verdict="${rec.verdict}">
       <div class="verdict-top">
         <span class="verdict-label">${v.label}</span>
@@ -440,6 +547,10 @@ async function renderRecord(id) {
         <span class="headline-value">${fmtDb(rec.value)}</span><span class="headline-unit">dB(A)</span>
       </div>
       ${rec.limit != null ? gauge(rec.value, rec.warn, rec.limit) : ''}
+    </section>
+    <section class="card chart-card">
+      <h2>주파수별 소리 크기 <small>막대: 평균 · 가로선: 최대</small></h2>
+      <div class="chart-box chart-box-result"><div class="chart-plot" id="rec-chart"></div></div>
     </section>
     ${rec.clipped ? '<p class="alert">소리가 휴대폰 마이크의 측정 한계를 넘었습니다. 실제 소음은 표시된 값보다 클 수 있습니다.</p>' : ''}
     <section class="figures">
@@ -453,10 +564,6 @@ async function renderRecord(id) {
       <p class="lead"><strong>${ZONE_INFO[dz].name}</strong>(${ZONE_INFO[dz].sound})이 가장 큽니다. ${ZONE_INFO[dz].causes}</p>
       ${tonal ? `<p>약 <strong>${fmtHz(rec.peakHz)}</strong>에서 뚜렷하게 튀는 소리가 있습니다. ${ZONE_INFO[zoneOfFrequency(rec.peakHz)].sound}가 들렸다면 이 소리입니다.</p>` : ''}
       <p class="fine">참고용 안내입니다. 정확한 원인은 정비 점검으로 확인하세요.</p>
-    </section>
-    <section class="card">
-      <h2>주파수별 소리 크기</h2>
-      ${octaveChart(rec.bands)}
     </section>
     <section class="card">
       <h2>메모·사진</h2>
@@ -476,6 +583,7 @@ async function renderRecord(id) {
         <dt>마이크 보정</dt><dd>${rec.calibrated ? '보정됨' : '보정 안 됨 (참고값)'}</dd>
       </dl>
     </section>
+    </div>
     <div class="action-bar">
       <a class="btn" href="#/measure/${rec.mode}">다시 측정</a>
       <button class="btn btn-primary" data-act="share">결과 보내기</button>
@@ -484,6 +592,12 @@ async function renderRecord(id) {
   `;
 
   if (fresh) toast('측정 결과를 저장했습니다');
+  const chart = new SpectrumChart(view.querySelector('#rec-chart'));
+  chart.update({ levels: rec.bands, holds: rec.bandsMax, overall: rec.value, verdict: rec.verdict });
+  cleanup = () => {
+    chart.destroy();
+    if (photoUrl) URL.revokeObjectURL(photoUrl);
+  };
 
   // Render the card now so the share sheet opens straight from the tap (iOS needs that).
   const card = renderCard(rec, s);
@@ -715,7 +829,7 @@ async function renderReport() {
             <span>${fmtDate(r.ts)}</span>
           </div>
           <div class="report-detail-body">
-            <div>${octaveChart(r.bands)}</div>
+            <div>${spectrumSvg(r.bands)}</div>
             <dl class="meta">
               <dt>${METRIC_LABEL[r.metric]}</dt><dd>${fmtDb(r.value)} dB(A)</dd>
               <dt>판정 기준</dt><dd>${criterionText(r)}</dd>
@@ -941,7 +1055,6 @@ async function renderSettings() {
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
   installPrompt = e;
-  if (document.body.dataset.view === 'home') route();
 });
 window.addEventListener('hashchange', route);
 route();

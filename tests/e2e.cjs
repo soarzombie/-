@@ -41,6 +41,12 @@ function serve() {
 function writeTone(file, freq, amp, seconds = 4, rate = 48000) {
   const n = seconds * rate;
   const buf = Buffer.alloc(44 + n * 2);
+  writeWavHeader(buf, n, rate);
+  for (let i = 0; i < n; i++) buf.writeInt16LE(Math.round(amp * 32767 * Math.sin((2 * Math.PI * freq * i) / rate)), 44 + i * 2);
+  fs.writeFileSync(file, buf);
+}
+
+function writeWavHeader(buf, n, rate) {
   buf.write('RIFF', 0);
   buf.writeUInt32LE(36 + n * 2, 4);
   buf.write('WAVEfmt ', 8);
@@ -53,7 +59,30 @@ function writeTone(file, freq, amp, seconds = 4, rate = 48000) {
   buf.writeUInt16LE(16, 34);
   buf.write('data', 36);
   buf.writeUInt32LE(n * 2, 40);
-  for (let i = 0; i < n; i++) buf.writeInt16LE(Math.round(amp * 32767 * Math.sin((2 * Math.PI * freq * i) / rate)), 44 + i * 2);
+}
+
+// Something like a car cabin: road rumble, engine orders, tyre/wind noise and a gear whine.
+function writeCabinNoise(file, seconds = 6, rate = 48000) {
+  const n = seconds * rate;
+  const x = new Float64Array(n);
+  let seed = 12345;
+  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 2 - 1;
+  let road = 0;
+  let tyre = 0;
+  for (let i = 0; i < n; i++) {
+    const t = i / rate;
+    const w = rand();
+    road += (w - road) * 0.02;
+    tyre += (w - tyre) * 0.15;
+    const rpm = 1 + 0.08 * Math.sin(2 * Math.PI * 0.25 * t);
+    const engine = 0.5 * Math.sin(2 * Math.PI * 62 * rpm * t) + 0.25 * Math.sin(2 * Math.PI * 124 * rpm * t + 1);
+    const whine = 0.06 * (1 + 0.5 * Math.sin(2 * Math.PI * 0.7 * t)) * Math.sin(2 * Math.PI * 1250 * t);
+    x[i] = 3 * road + 0.6 * tyre + 0.04 * w + 0.12 * engine + whine;
+  }
+  const rms = Math.sqrt(x.reduce((s, v) => s + v * v, 0) / n);
+  const buf = Buffer.alloc(44 + n * 2);
+  writeWavHeader(buf, n, rate);
+  for (let i = 0; i < n; i++) buf.writeInt16LE(Math.max(-32767, Math.min(32767, Math.round((x[i] / rms) * 0.12 * 32767))), 44 + i * 2);
   fs.writeFileSync(file, buf);
 }
 
@@ -70,18 +99,20 @@ async function launch(wav) {
   });
 }
 
-async function newPage(browser, base, errors) {
+async function newPage(browser, base, errors, { viewport = { width: 390, height: 844 }, mic = true, seed = {} } = {}) {
   const context = await browser.newContext({
-    viewport: { width: 390, height: 844 },
+    viewport,
     deviceScaleFactor: 2,
+    isMobile: true,
+    hasTouch: true,
     locale: 'ko-KR',
     timezoneId: 'Asia/Seoul',
-    permissions: ['microphone', 'geolocation'],
+    permissions: mic ? ['microphone', 'geolocation'] : ['geolocation'],
     geolocation: { latitude: 37.5112, longitude: 127.0981 },
     acceptDownloads: true,
   });
   // Short, no-delay measurements so the run takes seconds.
-  await context.addInitScript(() => {
+  await context.addInitScript((extra) => {
     if (localStorage.getItem('e2e-seeded')) return;
     localStorage.setItem('e2e-seeded', '1');
     localStorage.setItem('noise-meter:settings:v1', JSON.stringify({
@@ -92,8 +123,9 @@ async function newPage(browser, base, errors) {
         exhaust: { warn: 95, limit: 100, duration: 3, delay: 0 },
         inspect: { warn: null, limit: null, duration: 3, delay: 0 },
       },
+      ...extra,
     }));
-  });
+  }, seed);
   const page = await context.newPage();
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
   page.on('pageerror', (e) => errors.push(String(e)));
@@ -107,11 +139,10 @@ async function shot(page, name, fullPage = false) {
 
 async function measure(page, modeName) {
   await page.evaluate(() => (location.hash = '#/'));
-  await page.getByRole('link', { name: new RegExp(modeName) }).first().click();
+  await page.waitForSelector('.meter[data-state="live"]');
+  await page.getByRole('radio', { name: modeName }).click();
   await page.getByRole('button', { name: /측정 시작/ }).click();
-  await page.waitForFunction(() => /^\d/.test(document.querySelector('#m-level')?.textContent || ''));
-  await page.waitForTimeout(1500);
-  await shot(page, `measuring-${modeName}`);
+  await page.waitForSelector('.meter[data-state="recording"]');
   await page.waitForURL(/#\/record\//, { timeout: 15000 });
   await page.waitForSelector('.verdict');
   const headline = parseFloat(await page.locator('.headline-value').textContent());
@@ -132,15 +163,13 @@ async function measure(page, modeName) {
   writeTone(wav1, 1000, 0.1);
   let browser = await launch(wav1);
   let page = await newPage(browser, base, errors);
-  await shot(page, 'home-empty');
-
-  await page.getByRole('link', { name: /주행 중 실내/ }).click();
+  await page.waitForSelector('.meter[data-state="live"]');
+  await page.getByRole('button', { name: /측정 시작/ }).click();
   await page.locator('#f-vehicle').fill('12가 3456');
   await page.locator('#f-driver').fill('김현장');
   await shot(page, 'vehicle-sheet');
   await page.getByRole('button', { name: '확인' }).click();
-  await page.waitForURL(/#\/measure\/drive/);
-  await shot(page, 'measure-ready');
+  await page.waitForSelector('.meter[data-state="live"]');
   await page.getByRole('button', { name: /측정 시작/ }).click();
   await page.waitForURL(/#\/record\//, { timeout: 15000 });
   let r = {
@@ -169,7 +198,7 @@ async function measure(page, modeName) {
 
   // Second measurement in the same browser: inspect mode (no verdict)
   await page.goto(`${base}/#/`);
-  r = await measure(page, '이상음 찾기');
+  r = await measure(page, '이상음');
   assert.equal(r.verdict, '분석 완료');
   assert.match(await page.locator('.verdict-msg').textContent(), /뚜렷한 소리/);
   await shot(page, 'result-inspect', true);
@@ -188,7 +217,7 @@ async function measure(page, modeName) {
     }));
   });
   await page.reload();
-  r = await measure(page, '정차 공회전');
+  r = await measure(page, '공회전');
   const expected2 = toneDb(0.5, -19.1);
   console.log(`100 Hz: app ${r.headline} dB(A), expected ${expected2.toFixed(1)}; verdict ${r.verdict}; peak ${r.peak} Hz`);
   assert.ok(Math.abs(r.headline - expected2) < 0.6, 'A-weighted Leq of 100 Hz tone');
@@ -196,14 +225,12 @@ async function measure(page, modeName) {
   assert.ok(Math.abs(r.peak - 100) < 5);
   assert.match(await page.locator('.lead').textContent(), /저음/);
 
-  r = await measure(page, '배기 소음');
+  r = await measure(page, '배기');
   console.log(`exhaust (LAFmax): app ${r.headline} dB(A); verdict ${r.verdict}`);
   assert.ok(Math.abs(r.headline - expected2) < 0.6, 'LAFmax of steady tone equals Leq');
   assert.equal(r.verdict, '정상');
 
   // History, CSV, report
-  await page.goto(`${base}/#/`);
-  await shot(page, 'home-recent');
   await page.goto(`${base}/#/history`);
   await page.waitForSelector('.record-row');
   assert.equal(await page.locator('.record-row').count(), 2);
@@ -238,10 +265,43 @@ async function measure(page, modeName) {
   await page.waitForFunction(() => document.querySelector('#brand-company').textContent === '한빛운수');
   await shot(page, 'settings', true);
 
-  // Dark theme snapshot of the home screen
-  await page.emulateMedia({ colorScheme: 'dark' });
-  await page.goto(`${base}/#/`);
-  await shot(page, 'home-dark');
+  await browser.close();
+
+  // Run 3: cabin-like noise, the main screen in both orientations (screenshots only)
+  const wav3 = path.join(tmp, 'cabin.wav');
+  writeCabinNoise(wav3);
+  browser = await launch(wav3);
+  const seed = {
+    vehicle: '12가 3456',
+    driver: '김현장',
+    modes: { drive: { warn: 75, limit: 80, duration: 6, delay: 0 } },
+  };
+  for (const [name, viewport] of [['portrait', { width: 390, height: 844 }], ['landscape', { width: 844, height: 390 }]]) {
+    page = await newPage(browser, base, errors, { viewport, mic: false, seed });
+    await page.waitForSelector('#r-overlay:not([hidden])');
+    await shot(page, `main-${name}-first`);
+    await page.context().close();
+
+    page = await newPage(browser, base, errors, { viewport, seed });
+    await page.waitForSelector('.meter[data-state="live"]');
+    await page.waitForTimeout(1500);
+    await shot(page, `main-${name}-live`);
+    await page.getByRole('button', { name: /측정 시작/ }).click();
+    await page.waitForSelector('.meter[data-state="recording"]');
+    await page.waitForTimeout(3500);
+    await shot(page, `main-${name}-recording`);
+    await page.waitForURL(/#\/record\//, { timeout: 15000 });
+    await page.waitForTimeout(3200); // let the "saved" toast go
+    await shot(page, `result-${name}`);
+    if (name === 'portrait') {
+      await page.evaluate(() => (location.hash = '#/'));
+      await page.emulateMedia({ colorScheme: 'dark' });
+      await page.waitForSelector('.meter[data-state="live"]');
+      await page.waitForTimeout(1500);
+      await shot(page, 'main-portrait-dark');
+    }
+    await page.context().close();
+  }
   await browser.close();
   server.close();
 

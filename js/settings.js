@@ -1,6 +1,6 @@
 // Measurement modes and per-device settings (kept in localStorage).
 
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.2.0';
 
 // metric: which figure the verdict uses. 'leq' = average level, 'lmax' = Fast maximum.
 // warn / limit: dB(A). limit null = no pass/fail, the result focuses on frequency.
@@ -9,6 +9,7 @@ export const MODES = [
   {
     id: 'drive',
     name: '주행 중 실내',
+    short: '주행 실내',
     desc: '달리는 차 안, 운전석',
     metric: 'leq',
     defaults: { warn: 75, limit: 80, duration: 15, delay: 10 },
@@ -22,6 +23,7 @@ export const MODES = [
   {
     id: 'idle',
     name: '정차 공회전',
+    short: '공회전',
     desc: '시동 켜고 멈춘 상태',
     metric: 'leq',
     defaults: { warn: 55, limit: 65, duration: 10, delay: 3 },
@@ -34,6 +36,7 @@ export const MODES = [
   {
     id: 'exhaust',
     name: '배기 소음',
+    short: '배기',
     desc: '차 뒤, 배기구 옆',
     metric: 'lmax',
     defaults: { warn: 95, limit: 100, duration: 8, delay: 5 },
@@ -46,6 +49,7 @@ export const MODES = [
   {
     id: 'inspect',
     name: '이상음 찾기',
+    short: '이상음',
     desc: '어떤 소리인지 확인',
     metric: 'leq',
     defaults: { warn: null, limit: null, duration: 10, delay: 3 },
@@ -66,6 +70,7 @@ const DEFAULTS = {
   driver: '',
   vehicle: '',
   recentVehicles: [],
+  lastMode: 'drive',
   modes: Object.fromEntries(MODES.map((m) => [m.id, { ...m.defaults }])),
   // dBFS -> dB SPL. Phones differ by 10 dB or more, so each device should be calibrated.
   offset: 100,

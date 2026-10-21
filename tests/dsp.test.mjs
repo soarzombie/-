@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import {
-  OCTAVES,
+  BANDS,
   aWeightDb,
   designAWeighting,
   sosMagnitude,
   analyserDbToPower,
   aWeightPower,
   bandPowers,
+  bandMap,
+  foldBands,
   zoneShares,
   findPeak,
   judge,
@@ -40,9 +42,12 @@ for (const fs of [44100, 48000]) {
   });
 }
 
-test('octave bands are contiguous and labelled with nominal centres', () => {
-  assert.deepEqual(OCTAVES.map((b) => b.label), ['31.5', '63', '125', '250', '500', '1k', '2k', '4k', '8k']);
-  for (let i = 1; i < OCTAVES.length; i++) assert.ok(Math.abs(OCTAVES[i].lo - OCTAVES[i - 1].hi) < 1e-9);
+test('third-octave bands run 25 Hz – 10 kHz, contiguous, octave centres marked', () => {
+  assert.equal(BANDS.length, 27);
+  assert.equal(BANDS[0].label, '25');
+  assert.equal(BANDS[26].label, '10k');
+  assert.deepEqual(BANDS.filter((b) => b.major).map((b) => b.label), ['31.5', '63', '125', '250', '500', '1k', '2k', '4k', '8k']);
+  for (let i = 1; i < BANDS.length; i++) assert.ok(Math.abs(BANDS[i].lo - BANDS[i - 1].hi) < 1e-9);
 });
 
 // Reference FFT mirroring the AnalyserNode spec: Blackman window, 1/N scaling, 20*log10|X|.
@@ -95,7 +100,7 @@ test('analyser bins convert back to the true mean square and land in the right b
   const bands = bandPowers(power, fs / N);
   const total = bands.reduce((a, b) => a + b, 0);
   assert.ok(Math.abs(toDb(total) - toDb((amp * amp) / 2)) < 0.2, `total ${toDb(total)} dBFS`);
-  assert.equal(bands.indexOf(Math.max(...bands)), 5); // 1 kHz band
+  assert.equal(BANDS[bands.indexOf(Math.max(...bands))].label, '1k');
 });
 
 test('A-weighting a 100 Hz tone lowers it by about 19 dB', () => {
@@ -105,6 +110,19 @@ test('A-weighting a 100 Hz tone lowers it by about 19 dB', () => {
   const z = bandPowers(power, fs / N).reduce((a, b) => a + b, 0);
   const a = bandPowers(aWeightPower(power, fs / N), fs / N).reduce((s, b) => s + b, 0);
   assert.ok(Math.abs(toDb(a) - toDb(z) - aWeightDb(100)) < 0.5);
+});
+
+test('foldBands (live path) equals bandPowers of the A-weighted spectrum (recorded path)', () => {
+  const fs = 48000;
+  const N = 16384;
+  const db = analyserSpectrum(sine(80, 0.2, fs, N).map((v, n) => v + 0.05 * Math.sin((2 * Math.PI * 2500 * n) / fs)));
+  const live = foldBands(db, bandMap(N / 2, fs / N));
+  const recorded = bandPowers(aWeightPower(analyserDbToPower(db), fs / N), fs / N);
+  live.forEach((p, i) => {
+    if (recorded[i] > 1e-12) assert.ok(Math.abs(toDb(p) - toDb(recorded[i])) < 0.01, `band ${BANDS[i].label}`);
+  });
+  const loudest = live.indexOf(Math.max(...live));
+  assert.equal(BANDS[loudest].label, '2.5k'); // A-weighting lifts 2.5 kHz over the stronger 80 Hz tone
 });
 
 test('findPeak locates a tone and rates it prominent over noise', () => {
@@ -128,11 +146,13 @@ test('findPeak locates a tone and rates it prominent over noise', () => {
 });
 
 test('zoneShares sums to 100 and follows band energy', () => {
-  const shares = zoneShares([1, 1, 1, 0, 0, 0, 0, 0, 3]);
+  const power = BANDS.map((b) => (b.label === '63' || b.label === '125' ? 1 : b.label === '4k' ? 2 : 0));
+  const shares = zoneShares(power);
   assert.equal(shares.low + shares.mid + shares.high, 100);
   assert.equal(shares.low, 50);
+  assert.equal(shares.mid, 0);
   assert.equal(shares.high, 50);
-  assert.deepEqual(zoneShares([0, 0, 0, 0, 0, 0, 0, 0, 0]), { low: 0, mid: 0, high: 0 });
+  assert.deepEqual(zoneShares(BANDS.map(() => 0)), { low: 0, mid: 0, high: 0 });
 });
 
 test('judge compares the rounded value with the criteria', () => {

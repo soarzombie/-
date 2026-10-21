@@ -8,19 +8,23 @@ const F3 = 737.86223;
 const F4 = 12194.217;
 const A1000 = 1.9997; // dB, makes the analytic curve 0 dB at 1 kHz
 
-// 1/1-octave bands shown in the app. `exact` is the base-2 centre used for band edges.
-export const OCTAVES = [-5, -4, -3, -2, -1, 0, 1, 2, 3].map((n) => {
-  const exact = 1000 * 2 ** n;
-  const label = { 31.25: '31.5', 62.5: '63' }[exact] ?? (exact >= 1000 ? `${exact / 1000}k` : String(exact));
-  return { exact, label, lo: exact / Math.SQRT2, hi: exact * Math.SQRT2 };
+// 1/3-octave bands from 25 Hz to 10 kHz, the x axis of every spectrum chart.
+// `exact` is the base-2 centre 1000 * 2^(n/3) used for the edges; `major` marks the
+// octave centres that get an axis label.
+const THIRD_LABELS = [
+  '25', '31.5', '40', '50', '63', '80', '100', '125', '160', '200', '250', '315', '400', '500',
+  '630', '800', '1k', '1.25k', '1.6k', '2k', '2.5k', '3.15k', '4k', '5k', '6.3k', '8k', '10k',
+];
+const OCTAVE_LABELS = new Set(['31.5', '63', '125', '250', '500', '1k', '2k', '4k', '8k']);
+export const BANDS = THIRD_LABELS.map((label, i) => {
+  const exact = 1000 * 2 ** ((i - 16) / 3);
+  return { exact, label, major: OCTAVE_LABELS.has(label), lo: exact * 2 ** (-1 / 6), hi: exact * 2 ** (1 / 6) };
 });
 
-// Band index ranges for the plain-language "low / mid / high" summary.
-export const ZONES = {
-  low: [0, 1, 2], // 31.5 – 125 Hz
-  mid: [3, 4, 5], // 250 – 1k Hz
-  high: [6, 7, 8], // 2k – 8k Hz
-};
+// Plain-language groups: low up to the 160 Hz band, mid 200 Hz – 1.25 kHz, high from 1.6 kHz.
+const LOW_MID = 178;
+const MID_HIGH = 1413;
+export const ZONE_NAMES = ['low', 'mid', 'high'];
 
 // Mean of w[n]^2 for the Blackman window (alpha = 0.16) the Web Audio AnalyserNode applies.
 export const BLACKMAN_POWER = 0.42 ** 2 + 0.5 ** 2 / 2 + 0.08 ** 2 / 2;
@@ -96,7 +100,7 @@ export function aWeightPower(power, binHz) {
 }
 
 // Sum bins into bands; returns mean square per band.
-export function bandPowers(power, binHz, bands = OCTAVES) {
+export function bandPowers(power, binHz, bands = BANDS) {
   return bands.map(({ lo, hi }) => {
     let sum = 0;
     const k0 = Math.max(1, Math.ceil(lo / binHz));
@@ -106,11 +110,43 @@ export function bandPowers(power, binHz, bands = OCTAVES) {
   });
 }
 
+// Per-bin band index and A-weighting gain, so a live analyser frame folds into
+// A-weighted band powers in one pass (see foldBands).
+export function bandMap(binCount, binHz, bands = BANDS) {
+  const bins = [];
+  const index = [];
+  const gainA = [];
+  for (let k = 1; k < binCount; k++) {
+    const f = k * binHz;
+    const b = bands.findIndex((band) => f >= band.lo && f < band.hi);
+    if (b < 0) continue;
+    bins.push(k);
+    index.push(b);
+    gainA.push(10 ** (aWeightDb(f) / 10));
+  }
+  return { bins: Int32Array.from(bins), index: Int16Array.from(index), gainA: Float64Array.from(gainA), size: bands.length };
+}
+
+export function foldBands(dbBins, map, out = new Float64Array(map.size)) {
+  out.fill(0);
+  const { bins, index, gainA } = map;
+  for (let j = 0; j < bins.length; j++) {
+    const db = dbBins[bins[j]];
+    if (db > -300) out[index[j]] += ((2 * 10 ** (db / 10)) / BLACKMAN_POWER) * gainA[j];
+  }
+  return out;
+}
+
+export function zoneOfFrequency(hz) {
+  if (hz < LOW_MID) return 'low';
+  if (hz < MID_HIGH) return 'mid';
+  return 'high';
+}
+
 // Percent share of energy in the low / mid / high groups (rounded, sums to 100).
-export function zoneShares(bandPower) {
-  const sums = Object.fromEntries(
-    Object.entries(ZONES).map(([zone, idx]) => [zone, idx.reduce((s, i) => s + (bandPower[i] || 0), 0)]),
-  );
+export function zoneShares(bandPower, bands = BANDS) {
+  const sums = { low: 0, mid: 0, high: 0 };
+  bands.forEach((band, i) => (sums[zoneOfFrequency(band.exact)] += bandPower[i] || 0));
   const total = sums.low + sums.mid + sums.high;
   if (!(total > 0)) return { low: 0, mid: 0, high: 0 };
   const low = Math.round((sums.low / total) * 100);
@@ -120,12 +156,6 @@ export function zoneShares(bandPower) {
 
 export function dominantZone(shares) {
   return Object.entries(shares).sort((a, b) => b[1] - a[1])[0][0];
-}
-
-export function zoneOfFrequency(hz) {
-  if (hz < OCTAVES[3].lo) return 'low';
-  if (hz < OCTAVES[6].lo) return 'mid';
-  return 'high';
 }
 
 // Strongest bin between fmin and fmax, refined by parabolic interpolation.

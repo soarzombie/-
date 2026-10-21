@@ -14,10 +14,11 @@ A company-internal vehicle noise measurement web app (PWA) for field drivers. Dr
 
 ```
 index.html, css/app.css     App shell and styles (light/dark tokens, print styles for the report)
-js/app.js                   Screens + hash router (#/, #/measure/<mode>, #/record/<id>, #/history, #/report, #/settings)
+js/app.js                   Screens + hash router (#/ main screen, #/record/<id>, #/history, #/report, #/settings; #/measure/<mode> just selects a mode)
+js/spectrum.js              Canvas spectrum chart (1/3-octave dB(A) bars, max-hold marks, overall bar), live and on results
 js/meter.js                 Mic level meter: getUserMedia -> AudioWorklet (levels) + AnalyserNode (spectrum)
 js/level-processor.js       AudioWorklet: A-weighting biquads, energy sums, Fast (125 ms) detector
-js/dsp.js                   Pure DSP functions (A-weighting design, analyser bin -> power, octave bands, peak, judge)
+js/dsp.js                   Pure DSP functions (A-weighting design, analyser bin -> power, 1/3-octave BANDS, bandMap/foldBands, peak, judge)
 js/settings.js              MODES (measurement types, default criteria, guide text) + localStorage settings
 js/store.js                 IndexedDB records
 js/share.js                 Share card (canvas PNG), summary text, CSV, share/download helper
@@ -41,6 +42,7 @@ No build step. After changing any cached file, bump `VERSION` in `sw.js` (and ad
 ## Conventions
 
 - **Measurement chain:** levels come from the worklet (every sample), never from analyser frames. dB SPL = dBFS + per-device `offset` (calibration). The first 0.5 s of each measurement is discarded.
+- **Main screen:** the live spectrum is the default view (portrait: chart fills the spare height; landscape >= 640px wide: chart left, controls right; phone landscape hides the top bar). Spectrum = 1/3-octave bands 25 Hz–10 kHz, A-weighted, from a 16384-point analyser.
 - **Verdict:** `judge()` in `dsp.js`; each mode's `metric` decides whether Leq or LAFmax is judged. Records store a snapshot of the criteria used, so later settings changes don't alter old verdicts.
 - **Copy:** Korean, plain words for drivers (정상 / 주의 / 초과, 저음 / 중음 / 고음). Frequency explanations are framed as hints, never diagnoses.
 - **Escaping:** any user text (vehicle, driver, memo, company) goes through `esc()` before entering HTML; CSV cells are guarded against formula injection.
