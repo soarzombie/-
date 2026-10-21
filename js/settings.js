@@ -1,6 +1,6 @@
 // Per-device settings (kept in localStorage).
 
-export const APP_VERSION = '0.12.4';
+export const APP_VERSION = '0.13.0';
 
 const KEY = 'noise-meter:settings:v1';
 

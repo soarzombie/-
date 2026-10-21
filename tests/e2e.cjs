@@ -847,6 +847,24 @@ async function cursorDb(page, hz) {
   await chartSettings(page, { autoSave: 'off' });
   await page.evaluate(async () => (await import('./js/settings.js')).saveSettings({ vehicle: '' }));
 
+  // 영상: the readings and graphs with the sound as one video file, offered to send when it stops
+  await page.getByRole('button', { name: '영상 녹화' }).click();
+  await page.waitForSelector('#a-video-badge:not([hidden])');
+  await page.waitForTimeout(2600);
+  assert.match(await page.locator('#a-video-time').textContent(), /00:0[23]/);
+  await shot(page, 'video');
+  await page.getByRole('button', { name: '영상 정지' }).click();
+  await page.waitForSelector('dialog.sheet h2:has-text("영상 녹화 끝")');
+  const vText = await page.locator('dialog.sheet p').first().textContent();
+  const [vid] = await Promise.all([page.waitForEvent('download'), page.locator('dialog.sheet').getByRole('button', { name: '보내기' }).click()]);
+  const vBytes = fs.readFileSync(await vid.path());
+  const isMp4 = vBytes.subarray(4, 8).toString() === 'ftyp';
+  const isWebm = vBytes.readUInt32BE(0) === 0x1a45dfa3;
+  console.log(`video: ${vText}, ${vBytes.length} bytes, ${isMp4 ? 'MP4' : isWebm ? 'WebM' : 'unknown'}`);
+  assert.ok(vBytes.length > 20000 && (isMp4 || isWebm), 'a playable video file');
+  if (SHOTS) fs.writeFileSync(path.join(SHOTS, `video.${isMp4 ? 'mp4' : 'webm'}`), vBytes);
+  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+
   // attached file: 3 s of 1 kHz (77.0 dB(A)) then 3 s of 100 Hz (71.9 dB(A))
   // (passed as a buffer: Playwright here cannot attach files from non-ASCII paths, and the Korean name
   // is part of what is being checked)

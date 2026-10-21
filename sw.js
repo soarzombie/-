@@ -1,6 +1,6 @@
 // Offline support: the app shell is cached so measuring works without signal.
 // Bump VERSION whenever any cached file changes so phones pick up the update.
-const VERSION = 'v0.12.4';
+const VERSION = 'v0.13.0';
 const CACHE = `noise-meter-${VERSION}`;
 const FILES = [
   './',
@@ -25,6 +25,7 @@ const FILES = [
   'js/spectrogram.js',
   'js/spectrum.js',
   'js/timeline.js',
+  'js/video.js',
   'js/store.js',
   'icons/icon-192.png',
   'icons/icon-512.png',

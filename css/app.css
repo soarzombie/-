@@ -337,6 +337,8 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 .analyzer[data-rec="on"] .rec-mark { width: 19px; height: 19px; border-radius: 5px; }
 .analyzer[data-rec="on"] .ctl-rec { box-shadow: 0 0 0 5px rgb(255 79 94 / 28%); }
 .analyzer[data-rec="on"] #a-rec-cap { color: var(--rec); font-weight: 800; }
+.analyzer[data-video="on"] .ctl-video { color: var(--rec); box-shadow: 0 0 0 4px rgb(255 79 94 / 25%); }
+.analyzer[data-video="on"] #a-video-cap { color: var(--rec); font-weight: 800; }
 /* timed measurement: the ring around the button fills up as the seconds go by */
 .ctl-timed::before { content: ""; position: absolute; inset: -4px; border-radius: 50%; padding: 3px; background: conic-gradient(var(--accent) calc(var(--p, 0) * 360deg), var(--ring) 0); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; opacity: 0; pointer-events: none; }
 .analyzer[data-timed="on"] .ctl-timed::before { opacity: 1; }
