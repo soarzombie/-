@@ -29,7 +29,7 @@ import {
 import { analyzeSound, frameAt } from '../js/analysis.js';
 import { encodeWav, decodeWav } from '../js/audio.js';
 import { columnRange } from '../js/timeline.js';
-import { freqAxis, freqTicks, freqToX, xToFreq, checkFreqRange, checkDbRange } from '../js/spectrum.js';
+import { freqAxis, freqTicks, freqToX, xToFreq, checkFreqRange, checkDbRange, pinchRange } from '../js/spectrum.js';
 import { PRESETS, PRESET_KEYS, choosePreset, customize, presetOf } from '../js/presets.js';
 import { micProfile, saveMicProfile, parseCalFile, calCorrection } from '../js/mics.js';
 import { Meter } from '../js/meter.js';
@@ -669,4 +669,27 @@ test('GPS speed: the phone-reported speed, else distance over time; standing sti
   assert.ok(Math.abs(r.kmh - 50.04) < 0.01, 'a 120 m fix is ignored');
   r = trackSpeed(r.state, at(30, 600));
   assert.equal(r.kmh, null, 'after a long gap: unknown');
+});
+
+test('pinch zoom on the frequency axis keeps the frequencies under the fingers', () => {
+  const box = { x0: 30, x1: 330, yTop: 0, yBot: 100 };
+  const full = freqAxis('log', 20, 20000);
+  // fingers on 200 Hz and 2 kHz move apart to the plot's ends: the axis becomes 200 Hz – 2 kHz
+  const xa = freqToX(200, box, full);
+  const xb = freqToX(2000, box, full);
+  assert.deepEqual(pinchRange('log', box, 200, 2000, 30, 330), [200, 2000]);
+  // a smaller spread keeps both frequencies at the new finger positions
+  const [lo, hi] = pinchRange('log', box, 200, 2000, xa - 30, xb + 30);
+  const ax = freqAxis('log', lo, hi);
+  assert.ok(Math.abs(freqToX(200, box, ax) - (xa - 30)) < 2 && Math.abs(freqToX(2000, box, ax) - (xb + 30)) < 2);
+  // pinching in past the whole range gives the whole range; past an end it slides inside 10 Hz – 20 kHz
+  assert.deepEqual(pinchRange('log', box, 200, 2000, xa + 20, xb - 20), [20, 20000]);
+  const right = pinchRange('log', box, 5000, 10000, 100, 200);
+  assert.equal(right[1], 20000);
+  assert.ok(right[0] > 1000 && right[0] < 5000);
+  assert.equal(pinchRange('log', box, 200, 2000, 100, 110), null, 'fingers too close');
+  assert.equal(pinchRange('log', box, 200, 2000, 200, 100), null, 'fingers crossed');
+  // linear: 5 kHz – 10 kHz spread over the plot
+  assert.deepEqual(pinchRange('linear', box, 5000, 10000, 30, 330), [5000, 10000]);
+  assert.deepEqual(pinchRange('linear', box, 1000, 3000, 80, 180), [20, 6000], 'from 0 Hz on a linear axis');
 });

@@ -1,7 +1,7 @@
 // Getting saved analyses off the phone: text for messengers, a PNG card, CSV for Excel.
 
 import { fmtDb, fmtHz, fmtDate, fmtClock, speedText } from './format.js';
-import { drawSpectrum } from './spectrum.js';
+import { drawSpectrum, DARK_COLORS } from './spectrum.js';
 
 export function summaryText(rec, settings) {
   const lines = [
@@ -66,7 +66,7 @@ export function renderCard(rec, settings) {
   const sp = rec.spectrum;
   const line = settings.style === 'line';
   const data = { freqs: Float32Array.from(sp.freqs), cur: Float32Array.from(sp.cur), max: Float32Array.from(sp.max), min: sp.min ? Float32Array.from(sp.min) : null, peaks: rec.peaks };
-  drawSpectrum(g, W - 112, 680, data, { scale: 'log', style: settings.style, range: sp.range, unit: rec.unit, fontScale: 2.2 });
+  drawSpectrum(g, W - 112, 680, data, { scale: 'log', style: settings.style, range: sp.range, unit: rec.unit, fontScale: 2.2, colors: DARK_COLORS });
   g.restore();
 
   const what = fromFile ? ['전체 평균', '전체 최대'] : ['저장 순간', '측정 중 최대'];

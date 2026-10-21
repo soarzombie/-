@@ -80,7 +80,7 @@ export class OctaveView {
     const gap = Math.max(1, slot * 0.18);
     const { bands, max, min, total } = this.data;
     const lowN = BANDS.filter((b) => b.low).length;
-    g.fillStyle = 'rgba(255, 255, 255, 0.045)';
+    g.fillStyle = c.shade;
     g.fillRect(x0, yTop, lowN * slot, yBot - yTop);
     g.fillStyle = c.axis;
     g.textAlign = 'center';
@@ -122,7 +122,7 @@ export class OctaveView {
       const yy = y(total);
       g.fillStyle = BAR.total;
       g.fillRect(tx, yy, tw, yBot - yy);
-      g.fillStyle = c.label;
+      g.fillStyle = c.ink;
       g.textAlign = 'center';
       g.font = `700 ${fs}px ${c.font}`;
       g.fillText(total.toFixed(0), tx + tw / 2, Math.max(yTop + fs, yy - 4 * k));

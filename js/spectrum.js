@@ -11,7 +11,7 @@ import { rangeIndex, reduceRanges } from './dsp.js';
 export const FMIN = 20;
 export const FMAX = 20000;
 
-export const SPECTRUM_COLORS = {
+const DARK = {
   grid: '#272b33',
   axis: '#7d8592',
   max: 'rgba(120, 126, 138, 0.55)',
@@ -26,10 +26,49 @@ export const SPECTRUM_COLORS = {
   avg: '#7fe0c4',
   ref: '#c9a6ff',
   cursor: '#5cc8ff',
-  label: '#ffffff',
+  label: '#ffffff', // text on the dark label pills
   labelBg: 'rgba(12, 14, 18, 0.72)',
+  ink: '#ffffff', // text straight on the chart
+  mean: 'rgba(255, 255, 255, 0.55)', // average (Leq) lines and their labels
+  meanText: 'rgba(255, 255, 255, 0.85)',
+  shade: 'rgba(255, 255, 255, 0.045)',
+  live: '#5aa2ff', // the live level trace
+  speed: '#f2c94c',
+  history: '#ffb547', // a recording's level over time
+  playhead: '#ffffff',
   font: '-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif',
 };
+// The bright screen for sunlight: dark lines and text on white.
+const LIGHT = {
+  ...DARK,
+  grid: '#dde1e6',
+  axis: '#56606d',
+  max: 'rgba(110, 116, 128, 0.38)',
+  maxLine: 'rgba(90, 96, 108, 0.7)',
+  lineCur: '#1f6fe0',
+  lineMax: '#e0313f',
+  minHold: '#d97300',
+  maxTrack: '#e0607a',
+  minTrack: '#b8860b',
+  avg: '#0f9a78',
+  ref: '#7a4fd6',
+  cursor: '#0a7fc0',
+  ink: '#111418',
+  mean: 'rgba(0, 0, 0, 0.5)',
+  meanText: 'rgba(0, 0, 0, 0.75)',
+  shade: 'rgba(0, 0, 0, 0.05)',
+  live: '#1f6fe0',
+  speed: '#a87900',
+  history: '#d97300',
+  playhead: '#111418',
+};
+export const DARK_COLORS = DARK; // the share card is always dark
+export const SPECTRUM_COLORS = { ...DARK };
+
+// 'dark' | 'light': every chart reads SPECTRUM_COLORS when it draws.
+export function setChartTheme(theme) {
+  Object.assign(SPECTRUM_COLORS, theme === 'light' ? LIGHT : DARK);
+}
 
 const hzLabel = (f) => (f >= 1000 ? `${parseFloat((f / 1000).toFixed(2))}k` : String(parseFloat(f.toFixed(1))));
 
@@ -66,6 +105,30 @@ export function checkFreqRange(lo, hi) {
   if (lo < 10 || hi > FMAX) return `주파수는 10 Hz – ${FMAX / 1000} kHz 사이로 넣어 주세요.`;
   if (hi < lo * 1.25 || hi - lo < 50) return '끝 주파수는 시작보다 충분히 커야 합니다.';
   return [lo, hi];
+}
+
+// Pinch on the frequency axis: the frequencies fa and fb first under the two fingers stay under them as
+// they move to xa and xb. Returns the new [fmin, fmax] (kept within 10 Hz – 20 kHz, rounded, at least what
+// checkFreqRange accepts; the whole axis once it is reached) or null while the fingers are too close.
+export function pinchRange(scale, box, fa, fb, xa, xb) {
+  const W = box.x1 - box.x0;
+  if (Math.abs(xb - xa) < 24) return null;
+  const lin = scale === 'linear';
+  const fwd = lin ? (f) => f : Math.log;
+  const inv = lin ? (v) => v : Math.exp;
+  const span = ((fwd(fb) - fwd(fa)) * W) / (xb - xa);
+  if (!(span > 0)) return null;
+  const lo = lin ? 0 : fwd(10);
+  const hi = fwd(FMAX);
+  if (span >= fwd(FMAX) - fwd(lin ? 0 : FMIN)) return [FMIN, FMAX];
+  let a = fwd(fa) - ((xa - box.x0) / W) * span;
+  if (a < lo) a = lo;
+  if (a + span > hi) a = hi - span;
+  const round = (f) => (f < 100 ? Math.round(f) : Number(f.toPrecision(3)));
+  let fmin = round(Math.max(10, inv(a)));
+  const fmax = round(Math.min(FMAX, inv(a + span)));
+  if (lin && inv(a) < FMIN) fmin = FMIN; // a linear axis from 20 Hz starts at 0 Hz
+  return Array.isArray(checkFreqRange(fmin, fmax)) ? [fmin, fmax] : null;
 }
 
 export function checkDbRange(lo, hi) {
@@ -345,6 +408,7 @@ export class SpectrumView {
     this.opts = {};
     this.cursors = [];
     this.onCursor = onCursor;
+    this.onZoom = null; // ([fmin, fmax], done) while two fingers pinch the frequency axis
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(host);
     if (cursor) this.enableCursor();
@@ -390,31 +454,68 @@ export class SpectrumView {
 
   enableCursor() {
     let dragging = -1;
+    let added = -1; // a cursor this touch just placed (taken back if the touch turns into a pinch)
+    const fingers = new Map(); // pointerId -> x
+    let pinch = null; // two fingers with onZoom: { ids, fa, fb } frequencies first under them
     const axis = () => freqAxis(this.opts.scale || 'log', this.opts.fmin ?? FMIN, this.opts.fmax ?? FMAX);
     const xAt = (e) => e.clientX - this.host.getBoundingClientRect().left;
     this.host.addEventListener('pointerdown', (e) => {
       if (!this.box) return;
       const x = xAt(e);
+      fingers.set(e.pointerId, x);
+      try {
+        this.host.setPointerCapture(e.pointerId);
+      } catch {
+        // not a capturable pointer (synthetic): moves still arrive while over the chart
+      }
+      if (fingers.size === 2 && this.onZoom) {
+        if (added >= 0) this.cursors.splice(added, 1);
+        dragging = added = -1;
+        const ids = [...fingers.keys()].sort((p, q) => fingers.get(p) - fingers.get(q));
+        pinch = { ids, fa: xToFreq(fingers.get(ids[0]), this.box, axis()), fb: xToFreq(fingers.get(ids[1]), this.box, axis()) };
+        this.draw();
+        return;
+      }
+      if (fingers.size > 1) return;
       const hz = xToFreq(x, this.box, axis());
       const dist = (c) => Math.abs(freqToX(c.hz, this.box, axis()) - x);
       const near = this.cursors.findIndex((c) => dist(c) < 28);
+      added = -1;
       if (near >= 0) dragging = near;
       else if (this.cursors.length < 2) {
         this.cursors.push({ hz });
-        dragging = this.cursors.length - 1;
+        dragging = added = this.cursors.length - 1;
       } else {
         dragging = dist(this.cursors[0]) < dist(this.cursors[1]) ? 0 : 1;
         this.cursors[dragging].hz = hz;
       }
-      this.host.setPointerCapture?.(e.pointerId);
       this.draw();
     });
     this.host.addEventListener('pointermove', (e) => {
+      if (fingers.has(e.pointerId)) fingers.set(e.pointerId, xAt(e));
+      if (pinch) {
+        const [xa, xb] = pinch.ids.map((id) => fingers.get(id));
+        const r = pinchRange(this.opts.scale || 'log', this.box, pinch.fa, pinch.fb, xa, xb);
+        if (r && (r[0] !== this.opts.fmin || r[1] !== this.opts.fmax)) {
+          this.opts = { ...this.opts, fmin: r[0], fmax: r[1] };
+          this.draw();
+          this.onZoom(r, false);
+        }
+        return;
+      }
       if (dragging < 0) return;
       this.cursors[dragging].hz = xToFreq(xAt(e), this.box, axis());
       this.draw();
     });
-    const end = () => (dragging = -1);
+    const end = (e) => {
+      fingers.delete(e.pointerId);
+      dragging = -1;
+      if (pinch && fingers.size < 2) {
+        pinch = null;
+        this.onZoom([this.opts.fmin ?? FMIN, this.opts.fmax ?? FMAX], true);
+      }
+      if (!fingers.size) added = -1;
+    };
     this.host.addEventListener('pointerup', end);
     this.host.addEventListener('pointercancel', end);
   }

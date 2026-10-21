@@ -2,11 +2,15 @@
 // newest sound at the top, colour = weighted dB. Live it scrolls down as rows arrive; for a saved
 // analysis it is built once from the recorded sound, with a playhead while it plays back.
 
-import { reduceRanges } from './dsp.js';
+import { reduceRanges, rangeIndex, logGrid } from './dsp.js';
 import { SPECTRUM_COLORS, plotBox, columnsFor, drawXAxis, freqAxis, FMIN, FMAX } from './spectrum.js';
 import { fmtClock } from './format.js';
 
 const SPAN = 60; // dB of colour range below the running top, when the range is automatic
+// Live rows are also kept on a fine fixed frequency grid, so the history survives another view being
+// shown, the phone being turned and the axis being changed.
+const GRID = logGrid(1024, 10, 24000);
+const MAX_ROWS = 1200; // one minute at 20 rows a second
 
 // Dark violet -> red -> yellow -> white, readable on the black panel.
 const STOPS = [
@@ -50,6 +54,10 @@ export class SpectrogramView {
     this.colorRange = null; // [lo, hi] dB, or null = automatic (60 dB below the loudest)
     this.xLabels = true;
     this.top = null;
+    this.rows = new Float32Array(MAX_ROWS * GRID.centres.length); // ring of live rows on GRID
+    this.rowCount = 0;
+    this.rowHead = -1; // slot of the newest row
+    this.stale = true; // the history image needs painting again from the rows
     this.staticData = null;
     this.playhead = null;
     this.ro = new ResizeObserver(() => this.resize());
@@ -107,13 +115,40 @@ export class SpectrogramView {
     this.img.height = Math.max(2, Math.round(this.box.yBot - this.box.yTop));
     this.cols = null;
     if (this.staticData) this.renderStatic();
+    else this.stale = true;
     this.draw();
   }
 
   clear() {
     this.ig.clearRect(0, 0, this.img.width, this.img.height);
     this.top = null;
+    this.rowCount = 0;
+    this.rowHead = -1;
     this.draw();
+  }
+
+  row(age) {
+    const n = GRID.centres.length;
+    const slot = (this.rowHead - age + MAX_ROWS) % MAX_ROWS;
+    return this.rows.subarray(slot * n, slot * n + n);
+  }
+
+  // The whole live image again from the kept rows (newest at the top).
+  renderLive() {
+    this.stale = false;
+    const W = this.img.width;
+    const H = this.img.height;
+    const image = this.ig.createImageData(W, H);
+    if (this.top != null) {
+      const cols = this.columns(GRID.centres);
+      const line = { data: new Uint8ClampedArray(W * 4) };
+      const [lo, span] = this.colours(this.top);
+      for (let y = 0; y < Math.min(H, this.rowCount); y++) {
+        this.paintRow(line, reduceRanges(this.row(y), GRID.centres, cols.idx, cols.centres, cols.cur), lo, span);
+        image.data.set(line.data, y * W * 4);
+      }
+    }
+    this.ig.putImageData(image, 0, 0);
   }
 
   columns(freqs) {
@@ -133,15 +168,31 @@ export class SpectrogramView {
     }
   }
 
-  // Live: add the newest spectrum (dB(A) per bin) as the top row.
+  // Live: add the newest spectrum (dB per analyser bin) as the top row. Kept while hidden too.
   push(levels, freqs) {
-    if (!this.box || this.host.offsetParent === null) return;
-    const cols = this.columns(freqs);
-    const values = reduceRanges(levels, freqs, cols.idx, cols.centres, cols.cur);
+    const key = `${freqs.length}|${freqs[1]}`;
+    if (this.gridKey !== key) {
+      this.gridKey = key;
+      this.gridIdx = rangeIndex(freqs, GRID.edges);
+    }
+    this.rowHead = (this.rowHead + 1) % MAX_ROWS;
+    this.rowCount = Math.min(MAX_ROWS, this.rowCount + 1);
+    const kept = reduceRanges(levels, freqs, this.gridIdx, GRID.centres, this.row(0));
     let frameMax = -Infinity;
-    for (const v of values) if (v > frameMax) frameMax = v;
+    for (const v of kept) if (v > frameMax) frameMax = v;
     // colour range follows the loudest bins, rising at once and falling slowly
     this.top = this.top == null ? frameMax : Math.max(frameMax, this.top - 0.05);
+    if (!this.box || this.host.offsetParent === null) {
+      this.stale = true;
+      return;
+    }
+    if (this.stale) {
+      this.renderLive();
+      this.draw();
+      return;
+    }
+    const cols = this.columns(GRID.centres);
+    const values = reduceRanges(kept, GRID.centres, cols.idx, cols.centres, cols.cur);
     const row = this.ig.createImageData(this.img.width, 1);
     this.paintRow(row, values, ...this.colours(this.top));
     this.ig.drawImage(this.img, 0, 0, this.img.width, this.img.height - 1, 0, 1, this.img.width, this.img.height - 1);
@@ -194,12 +245,15 @@ export class SpectrogramView {
 
   draw() {
     if (!this.box || this.host.offsetParent === null) return;
+    if (this.stale && !this.staticData) this.renderLive();
     const { g, box } = this;
     const k = this.fontScale;
     const c = SPECTRUM_COLORS;
     g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     g.clearRect(0, 0, this.w, this.h);
     g.imageSmoothingEnabled = true;
+    g.fillStyle = `rgb(${LUT[0]}, ${LUT[1]}, ${LUT[2]})`; // rows not filled yet: the bottom of the colour scale
+    g.fillRect(box.x0, box.yTop, box.x1 - box.x0, box.yBot - box.yTop);
     g.drawImage(this.img, box.x0, box.yTop, box.x1 - box.x0, box.yBot - box.yTop);
 
     // time axis: newest at the top, older further down

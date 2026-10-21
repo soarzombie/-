@@ -104,26 +104,26 @@ export class TimelineView {
 
     g.beginPath();
     data.history.forEach((v, i) => g[i ? 'lineTo' : 'moveTo'](x((i + 1) * data.step), y(v)));
-    g.strokeStyle = '#ffb547';
+    g.strokeStyle = c.history;
     g.lineWidth = 1.6 * k;
     g.lineJoin = 'round';
     g.stroke();
 
     if (Number.isFinite(data.leq)) {
       g.setLineDash([6 * k, 4 * k]);
-      g.strokeStyle = 'rgba(255,255,255,0.6)';
+      g.strokeStyle = c.mean;
       g.lineWidth = 1;
       g.beginPath();
       g.moveTo(box.x0, y(data.leq));
       g.lineTo(box.x1, y(data.leq));
       g.stroke();
       g.setLineDash([]);
-      g.fillStyle = 'rgba(255,255,255,0.85)';
+      g.fillStyle = c.meanText;
       g.textAlign = 'right';
       g.fillText(`Leq ${data.leq.toFixed(1)} ${data.unit}`, box.x1 - 4 * k, Math.max(box.yTop + 11 * k, y(data.leq) - 5 * k));
     }
     if (this.playhead != null) {
-      g.strokeStyle = '#ffffff';
+      g.strokeStyle = c.playhead;
       g.lineWidth = 2;
       g.beginPath();
       g.moveTo(x(this.playhead), box.yTop);
@@ -156,8 +156,6 @@ export function columnRange(values, from, to, cols) {
   return { lo, hi };
 }
 
-const LIVE_COLOR = '#5aa2ff';
-const SPEED_COLOR = '#f2c94c';
 
 export class LiveTimelineView {
   // step: seconds between pushed values (the meter's 50 ms blocks); keeps up to maxSec of them.
@@ -288,7 +286,7 @@ export class LiveTimelineView {
       g.beginPath();
       g.rect(box.x0, box.yTop, box.x1 - box.x0, box.yBot - box.yTop);
       g.clip();
-      g.strokeStyle = LIVE_COLOR;
+      g.strokeStyle = c.live;
       g.lineWidth = 1.5 * k;
       g.lineJoin = 'round';
       g.beginPath();
@@ -307,7 +305,7 @@ export class LiveTimelineView {
       g.stroke();
       g.restore();
       // the newest value
-      g.fillStyle = LIVE_COLOR;
+      g.fillStyle = c.live;
       g.beginPath();
       g.arc(Math.min(box.x1, xEnd), y(this.values[to - 1]), 3.2 * k, 0, Math.PI * 2);
       g.fill();
@@ -318,14 +316,14 @@ export class LiveTimelineView {
     const { leq, unit } = this.stats;
     if (Number.isFinite(leq) && to - from >= 2) {
       g.setLineDash([6 * k, 4 * k]);
-      g.strokeStyle = 'rgba(255,255,255,0.55)';
+      g.strokeStyle = c.mean;
       g.lineWidth = 1;
       g.beginPath();
       g.moveTo(box.x0, y(leq));
       g.lineTo(box.x1, y(leq));
       g.stroke();
       g.setLineDash([]);
-      g.fillStyle = 'rgba(255,255,255,0.85)';
+      g.fillStyle = c.meanText;
       g.textAlign = 'right';
       g.fillText(`평균 ${leq.toFixed(1)} ${unit}`, box.x1 - 4 * k, Math.max(box.yTop + 11 * k, y(leq) - 5 * k));
     }
@@ -343,7 +341,7 @@ export class LiveTimelineView {
     g.beginPath();
     g.rect(box.x0, box.yTop, box.x1 - box.x0, box.yBot - box.yTop);
     g.clip();
-    g.strokeStyle = SPEED_COLOR;
+    g.strokeStyle = SPECTRUM_COLORS.speed;
     g.lineWidth = 1.4 * k;
     g.lineJoin = 'round';
     g.beginPath();
@@ -362,7 +360,7 @@ export class LiveTimelineView {
     g.stroke();
     g.restore();
     // its scale goes after the graph title, in the line's colour
-    g.fillStyle = SPEED_COLOR;
+    g.fillStyle = SPECTRUM_COLORS.speed;
     g.textAlign = 'left';
     g.fillText(` · 노란 선 속도 0–${hi} km/h`, this.titleEnd, box.yTop + 12 * k);
   }

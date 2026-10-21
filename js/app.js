@@ -9,7 +9,7 @@ import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
 import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds } from './dsp.js';
 import * as store from './store.js';
 import { esc, fmtDb, fmtHz, fmtClock, fmtDate, fmtDay, fmtShortDate, fmtTime, fmtWhen, fileStamp, speedText } from './format.js';
-import { SpectrumView, curveLook, checkFreqRange, checkDbRange } from './spectrum.js';
+import { SpectrumView, curveLook, checkFreqRange, checkDbRange, setChartTheme, FMIN, FMAX } from './spectrum.js';
 import { SpectrogramView } from './spectrogram.js';
 import { encodeWav, decodeAudioFile } from './audio.js';
 import { analyzeSound, frameAt } from './analysis.js';
@@ -129,6 +129,13 @@ function openMenu(anchor, html, onClose = null, className = '') {
   layer.addEventListener('click', close); // the whole tap lands on the layer, not on what is under it
   anchor.setAttribute('aria-expanded', 'true');
   return { menu, close };
+}
+
+// 'dark' | 'light' (the bright screen for sunlight): page colours and chart colours.
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+  setChartTheme(theme);
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', theme === 'light' ? '#eef0f3' : '#0b0d10');
 }
 
 // A setting changed by hand: a chosen measurement situation (presets.js) becomes 사용자 지정.
@@ -378,6 +385,7 @@ async function renderAnalyzer() {
         <div class="trace-plot" id="a-trace"></div>
         <div class="chart-tools">
           <p class="rec-badge" id="a-rec-badge" hidden><i></i>녹음 <b id="a-rec-time">00:00</b></p>
+          <button type="button" class="zoom-chip" data-act="zoom-reset" id="a-zoom" hidden>전체 보기</button>
           <p class="speed-badge" id="a-speed" hidden>– km/h</p>
           <p class="ref-chip" id="a-ref" hidden><i aria-hidden="true"></i><span id="a-ref-name"></span><b id="a-ref-diff"></b><button type="button" class="ref-close" data-act="ref-off" aria-label="기준 비교 끄기">×</button></p>
           <p class="an-peak" id="a-peak">피크 –</p>
@@ -415,6 +423,12 @@ async function renderAnalyzer() {
   const chart = new SpectrumView($('a-chart'), { cursor: true });
   chart.onCursor = bindCursorReadout($('a-cursor'));
   $('a-cursor').querySelector('.cr-close').onclick = () => chart.clearCursors();
+  // two fingers pinch the frequency axis; "전체 보기" goes back to 20 Hz – 20 kHz
+  let pinchAxis = null;
+  chart.onZoom = ([fmin, fmax], done) => {
+    pinchAxis = done ? null : [fmin, fmax];
+    if (done) change({ freqMin: fmin, freqMax: fmax });
+  };
   const gram = new SpectrogramView($('a-gram'));
   gram.configure({ scale: s.scale, fmin: s.freqMin, fmax: s.freqMax, colorRange: s.gramDb });
   gram.unit = unitOf(s.weighting);
@@ -483,7 +497,7 @@ async function renderAnalyzer() {
           ref,
           peaks,
         },
-        { scale: st.scale, fmin: st.freqMin, fmax: st.freqMax, style: st.style, range: st.specDb || range, unit: unit() },
+        { scale: st.scale, fmin: pinchAxis?.[0] ?? st.freqMin, fmax: pinchAxis?.[1] ?? st.freqMax, style: st.style, range: st.specDb || range, unit: unit() },
       );
     }
   };
@@ -929,17 +943,20 @@ async function renderAnalyzer() {
     const st = getSettings();
     const { dlg } = openSheet(`
       <div class="sheet-form chart-sheet">
-        <h2>그래프 설정</h2>
+        <h2>측정 · 그래프 설정</h2>
+        <h3 class="sheet-sub">측정</h3>
         <div class="seg-field mic-field"><span>마이크</span>
           <select id="f-mic" aria-label="마이크"><option value="">휴대폰 기본 마이크</option></select>
           <p class="fine seg-note" id="f-mic-note"></p></div>
         ${segRow('weighting', '주파수 가중치', WEIGHTINGS.map((w) => [w, `${w}특성`]), st.weighting, `<span id="f-weight-note">${WEIGHT_NOTE[st.weighting]}</span> 바꾸면 최소·평균·최대가 새로 시작합니다.`)}
         ${segRow('timeWeighting', '시간 가중 (큰 숫자)', [['F', 'Fast 0.125초'], ['S', 'Slow 1초']], st.timeWeighting, 'Slow는 숫자가 덜 흔들려 읽기 쉽습니다. 바꾸면 최소·평균·최대가 새로 시작합니다.')}
-        ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
         ${segRow('timed', '정해진 시간 측정 (⏱ 버튼)', TIMED_SECS.map((n) => [n, n < 60 ? `${n}초` : '1분']), st.timedSec, '누르면 처음부터 이 시간만큼 재고 멈춘 뒤 저장 창을 엽니다.')}
         ${segRow('gps', '속도 (GPS)', [['off', '끔'], ['on', '켬']], st.gps ? 'on' : 'off', '켜면 위치 권한을 묻고, 차 속도를 그래프 위와 시간축 그래프(노란 선), 저장 기록에 함께 남깁니다. 위치는 저장하지 않습니다.')}
+        <h3 class="sheet-sub">그래프</h3>
+        ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
         ${segRow('fft', 'FFT 크기', FFT_SIZES.map((n) => [n, n]), st.fftSize, '클수록 주파수를 잘게 나누지만 반응이 느려집니다. 1/3 옥타브 보기는 늘 32768로 계산합니다.')}
-        ${segRow('scale', '주파수 축', [['log', '로그'], ['linear', '선형']], st.scale)}
+        ${segRow('scale', '주파수 축', [['log', '로그'], ['linear', '선형']], st.scale, '주파수 그래프를 두 손가락으로 벌리거나 좁혀도 범위가 바뀝니다.')}
+        ${segRow('theme', '화면 밝기', [['dark', '어둡게'], ['light', '밝게 (햇빛 아래)']], st.theme)}
         <button type="button" class="btn btn-wide" data-close>닫기</button>
       </div>`);
     const micSel = dlg.querySelector('#f-mic');
@@ -987,6 +1004,12 @@ async function renderAnalyzer() {
     }
     if (st.fftSize !== prev.fftSize) applyFft();
     if (st.timedSec !== prev.timedSec && !meter?.timed) showTimed(0);
+    if (st.theme !== prev.theme) {
+      applyTheme(st.theme);
+      trace.draw();
+      gram.draw();
+      octave.draw();
+    }
     if (st.gps !== prev.gps) {
       if (st.gps) startGps();
       else stopGps();
@@ -999,6 +1022,7 @@ async function renderAnalyzer() {
       trace.configure({ windowSec: st.traceSec || 30, yRange: st.traceDb });
       trace.draw();
     }
+    $('a-zoom').hidden = st.freqMin === FMIN && st.freqMax === FMAX;
     const p = presetOf(st.preset);
     $('a-preset').firstElementChild.textContent = p.name;
     $('a-preset').setAttribute('aria-label', `측정 상황: ${p.name}`);
@@ -1131,7 +1155,7 @@ async function renderAnalyzer() {
         <div class="menu-group menu-wide">
           <button type="button" role="menuitem" data-act="hold-reset">${ICON.reset}홀드 재설정</button>
           <button type="button" role="menuitem" data-act="ranges">${ICON.axes}축 범위</button>
-          <button type="button" role="menuitem" data-act="more">${ICON.sliders}가중치 · FFT · 기타 설정</button>
+          <button type="button" role="menuitem" data-act="more">${ICON.sliders}<span class="mi-text">측정 · 그래프 설정<small>마이크 · 가중치 · 정해진 시간 · 속도 · FFT · 화면 밝기</small></span></button>
         </div>`;
     };
     menu = openMenu(anchor, html(), () => (menu = null), 'menu-chart');
@@ -1202,6 +1226,8 @@ async function renderAnalyzer() {
   };
   view.querySelector('[data-act=help]').onclick = helpSheet;
   view.querySelector('[data-act=ref-off]').onclick = refOff;
+  $('a-zoom').hidden = s.freqMin === FMIN && s.freqMax === FMAX;
+  $('a-zoom').onclick = () => change({ freqMin: FMIN, freqMax: FMAX });
   view.querySelector('[data-act=chart-settings]').onclick = chartMenu;
   $('a-preset').onclick = presetMenu;
   view.querySelectorAll('.mode').forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
@@ -2002,6 +2028,7 @@ async function renderSettings() {
 
 /* ---------- boot ---------- */
 
+applyTheme(getSettings().theme);
 window.addEventListener('hashchange', route);
 route();
 

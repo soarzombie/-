@@ -319,7 +319,27 @@ async function cursorDb(page, hz) {
 
   // other views: spectrogram and 1/3 octave each on their own, then back
   assert.equal(await page.locator('.mode').count(), 3, 'three views');
+  await page.waitForTimeout(3000);
   await setMode(page, 'gram');
+  // the spectrogram kept what came in while it was not shown: the tone is there at once, seconds deep
+  await page.waitForTimeout(200);
+  const gramRows = await page.evaluate(() => {
+    const cv = document.querySelector('#a-gram canvas');
+    const { data, width, height } = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height);
+    let rows = 0;
+    for (let y = 0; y < height; y++) {
+      for (let x = 60; x < width; x++) {
+        const i = (y * width + x) * 4;
+        if (data[i] + data[i + 1] + data[i + 2] > 600) {
+          rows++;
+          break;
+        }
+      }
+    }
+    return rows / (window.devicePixelRatio || 1);
+  });
+  console.log(`spectrogram history on showing it: ${gramRows.toFixed(0)} rows`);
+  assert.ok(gramRows > 60, 'rows from before the spectrogram was shown');
   assert.ok(!(await page.locator('#a-trace canvas').isVisible()), 'time-axis graph only in the main view');
   await page.waitForTimeout(1500);
   assert.ok(await page.locator('#a-gram canvas').isVisible() && !(await page.locator('#a-chart canvas').isVisible()));
@@ -449,6 +469,32 @@ async function cursorDb(page, hz) {
   await page.waitForSelector('dialog.sheet', { state: 'detached' });
   st = await settingsOf(page);
   assert.deepEqual([st.freqMin, st.freqMax, st.specDb, st.traceDb, st.gramDb, st.octDb], [20, 20000, null, null, null, null]);
+
+  // two fingers on 200 Hz and 2 kHz spread to the ends of the plot: the axis becomes 200 Hz – 2 kHz;
+  // "전체 보기" goes back
+  {
+    const r = await page.locator('#a-chart').boundingBox();
+    const k = r.width < 360 ? 0.92 : 1;
+    const x0 = r.x + 30 * k;
+    const x1 = r.x + Math.floor(r.width) - 6 * k;
+    const at = (hz) => x0 + (Math.log(hz / 20) / Math.log(1000)) * (x1 - x0);
+    const yy = r.y + r.height * 0.5;
+    const cdp = await page.context().newCDPSession(page);
+    const touch = (type, xa, xb) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x: xa, y: yy, id: 1 }, { x: xb, y: yy, id: 2 }] });
+    await touch('touchStart', at(200), at(2000));
+    for (let i = 1; i <= 8; i++) await touch('touchMove', at(200) + ((x0 + 1 - at(200)) * i) / 8, at(2000) + ((x1 - 1 - at(2000)) * i) / 8);
+    await touch('touchEnd');
+    await page.waitForSelector('#a-zoom:not([hidden])');
+    const zoomed = await settingsOf(page);
+    console.log(`pinch: ${zoomed.freqMin} – ${zoomed.freqMax} Hz`);
+    assert.ok(Math.abs(zoomed.freqMin - 200) < 12 && Math.abs(zoomed.freqMax - 2000) < 120, 'pinched axis');
+    assert.ok(await page.locator('#a-cursor').isHidden(), 'a pinch places no cursor');
+    await shot(page, 'pinch');
+    await page.locator('#a-zoom').click();
+    await page.waitForSelector('#a-zoom', { state: 'hidden' });
+    const back = await settingsOf(page);
+    assert.deepEqual([back.freqMin, back.freqMax], [20, 20000]);
+  }
 
   // help sheet
   await page.getByRole('button', { name: '도움말' }).click();
@@ -809,6 +855,15 @@ async function cursorDb(page, hz) {
     await page.waitForTimeout(300);
     await shot(page, `main-${name}-trace`);
     await page.locator('#a-cursor .cr-close').click();
+    // the bright screen for sunlight
+    await chartSettings(page, { theme: 'light' });
+    assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), 'light');
+    await page.waitForTimeout(600);
+    await tapFrequency(page, 1250);
+    await page.waitForTimeout(300);
+    await shot(page, `main-${name}-light`);
+    await page.locator('#a-cursor .cr-close').click();
+    await chartSettings(page, { theme: 'dark' });
     await page.getByRole('button', { name: '그래프 설정' }).click();
     await page.getByRole('menuitem', { name: /가중치/ }).click();
     await page.waitForTimeout(200);
