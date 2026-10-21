@@ -3,7 +3,7 @@
 // Style 'fill': red area = current, grey area = peak hold (maximum since reset); 'bar': the same as bars;
 // 'line': blue line = current, red line = peak hold. Over any style: orange = minimum hold, dashed light
 // red / light orange = max / min tracking.
-// Labels mark the strongest tonal peaks; cursors A/B are crosshairs that read exact values. drawSpectrum() is
+// Labels mark the strongest tonal peaks; the cursor reads the live level and the maximum at one frequency. drawSpectrum() is
 // also used for the share image, and the layout helpers keep the spectrogram aligned with it.
 
 import { rangeIndex, reduceRanges } from './dsp.js';
@@ -84,6 +84,12 @@ export function curveLook(style, c = SPECTRUM_COLORS) {
     avg: [c.avg, 'line'],
     ref: [c.ref, 'dash'],
   };
+}
+
+// Colours for the cursor's levels on the dark label: the live curve's and the maximum's, brightened
+// where the curve is an area.
+export function readingColors(style, c = SPECTRUM_COLORS) {
+  return style === 'line' ? { cur: c.lineCur, max: c.lineMax } : { cur: '#ff7a85', max: '#c9ced8' };
 }
 
 // Plot rectangle inside a w x h drawing; shared by the spectrum and the spectrogram.
@@ -329,71 +335,78 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
     g.fillText(text, bx + 6 * k, by + 14.5 * k);
   });
 
-  // cursors: a crosshair at the curve, with the frequency and level next to the point.
-  // The column read here is also what the read-out strip shows.
+  // cursor: a vertical line at one frequency, a dot on the live curve and one on the maximum, and a
+  // label with the frequency and both levels in their curves' colours. The columns read here are also
+  // what the read-out strip shows.
   const colOf = (hz) => Math.max(0, Math.min(cols.n - 1, Math.floor(freqToX(hz, box, axis) - x0)));
-  const readings = (opts.cursors || []).map((cur) => ({
+  const labels = { cur: '지금', max: '최대', ...opts.cursorLabels };
+  const readings = (opts.cursors || []).slice(0, 1).map((cur) => ({
     hz: cur.hz,
     cur: data.cur ? cols.cur[colOf(cur.hz)] : NaN,
     max: data.max ? cols.max[colOf(cur.hz)] : NaN,
     ref: refOut ? refOut[colOf(cur.hz)] : NaN,
+    labels,
+    style,
   }));
-  (opts.cursors || []).forEach((cur, i) => {
-    const cx = Math.round(freqToX(cur.hz, box, axis)) + 0.5;
-    const v = readings[i].cur;
+  const ink = readingColors(style, c);
+  readings.forEach((r) => {
+    const cx = Math.round(freqToX(r.hz, box, axis)) + 0.5;
     g.strokeStyle = c.cursor;
     g.lineWidth = 1.2 * k;
     g.beginPath();
     g.moveTo(cx, yTop);
     g.lineTo(cx, yBot);
     g.stroke();
-    if (Number.isFinite(v) && v > lo) {
-      const cy = Math.round(y(v)) + 0.5;
-      g.globalAlpha = 0.75;
+    const shown = ['max', 'cur'].filter((key) => Number.isFinite(r[key]) && r[key] > lo);
+    if (!shown.length) return;
+    if (shown.includes('cur')) {
+      const cy = Math.round(y(r.cur)) + 0.5;
+      g.globalAlpha = 0.5;
       g.beginPath();
       g.moveTo(x0, cy);
       g.lineTo(x1, cy);
       g.stroke();
       g.globalAlpha = 1;
-      g.fillStyle = c.cursor;
-      g.beginPath();
-      g.arc(cx, cy, 4 * k, 0, Math.PI * 2);
-      g.fill();
-      const hzText = `${Math.round(cur.hz).toLocaleString('ko-KR')} Hz`;
-      const dbText = `${v.toFixed(1)} ${opts.unit || 'dB(A)'}`;
-      g.font = font(13 * k, 700);
-      const tag = 16 * k; // the cursor's letter, left of the numbers
-      const tw = Math.max(g.measureText(hzText).width, g.measureText(dbText).width) + tag + 14 * k;
-      const th = 38 * k;
-      const gap = 8 * k;
-      const bx = cx + gap + tw <= x1 ? cx + gap : cx - gap - tw;
-      const by = cy + gap + th <= yBot ? cy + gap : Math.max(yTop + 20 * k, cy - gap - th);
-      g.fillStyle = c.labelBg;
-      g.beginPath();
-      g.roundRect ? g.roundRect(bx, by, tw, th, 6 * k) : g.rect(bx, by, tw, th);
-      g.fill();
-      g.fillStyle = c.cursor;
-      g.beginPath();
-      g.roundRect ? g.roundRect(bx + 5 * k, by + 5 * k, tag, tag, 4 * k) : g.rect(bx + 5 * k, by + 5 * k, tag, tag);
-      g.fill();
-      g.textAlign = 'center';
-      g.fillStyle = '#0b0d10';
-      g.font = font(12 * k, 800);
-      g.fillText(cur.name, bx + 5 * k + tag / 2, by + 17.5 * k);
-      g.textAlign = 'left';
-      g.font = font(13 * k, 700);
-      g.fillStyle = c.label;
-      g.fillText(hzText, bx + tag + 9 * k, by + 16 * k);
-      g.fillStyle = c.cursor;
-      g.fillText(dbText, bx + tag + 9 * k, by + 32 * k);
     }
+    for (const key of shown) {
+      g.fillStyle = ink[key];
+      g.strokeStyle = c.labelBg;
+      g.lineWidth = 2 * k;
+      g.beginPath();
+      g.arc(cx, y(r[key]), 4.5 * k, 0, Math.PI * 2);
+      g.fill();
+      g.stroke();
+    }
+    const lines = [
+      [`${Math.round(r.hz).toLocaleString('ko-KR')} Hz`, c.label],
+      ...['cur', 'max'].filter((key) => shown.includes(key)).map((key) => [`${labels[key]} ${r[key].toFixed(1)}`, ink[key]]),
+    ];
+    g.font = font(13 * k, 700);
+    const tw = Math.max(...lines.map(([t]) => g.measureText(t).width)) + 14 * k;
+    const th = (8 + 16 * lines.length) * k;
+    const gap = 8 * k;
+    const anchor = y(shown.includes('cur') ? r.cur : r.max);
+    const bx = cx + gap + tw <= x1 ? cx + gap : cx - gap - tw;
+    const by = anchor + gap + th <= yBot ? anchor + gap : Math.max(yTop + 20 * k, anchor - gap - th);
+    g.fillStyle = c.labelBg;
+    g.beginPath();
+    g.roundRect ? g.roundRect(bx, by, tw, th, 6 * k) : g.rect(bx, by, tw, th);
+    g.fill();
+    g.textAlign = 'left';
+    lines.forEach(([t, colour], i) => {
+      g.fillStyle = colour;
+      g.fillText(t, bx + 7 * k, by + (16 + 16 * i) * k);
+    });
   });
 
   return { box, cols, readings };
 }
 
-// Canvas that follows its host's size and redraws on update(). With `cursor`, tapping the chart
-// places cursor A, a second tap places B, and dragging moves the one under the finger.
+// The analyzer page turned a quarter turn clockwise in CSS (the 가로 button where the screen cannot be locked).
+export const sideways = () => document.documentElement.dataset.rotate === 'on' && document.body.dataset.view === 'home';
+
+// Canvas that follows its host's size and redraws on update(). With `cursor`, tapping the chart places
+// the cursor (or moves it there) and dragging moves it; two fingers pinch the axis (onZoom).
 export class SpectrumView {
   constructor(host, { cursor = false, onCursor = null } = {}) {
     this.host = host;
@@ -419,7 +432,7 @@ export class SpectrumView {
   }
 
   resize() {
-    const r = this.host.getBoundingClientRect();
+    const r = { width: this.host.clientWidth, height: this.host.clientHeight }; // layout size, also when turned sideways
     this.dpr = Math.min(3, window.devicePixelRatio || 1);
     this.w = Math.max(1, Math.floor(r.width));
     this.h = Math.max(1, Math.floor(r.height));
@@ -441,8 +454,7 @@ export class SpectrumView {
     const { g } = this;
     g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     g.clearRect(0, 0, this.w, this.h);
-    const cursors = this.cursors.map((c, i) => ({ hz: c.hz, name: 'AB'[i] }));
-    const { box, readings } = drawSpectrum(g, this.w, this.h, this.data, { ...this.opts, fontScale: this.fontScale, cache: this.cache, cursors });
+    const { box, readings } = drawSpectrum(g, this.w, this.h, this.data, { ...this.opts, fontScale: this.fontScale, cache: this.cache, cursors: this.cursors });
     this.box = box;
     this.onCursor?.(readings);
   }
@@ -453,12 +465,16 @@ export class SpectrumView {
   }
 
   enableCursor() {
-    let dragging = -1;
-    let added = -1; // a cursor this touch just placed (taken back if the touch turns into a pinch)
+    let dragging = false;
+    let before = null; // where the cursor was before this touch: put back if the touch turns into a pinch
     const fingers = new Map(); // pointerId -> x
     let pinch = null; // two fingers with onZoom: { ids, fa, fb } frequencies first under them
     const axis = () => freqAxis(this.opts.scale || 'log', this.opts.fmin ?? FMIN, this.opts.fmax ?? FMAX);
-    const xAt = (e) => e.clientX - this.host.getBoundingClientRect().left;
+    // x along the plot; on the analyzer turned sideways (app.js) the plot's x runs down the screen
+    const xAt = (e) => {
+      const r = this.host.getBoundingClientRect();
+      return sideways() ? e.clientY - r.top : e.clientX - r.left;
+    };
     this.host.addEventListener('pointerdown', (e) => {
       if (!this.box) return;
       const x = xAt(e);
@@ -469,8 +485,8 @@ export class SpectrumView {
         // not a capturable pointer (synthetic): moves still arrive while over the chart
       }
       if (fingers.size === 2 && this.onZoom) {
-        if (added >= 0) this.cursors.splice(added, 1);
-        dragging = added = -1;
+        this.cursors = before == null ? [] : [{ hz: before }];
+        dragging = false;
         const ids = [...fingers.keys()].sort((p, q) => fingers.get(p) - fingers.get(q));
         pinch = { ids, fa: xToFreq(fingers.get(ids[0]), this.box, axis()), fb: xToFreq(fingers.get(ids[1]), this.box, axis()) };
         this.draw();
@@ -478,17 +494,12 @@ export class SpectrumView {
       }
       if (fingers.size > 1) return;
       const hz = xToFreq(x, this.box, axis());
-      const dist = (c) => Math.abs(freqToX(c.hz, this.box, axis()) - x);
-      const near = this.cursors.findIndex((c) => dist(c) < 28);
-      added = -1;
-      if (near >= 0) dragging = near;
-      else if (this.cursors.length < 2) {
-        this.cursors.push({ hz });
-        dragging = added = this.cursors.length - 1;
-      } else {
-        dragging = dist(this.cursors[0]) < dist(this.cursors[1]) ? 0 : 1;
-        this.cursors[dragging].hz = hz;
-      }
+      const cur = this.cursors[0];
+      before = cur ? cur.hz : null;
+      // one cursor: a tap puts it there, unless the tap is on it (then it is just picked up)
+      if (!cur) this.cursors = [{ hz }];
+      else if (Math.abs(freqToX(cur.hz, this.box, axis()) - x) >= 28) cur.hz = hz;
+      dragging = true;
       this.draw();
     });
     this.host.addEventListener('pointermove', (e) => {
@@ -503,18 +514,17 @@ export class SpectrumView {
         }
         return;
       }
-      if (dragging < 0) return;
-      this.cursors[dragging].hz = xToFreq(xAt(e), this.box, axis());
+      if (!dragging || !this.cursors.length) return;
+      this.cursors[0].hz = xToFreq(xAt(e), this.box, axis());
       this.draw();
     });
     const end = (e) => {
       fingers.delete(e.pointerId);
-      dragging = -1;
+      dragging = false;
       if (pinch && fingers.size < 2) {
         pinch = null;
         this.onZoom([this.opts.fmin ?? FMIN, this.opts.fmax ?? FMAX], true);
       }
-      if (!fingers.size) added = -1;
     };
     this.host.addEventListener('pointerup', end);
     this.host.addEventListener('pointercancel', end);

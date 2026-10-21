@@ -192,6 +192,17 @@ async function tapFrequency(page, hz, fmin = 20, fmax = 20000) {
   await page.mouse.click(r.x + x, r.y + r.height * 0.75); // low enough to miss the floating level panel in landscape
 }
 
+// The same, with the analyzer turned sideways (the plot's x runs down the screen, its y to the left).
+async function tapSideways(page, hz, fmin = 20, fmax = 20000) {
+  const r = await page.locator('#a-chart').boundingBox();
+  const [w, h] = await page.evaluate(() => [document.querySelector('#a-chart').clientWidth, document.querySelector('#a-chart').clientHeight]);
+  const k = w < 360 ? 0.92 : 1;
+  const x0 = 30 * k;
+  const x1 = w - 6 * k;
+  const lx = x0 + (Math.log(hz / fmin) / Math.log(fmax / fmin)) * (x1 - x0);
+  await page.mouse.click(r.x + r.width - h * 0.75, r.y + lx);
+}
+
 const settingsOf = (page) => page.evaluate(() => JSON.parse(localStorage.getItem('noise-meter:settings:v1')));
 const num = async (page, sel) => parseFloat((await page.locator(sel).textContent()).replace(/[^\d.-]/g, ''));
 const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
@@ -256,9 +267,9 @@ async function pickMic(page, label) {
 async function cursorDb(page, hz) {
   await tapFrequency(page, hz);
   await page.waitForSelector('#a-cursor:not([hidden])');
-  const text = await page.locator('#a-cursor .cr-lines span').first().textContent();
+  const db = Number(await page.locator('#a-cursor .cr-cur em').textContent());
   await page.locator('#a-cursor .cr-close').click();
-  return Number(text.replace(/,/g, '').match(/[\d.]+/g)[1]);
+  return db;
 }
 
 (async () => {
@@ -295,17 +306,24 @@ async function cursorDb(page, hz) {
   await page.getByRole('button', { name: '초기화' }).click();
   assert.equal(await page.locator('#a-time').textContent(), '00:00');
 
-  // cursors: A at 1 kHz reads the tone, B adds the difference, x clears
+  // the cursor reads the live level and the maximum at one frequency; another tap moves it; x clears
   await tapFrequency(page, 1000);
   await page.waitForSelector('#a-cursor:not([hidden])');
-  const aText = await page.locator('#a-cursor .cr-lines span').first().textContent();
-  const [aHz, aDb] = aText.replace(/,/g, '').match(/[\d.]+/g).map(Number); // "A 1,000 Hz 74.4"
-
-  console.log(`cursor A: ${aText}`);
+  const hzAt = async () => Number((await page.locator('#a-cursor .cr-hz').textContent()).replace(/[^\d.]/g, ''));
+  const aHz = await hzAt();
+  const aDb = Number(await page.locator('#a-cursor .cr-cur em').textContent());
+  const aMax = Number(await page.locator('#a-cursor .cr-max em').textContent());
+  console.log(`cursor: ${await page.locator('#a-cursor .cr-lines').textContent()}`);
   assert.ok(Math.abs(aHz - 1000) / 1000 < 0.03, 'cursor frequency');
   assert.ok(aDb > 60, 'cursor reads the tone level');
+  assert.ok(aMax >= aDb - 0.5 && aMax - aDb < 3, 'and the maximum there');
+  assert.match(await page.locator('#a-cursor .cr-cur').textContent(), /^지금 /);
+  assert.match(await page.locator('#a-cursor .cr-max').textContent(), /^최대 /);
   await tapFrequency(page, 5000);
-  await page.waitForSelector('#a-cursor .cr-diff');
+  await page.waitForFunction(() => /^5,0\d\d Hz|^4,9\d\d Hz/.test(document.querySelector('#a-cursor .cr-hz')?.textContent || ''));
+  assert.equal(await page.locator('#a-cursor .cr-hz').count(), 1, 'one cursor: the second tap moved it');
+  await tapFrequency(page, 1000);
+  await page.waitForTimeout(300);
   await shot(page, 'cursor');
   await page.locator('#a-cursor .cr-close').click();
   await page.waitForSelector('#a-cursor', { state: 'hidden' });
@@ -316,6 +334,31 @@ async function cursorDb(page, hz) {
   assert.ok(await page.locator('#a-trace canvas').isVisible(), 'time-axis graph under the spectrum');
   assert.ok(traceBox.y > specBox.y + specBox.height - 1, 'below it');
   assert.ok(traceBox.height < specBox.height * 0.6, 'and smaller');
+
+  // 가로: where the screen cannot be locked (here, as on an iPhone) the page turns sideways into the
+  // landscape layout; a tap still reads the right frequency, the chart menu opens on screen; 세로 goes back
+  await page.getByRole('button', { name: '가로 화면으로' }).click();
+  await page.waitForFunction(() => document.documentElement.dataset.rotate === 'on' && document.documentElement.dataset.layout === 'landscape');
+  assert.ok(await page.locator('.tabbar').isHidden(), 'no tab bar in the landscape layout');
+  const turned = await page.evaluate(() => [document.querySelector('#a-chart').clientWidth, document.querySelector('#a-chart').clientHeight]);
+  assert.ok(turned[0] > turned[1] * 1.5, `a wide chart when turned: ${turned}`);
+  await page.waitForTimeout(800);
+  await tapSideways(page, 1000);
+  await page.waitForSelector('#a-cursor:not([hidden])');
+  const sideHz = Number((await page.locator('#a-cursor .cr-hz').textContent()).replace(/[^\d.]/g, ''));
+  console.log(`turned sideways: chart ${turned.join(' x ')}, cursor ${sideHz} Hz`);
+  assert.ok(Math.abs(sideHz - 1000) / 1000 < 0.04, 'the cursor reads the tapped frequency when turned');
+  await shot(page, 'sideways');
+  await page.locator('#a-cursor .cr-close').click();
+  await page.getByRole('button', { name: '그래프 설정' }).click();
+  await page.getByRole('menu').waitFor();
+  const mb = await page.getByRole('menu').boundingBox();
+  assert.ok(mb.x >= 0 && mb.y >= 0 && mb.x + mb.width <= 391 && mb.y + mb.height <= 845, `the menu stays on screen: ${JSON.stringify(mb)}`);
+  await shot(page, 'sideways-menu');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: '세로 화면으로' }).click();
+  await page.waitForFunction(() => document.documentElement.dataset.layout === 'portrait' && document.documentElement.dataset.rotate === 'off');
+  assert.ok(await page.locator('.tabbar').isVisible(), 'back to portrait');
 
   // other views: spectrogram and 1/3 octave each on their own, then back
   assert.equal(await page.locator('.mode').count(), 3, 'three views');
@@ -459,7 +502,8 @@ async function cursorDb(page, hz) {
   await page.locator('#a-cursor .cr-close').click().catch(() => {});
   await tapFrequency(page, 1000, 500, 2000);
   await page.waitForSelector('#a-cursor:not([hidden])');
-  const [rHz, rDb] = (await page.locator('#a-cursor .cr-lines span').first().textContent()).replace(/,/g, '').match(/[\d.]+/g).map(Number);
+  const rHz = Number((await page.locator('#a-cursor .cr-hz').textContent()).replace(/[^\d.]/g, ''));
+  const rDb = Number(await page.locator('#a-cursor .cr-cur em').textContent());
   console.log(`cursor on 500 Hz – 2 kHz: ${rHz} Hz ${rDb}`);
   assert.ok(Math.abs(rHz - 1000) < 15 && rDb > 60, 'cursor on the narrowed axis');
   await shot(page, 'range-live');
@@ -494,6 +538,24 @@ async function cursorDb(page, hz) {
     await page.waitForSelector('#a-zoom', { state: 'hidden' });
     const back = await settingsOf(page);
     assert.deepEqual([back.freqMin, back.freqMax], [20, 20000]);
+  }
+
+  // 창 함수: Hanning is computed in the app; the tone stays at 1 kHz with its level, the big number is the same
+  {
+    const before = await num(page, '#a-now');
+    await chartSettings(page, { window: 'hann' });
+    await page.waitForTimeout(1500);
+    const db = await cursorDb(page, 1000);
+    const peak = await num(page, '#a-peak');
+    console.log(`Hanning window: cursor at 1 kHz ${db}, peak ${peak} Hz, now ${await num(page, '#a-now')} (was ${before})`);
+    assert.ok(Math.abs(peak - 1000) < 10 && db > 60, 'the tone with the Hanning window');
+    assert.ok(Math.abs((await num(page, '#a-now')) - before) < 0.3, 'the level does not depend on the window');
+    await page.getByRole('button', { name: '그래프 설정' }).click();
+    await page.getByRole('menuitem', { name: '오디오 세부정보' }).click();
+    assert.match(await page.locator('dialog.sheet .details').textContent(), /창 함수Hanning \(앱에서 계산\)/);
+    await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
+    await page.waitForSelector('dialog.sheet', { state: 'detached' });
+    await chartSettings(page, { window: 'blackman' });
   }
 
   // help sheet
@@ -610,6 +672,29 @@ async function cursorDb(page, hz) {
   console.log(`recording: ${recLen.toFixed(2)} s, Leq ${recLeq}`);
   assert.ok(recLen > 3 && recLen < 4.8, 'recording length includes the paused part');
   assert.ok(Math.abs(recLeq - (expected1 + 3)) < 0.3, 'recording Leq');
+
+  // calibrator mode: the 1 kHz test tone stands in for a 94 dB calibrator; steady, so stability is good,
+  // the value is filled in, and after applying the analyzer reads 94 dB(A)
+  await page.locator('.tabbar a[data-tab=settings]').click();
+  await page.waitForSelector('.cal-modes'); // still unlocked from the calibration above
+  await page.locator('.cal-modes button[data-v=calibrator]').click();
+  assert.ok(await page.locator('.cal-ref-pick').isVisible(), 'calibrator level choice');
+  await page.getByRole('button', { name: /보정 측정/ }).click();
+  await page.waitForSelector('#cal-live:not([hidden])');
+  await page.waitForSelector('#cal-result:not([hidden])', { timeout: 15000 });
+  const stab = await page.locator('#cal-stab').textContent();
+  console.log(`calibrator: phone ${await page.locator('#cal-phone').textContent()}, ${stab}`);
+  assert.match(stab, /안정성 좋음/);
+  assert.ok(await page.locator('#cal-warn').isHidden(), 'no warning for a steady 1 kHz tone');
+  assert.equal(await page.locator('#f-cal-ref').inputValue(), '94');
+  await shot(page, 'calibrator', true);
+  await page.getByRole('button', { name: '적용' }).click();
+  const calOffset = parseFloat(await page.locator('#cal-offset').textContent());
+  assert.ok(Math.abs(calOffset - (103 + 94 - (expected1 + 3))) < 0.4, `calibrator offset ${calOffset}`);
+  await page.locator('.tabbar a[data-tab=home]').click();
+  await running(page);
+  await page.waitForTimeout(2000);
+  assert.ok(Math.abs((await num(page, '#a-now')) - 94) < 0.5, 'reads the calibrator level');
   await browser.close();
 
   // Run 2: 100 Hz at -9 dBFS RMS; A-weighting takes off 19.1 dB -> 71.9 dB(A)
@@ -742,6 +827,62 @@ async function cursorDb(page, hz) {
   await page.waitForSelector('#a-ref', { state: 'hidden' });
   assert.equal((await settingsOf(page)).refId, '');
 
+  // 오디오 세부정보: the microphone, the browser's audio values, sound processing off
+  await page.getByRole('button', { name: '그래프 설정' }).click();
+  await page.getByRole('menuitem', { name: '오디오 세부정보' }).click();
+  const details = page.locator('dialog.sheet .details');
+  await details.waitFor();
+  const dText = await details.textContent();
+  assert.match(dText, /샘플링 레이트\d+ Hz/);
+  assert.match(dText, /자동 음량 조절꺼짐/);
+  assert.match(dText, /A특성/);
+  await shot(page, 'details');
+  await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
+  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+
+  // 바로 저장: a timed measurement saves without the sheet, with the last vehicle number
+  await page.evaluate(async () => (await import('./js/settings.js')).saveSettings({ vehicle: '78다 9012' })); // as after an earlier save
+  await chartSettings(page, { autoSave: 'on' });
+  const before = await page.evaluate(() => new Promise((r) => {
+    const q = indexedDB.open('noise-meter');
+    q.onsuccess = () => {
+      const c = q.result.transaction('records').objectStore('records').count();
+      c.onsuccess = () => r(c.result);
+    };
+  }));
+  await page.getByRole('button', { name: '5초 측정', exact: true }).click();
+  await page.waitForFunction(() => /5초 측정을 저장했습니다 \(78다 9012\)/.test(document.querySelector('#toast')?.textContent || ''), null, { timeout: 12000 });
+  assert.equal(await page.locator('dialog.sheet').count(), 0, 'no save sheet');
+  await page.locator('#toast .toast-action').click();
+  await page.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
+  assert.match(await page.locator('.rec-head h1').textContent(), /78다 9012/);
+  assert.match(await page.locator('.rec-head p').first().textContent(), /5초 측정 00:05/);
+  await page.locator('.tabbar a[data-tab=history]').click();
+  await page.waitForSelector('.record-row');
+  assert.equal(await page.locator('.record-row').count(), before + 1);
+  await page.locator('.tabbar a[data-tab=home]').click();
+  await running(page);
+  await chartSettings(page, { autoSave: 'off' });
+  await page.evaluate(async () => (await import('./js/settings.js')).saveSettings({ vehicle: '' }));
+
+  // 영상: the readings and graphs with the sound as one video file, offered to send when it stops
+  await page.getByRole('button', { name: '영상 녹화' }).click();
+  await page.waitForSelector('#a-video-badge:not([hidden])');
+  await page.waitForTimeout(2600);
+  assert.match(await page.locator('#a-video-time').textContent(), /00:0[23]/);
+  await shot(page, 'video');
+  await page.getByRole('button', { name: '영상 정지' }).click();
+  await page.waitForSelector('dialog.sheet h2:has-text("영상 녹화 끝")');
+  const vText = await page.locator('dialog.sheet p').first().textContent();
+  const [vid] = await Promise.all([page.waitForEvent('download'), page.locator('dialog.sheet').getByRole('button', { name: '보내기' }).click()]);
+  const vBytes = fs.readFileSync(await vid.path());
+  const isMp4 = vBytes.subarray(4, 8).toString() === 'ftyp';
+  const isWebm = vBytes.readUInt32BE(0) === 0x1a45dfa3;
+  console.log(`video: ${vText}, ${vBytes.length} bytes, ${isMp4 ? 'MP4' : isWebm ? 'WebM' : 'unknown'}`);
+  assert.ok(vBytes.length > 20000 && (isMp4 || isWebm), 'a playable video file');
+  if (SHOTS) fs.writeFileSync(path.join(SHOTS, `video.${isMp4 ? 'mp4' : 'webm'}`), vBytes);
+  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+
   // attached file: 3 s of 1 kHz (77.0 dB(A)) then 3 s of 100 Hz (71.9 dB(A))
   // (passed as a buffer: Playwright here cannot attach files from non-ASCII paths, and the Korean name
   // is part of what is being checked)
@@ -784,7 +925,7 @@ async function cursorDb(page, hz) {
   assert.ok(Math.abs((await num(page, '.stats-grid div:first-child b')) - fileLeq) < 0.3, 'saved file Leq');
   // record against record: the 5 s measurement dashed over the file, and the two averages
   await page.getByRole('button', { name: '다른 기록과 비교' }).click();
-  await page.locator('dialog.sheet .record-row').filter({ hasText: '5초 측정' }).click();
+  await page.locator('dialog.sheet .record-row').filter({ hasText: '차량 미입력' }).filter({ hasText: '5초 측정' }).click();
   await page.waitForSelector('#rec-ref:not([hidden])');
   const cmp = await page.locator('#rec-ref-text').textContent();
   console.log(`record comparison: ${cmp}`);
@@ -807,20 +948,20 @@ async function cursorDb(page, hz) {
   await office.evaluate(() => (location.hash = '#/history'));
   await office.waitForSelector('.empty-hint');
   await office.setInputFiles('#f-backup', { name: 'backup.nmb', mimeType: 'application/octet-stream', buffer: fs.readFileSync(bakPath) });
-  await office.waitForFunction(() => /정비팀 1호의 기록 2건을 넣었습니다/.test(document.querySelector('#toast')?.textContent || ''));
+  await office.waitForFunction(() => /정비팀 1호의 기록 3건을 넣었습니다/.test(document.querySelector('#toast')?.textContent || ''));
   await office.waitForSelector('.record-row');
-  assert.equal(await office.locator('.record-row').count(), 2);
+  assert.equal(await office.locator('.record-row').count(), 3);
   assert.equal(await office.locator('.rr-dev').first().textContent(), '정비팀 1호');
   await shot(office, 'backup-imported');
-  await office.locator('.record-row').filter({ hasText: '5초 측정' }).click();
+  await office.locator('.record-row').filter({ hasText: '차량 미입력' }).filter({ hasText: '5초 측정' }).click();
   await office.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
   assert.match(await office.locator('.meta dt:has-text("휴대폰") + dd').textContent(), /정비팀 1호 \(\d{4}\.\d\d\.\d\d 백업에서 넣음\)/);
   assert.ok(await office.getByRole('button', { name: '소리 파일 보내기' }).isVisible(), 'the sound came along');
   await office.evaluate(() => (location.hash = '#/history'));
   await office.waitForSelector('.record-row');
   await office.setInputFiles('#f-backup', { name: 'backup.nmb', mimeType: 'application/octet-stream', buffer: fs.readFileSync(bakPath) });
-  await office.waitForFunction(() => /새 기록이 없습니다 \(2건 모두 이미 있음\)/.test(document.querySelector('#toast')?.textContent || ''));
-  assert.equal(await office.locator('.record-row').count(), 2);
+  await office.waitForFunction(() => /새 기록이 없습니다 \(3건 모두 이미 있음\)/.test(document.querySelector('#toast')?.textContent || ''));
+  assert.equal(await office.locator('.record-row').count(), 3);
   await office.context().close();
   await browser.close();
 
@@ -852,7 +993,6 @@ async function cursorDb(page, hz) {
     await setMode(page, 'spectrum');
     await chartMenu(page, { style: 'line' });
     await page.waitForTimeout(2500);
-    await tapFrequency(page, 1250);
     await tapFrequency(page, 125);
     await page.waitForTimeout(300);
     await shot(page, `main-${name}-line`);

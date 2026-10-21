@@ -17,12 +17,25 @@ export const tauOf = (t = 'F') => TIME_WEIGHTINGS[t] || TIME_WEIGHTINGS.F;
 export const WEIGHTINGS = ['A', 'C', 'Z'];
 export const unitOf = (w = 'A', digital = false) => `${digital ? 'dBFS' : 'dB'}(${w})`;
 
-// Mean of w[n]^2 for the Blackman window (alpha = 0.16) the Web Audio AnalyserNode applies.
-export const BLACKMAN_POWER = 0.42 ** 2 + 0.5 ** 2 / 2 + 0.08 ** 2 / 2;
+// FFT windows (창 함수), as cosine sums w[n] = a0 - a1 cos(2πn/N) + a2 cos(4πn/N). Blackman (alpha = 0.16)
+// is the one the Web Audio AnalyserNode applies itself; the others are applied in meter.js.
+export const FFT_WINDOWS = {
+  hann: { name: 'Hanning', a: [0.5, 0.5, 0] },
+  hamming: { name: 'Hamming', a: [0.54, 0.46, 0] },
+  blackman: { name: 'Blackman', a: [0.42, 0.5, 0.08] },
+};
+const windowSpec = (kind) => FFT_WINDOWS[kind] || FFT_WINDOWS.blackman;
 
-// Turns an analyser bin (dB of the 1/N-scaled, windowed |X[k]|) into that bin's share of the
-// signal's mean square, one-sided. With it the bins of a spectrum add up to the overall level.
-const BIN_CORRECTION_DB = 10 * Math.log10(2 / BLACKMAN_POWER);
+// Mean of w[n]^2 for a window.
+export const windowPower = (kind = 'blackman') => {
+  const [a0, a1, a2] = windowSpec(kind).a;
+  return a0 ** 2 + a1 ** 2 / 2 + a2 ** 2 / 2;
+};
+export const BLACKMAN_POWER = windowPower('blackman');
+
+// Turns a bin (dB of the 1/N-scaled, windowed |X[k]|) into that bin's share of the signal's mean
+// square, one-sided. With it the bins of a spectrum add up to the overall level, whatever the window.
+const binCorrectionDb = (kind) => 10 * Math.log10(2 / windowPower(kind));
 
 export function aWeightDb(f) {
   if (f <= 0) return -Infinity;
@@ -106,10 +119,11 @@ export function toDb(meanSquare, offset = 0) {
 
 // Per-bin dB to add to analyser output for a weighted, calibrated level per bin. `correction(f)` is the
 // microphone's frequency-response correction from its calibration file (mics.js), if any.
-export function binLevelTable(binCount, binHz, weighting = 'A', correction = null) {
+export function binLevelTable(binCount, binHz, weighting = 'A', correction = null, window = 'blackman') {
   const t = new Float32Array(binCount);
+  const win = binCorrectionDb(window);
   t[0] = -Infinity; // DC is not sound
-  for (let k = 1; k < binCount; k++) t[k] = BIN_CORRECTION_DB + weightDb(k * binHz, weighting) + (correction ? correction(k * binHz) : 0);
+  for (let k = 1; k < binCount; k++) t[k] = win + weightDb(k * binHz, weighting) + (correction ? correction(k * binHz) : 0);
   return t;
 }
 
@@ -306,19 +320,21 @@ export function fft(re, im) {
 }
 
 const WINDOWS = new Map();
-function blackman(n) {
-  let w = WINDOWS.get(n);
+export function windowOf(kind, n) {
+  const key = `${kind}|${n}`;
+  let w = WINDOWS.get(key);
   if (!w) {
-    w = Float64Array.from({ length: n }, (_, i) => 0.42 - 0.5 * Math.cos((2 * Math.PI * i) / n) + 0.08 * Math.cos((4 * Math.PI * i) / n));
-    WINDOWS.set(n, w);
+    const [a0, a1, a2] = windowSpec(kind).a;
+    w = Float64Array.from({ length: n }, (_, i) => a0 - a1 * Math.cos((2 * Math.PI * i) / n) + a2 * Math.cos((4 * Math.PI * i) / n));
+    WINDOWS.set(key, w);
   }
   return w;
 }
 
-// One frame in the AnalyserNode's convention (Blackman window, 1/N scaling, dB of |X|), so
-// binLevels() turns it into the same dB(A) per bin the live view shows.
-export function frameSpectrum(samples, start, fftSize, out = new Float32Array(fftSize / 2)) {
-  const win = blackman(fftSize);
+// One frame in the AnalyserNode's convention (window, 1/N scaling, dB of |X|), so binLevels() turns it
+// into the same dB per bin the live view shows. Blackman is the analyser's own window.
+export function frameSpectrum(samples, start, fftSize, out = new Float32Array(fftSize / 2), window = 'blackman') {
+  const win = windowOf(window, fftSize);
   const re = new Float64Array(fftSize);
   const im = new Float64Array(fftSize);
   for (let n = 0; n < fftSize; n++) re[n] = (samples[start + n] || 0) * win[n];
@@ -327,10 +343,40 @@ export function frameSpectrum(samples, start, fftSize, out = new Float32Array(ff
   return out;
 }
 
-export function stft(samples, rate, fftSize = 2048, hop = fftSize / 2) {
+export function stft(samples, rate, fftSize = 2048, hop = fftSize / 2, window = 'blackman') {
   const frames = [];
-  for (let start = 0; start + fftSize <= samples.length; start += hop) frames.push(frameSpectrum(samples, start, fftSize));
+  for (let start = 0; start + fftSize <= samples.length; start += hop) frames.push(frameSpectrum(samples, start, fftSize, undefined, window));
   return { frames, binHz: rate / fftSize, hopSec: hop / rate };
+}
+
+// The live spectrum with a window the AnalyserNode does not have: the analyser's latest fftSize samples
+// (getFloatTimeDomainData) windowed and transformed here, with the analyser's own smoothing over time
+// (|X| averaged with the previous frame by `smoothing`), in dB of |X| / N like getFloatFrequencyData.
+export class WindowedSpectrum {
+  constructor(fftSize, window, smoothing = 0.5) {
+    this.n = fftSize;
+    this.win = windowOf(window, fftSize);
+    this.smoothing = smoothing;
+    this.time = new Float32Array(fftSize);
+    this.re = new Float64Array(fftSize);
+    this.im = new Float64Array(fftSize);
+    this.mag = new Float64Array(fftSize / 2); // smoothed |X| / N
+  }
+
+  // samples: fftSize time-domain samples, oldest first. Writes dB per bin into out.
+  run(samples, out) {
+    const { n, win, re, im, mag, smoothing } = this;
+    for (let i = 0; i < n; i++) {
+      re[i] = samples[i] * win[i];
+      im[i] = 0;
+    }
+    fft(re, im);
+    for (let k = 0; k < mag.length; k++) {
+      mag[k] = smoothing * mag[k] + (1 - smoothing) * (Math.hypot(re[k], im[k]) / n);
+      out[k] = mag[k] > 0 ? 20 * Math.log10(mag[k]) : -Infinity;
+    }
+    return out;
+  }
 }
 
 // The meter's level chain run over a whole recording: frequency weighting, Fast (or Slow) detector.

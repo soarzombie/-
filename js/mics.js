@@ -75,3 +75,19 @@ export function calCorrection(points) {
     return -(points[i - 1][1] + t * (points[i][1] - points[i - 1][1]));
   };
 }
+
+// How steady the sound was during a calibration: the spread of the time-weighted levels (dB, one per
+// 50 ms block after the warm-up). A calibrator's tone should hold within a few tenths of a dB; a source
+// read against a reference meter may move more, as both instruments average the same seconds.
+// Returns { sd, range, grade: 'good' | 'fair' | 'poor' } or null for too few levels.
+export const STABILITY_LIMITS = { meter: [1, 2], calibrator: [0.3, 1] };
+
+export function calStability(levels, mode = 'meter') {
+  const v = levels.filter(Number.isFinite);
+  if (v.length < 10) return null;
+  const mean = v.reduce((s, x) => s + x, 0) / v.length;
+  const sd = Math.sqrt(v.reduce((s, x) => s + (x - mean) ** 2, 0) / v.length);
+  const range = Math.max(...v) - Math.min(...v);
+  const [good, fair] = STABILITY_LIMITS[mode] || STABILITY_LIMITS.meter;
+  return { sd, range, grade: sd <= good ? 'good' : sd <= fair ? 'fair' : 'poor' };
+}

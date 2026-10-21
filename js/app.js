@@ -3,14 +3,15 @@
 
 import { APP_VERSION, getSettings, saveSettings, rememberVehicle } from './settings.js';
 import { PRESETS, CUSTOM, presetOf, choosePreset, customize } from './presets.js';
-import { micProfile, saveMicProfile, parseCalFile, calCorrection } from './mics.js';
+import { micProfile, saveMicProfile, parseCalFile, calCorrection, calStability } from './mics.js';
 import { trackSpeed, STALE_SEC } from './gps.js';
 import { backupBlob, readBackup, importPlan } from './backup.js';
+import { ScreenVideo, videoType, videoExt, MAX_VIDEO_SEC } from './video.js';
 import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
-import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds } from './dsp.js';
+import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds, FFT_WINDOWS } from './dsp.js';
 import * as store from './store.js';
 import { esc, fmtDb, fmtHz, fmtClock, fmtDate, fmtDay, fmtShortDate, fmtTime, fmtWhen, fileStamp, speedText } from './format.js';
-import { SpectrumView, curveLook, checkFreqRange, checkDbRange, setChartTheme, FMIN, FMAX } from './spectrum.js';
+import { SpectrumView, curveLook, checkFreqRange, checkDbRange, setChartTheme, sideways, FMIN, FMAX } from './spectrum.js';
 import { SpectrogramView } from './spectrogram.js';
 import { encodeWav, decodeAudioFile } from './audio.js';
 import { analyzeSound, frameAt } from './analysis.js';
@@ -36,6 +37,8 @@ const ICON = {
   info: svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><circle class="fill" cx="12" cy="7.8" r="1.2"/>'),
   chevron: svg('<path d="M7 10l5 5 5-5"/>'),
   axes: svg('<path d="M4 4v16h16"/><path d="M8 8h3M8 12h6M8 16h9"/>'),
+  rotate: svg('<rect x="2.5" y="8" width="13" height="9" rx="2"/><path d="M12.5 3.5a7 7 0 0 1 8 7.5"/><path d="M18.5 9.5l2 1.5 1.5-2"/>'),
+  video: svg('<rect x="2.5" y="6.5" width="13" height="11" rx="2.5"/><path d="M15.5 10.5l6-3.5v10l-6-3.5z"/>'),
   timer: svg('<circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4l2.6 2M9.5 3h5M12 3v2.5"/>'),
   sliders: svg('<path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17" r="2"/>'),
 };
@@ -113,10 +116,11 @@ function openMenu(anchor, html, onClose = null, className = '') {
   menu.setAttribute('role', 'menu');
   menu.innerHTML = html;
   document.body.append(layer, menu);
-  const a = anchor.getBoundingClientRect();
-  const m = menu.getBoundingClientRect();
-  menu.style.left = `${Math.max(8, Math.min(a.right - m.width, window.innerWidth - m.width - 8))}px`;
-  menu.style.top = `${Math.max(8, Math.min(a.bottom + 6, window.innerHeight - m.height - 8))}px`;
+  // in the page's own coordinates, which are not the screen's when the analyzer is turned sideways
+  const a = pageRect(anchor);
+  const [vw, vh] = sideways() ? [document.body.clientWidth, document.body.clientHeight] : [window.innerWidth, window.innerHeight];
+  menu.style.left = `${Math.max(8, Math.min(a.right - menu.offsetWidth, vw - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(a.bottom + 6, vh - menu.offsetHeight - 8))}px`;
   const onKey = (e) => e.key === 'Escape' && close();
   const close = () => {
     if (!menu.isConnected) return;
@@ -130,6 +134,69 @@ function openMenu(anchor, html, onClose = null, className = '') {
   layer.addEventListener('click', close); // the whole tap lands on the layer, not on what is under it
   anchor.setAttribute('aria-expanded', 'true');
   return { menu, close };
+}
+
+// An element's box in page coordinates. Turned sideways, the page is rotated a quarter turn clockwise
+// about the screen's top right, so a screen point (x, y) is the page point (y, screen width - x).
+function pageRect(el) {
+  const r = el.getBoundingClientRect();
+  if (!sideways()) return r;
+  const W = window.innerWidth;
+  return { left: r.top, right: r.bottom, top: W - r.right, bottom: W - r.left, width: r.height, height: r.width };
+}
+
+// Landscape layout (data-layout on <html>, used by the analyzer's CSS): a landscape screen, the screen
+// locked to landscape by the 가로 button (Android, in full screen: data-lock), or, where it cannot be
+// locked (iPhone), the analyzer page turned sideways in CSS (data-rotate).
+const html = document.documentElement;
+const LANDSCAPE = window.matchMedia?.('(orientation: landscape) and (min-width: 600px)');
+
+function updateLayout() {
+  const forced = html.dataset.rotate === 'on' || html.dataset.lock === 'on';
+  html.dataset.layout = LANDSCAPE?.matches || html.dataset.rotate === 'on' ? 'landscape' : 'portrait';
+  const btn = document.querySelector('[data-act=rotate]');
+  if (btn) {
+    btn.querySelector('span').textContent = forced ? '세로' : '가로';
+    btn.setAttribute('aria-label', forced ? '세로 화면으로' : '가로 화면으로');
+  }
+}
+
+LANDSCAPE?.addEventListener?.('change', () => {
+  if (LANDSCAPE.matches) html.dataset.rotate = 'off'; // the phone turned by itself: no need to turn the page
+  updateLayout();
+});
+document.addEventListener('fullscreenchange', () => {
+  if (document.fullscreenElement || html.dataset.lock !== 'on') return;
+  html.dataset.lock = 'off'; // full screen left (back button): the lock went with it
+  updateLayout();
+});
+
+async function toggleLandscape() {
+  if (html.dataset.rotate === 'on') {
+    html.dataset.rotate = 'off';
+    return updateLayout();
+  }
+  if (html.dataset.lock === 'on') {
+    html.dataset.lock = 'off';
+    window.screen.orientation?.unlock?.();
+    if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
+    return updateLayout();
+  }
+  try {
+    if (!window.screen.orientation?.lock || !html.requestFullscreen) throw new Error('no lock');
+    if (!document.fullscreenElement) await html.requestFullscreen({ navigationUI: 'hide' });
+    await window.screen.orientation.lock('landscape');
+    // a lock that does not turn the screen (some browsers and emulators) counts as no lock
+    for (let t = 0; t < 10 && window.innerWidth <= window.innerHeight; t++) await sleep(100);
+    if (window.innerWidth <= window.innerHeight) throw new Error('not turned');
+    html.dataset.lock = 'on';
+    return updateLayout();
+  } catch {
+    window.screen.orientation?.unlock?.();
+    if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
+  }
+  html.dataset.rotate = 'on';
+  updateLayout();
 }
 
 // 'dark' | 'light' (the bright screen for sunlight): page colours and chart colours.
@@ -190,7 +257,6 @@ async function micPermission() {
   }
 }
 
-// One-line cursor read-out: "A 1,250 Hz 62.3  B 125 Hz 47.6  B−A −14.7 dB" (levels in dB(A)).
 // A saved record as a comparison reference: its average spectrum (a measurement's average since reset,
 // a file's overall average; older measurements only have the moment of saving).
 function refCurve(rec) {
@@ -210,13 +276,14 @@ function refCurve(rec) {
 
 const signed = (d) => `${d >= 0 ? '+' : '−'}${fmtDb(Math.abs(d))}`;
 
-function cursorText(values) {
-  const parts = values.map((v, i) => `<span><b>${'AB'[i]}</b> ${fmtHz(v.hz)} <em>${fmtDb(v.cur)}</em>${Number.isFinite(v.ref) && Number.isFinite(v.cur) ? ` <i class="cr-ref">기준 ${fmtDb(v.ref)} (${signed(v.cur - v.ref)})</i>` : ''}</span>`);
-  if (values.length === 2) {
-    const d = values[1].cur - values[0].cur;
-    parts.push(`<span class="cr-diff">B−A ${d >= 0 ? '+' : ''}${fmtDb(d)} dB</span>`);
-  }
-  return parts.join('');
+// One-line cursor read-out: "1,250 Hz  ▬ 지금 62.3  ▬ 최대 68.1" (each level with its curve's swatch),
+// and the reference when one is shown.
+function cursorText([v]) {
+  const look = curveLook(v.style);
+  const level = (key, cls) =>
+    Number.isFinite(v[key]) ? `<span class="${cls}"><i class="sw sw-${look[key][1]}" style="--c:${look[key][0]}" aria-hidden="true"></i>${v.labels[key]} <em>${fmtDb(v[key])}</em></span>` : '';
+  const ref = Number.isFinite(v.ref) && Number.isFinite(v.cur) ? `<span class="cr-ref">기준 ${fmtDb(v.ref)} (${signed(v.cur - v.ref)})</span>` : '';
+  return `<span class="cr-hz">${fmtHz(v.hz)}</span>${level('cur', 'cr-cur')}${level('max', 'cr-max')}${ref}`;
 }
 
 function bindCursorReadout(el) {
@@ -340,14 +407,17 @@ function helpSheet() {
         <dt>큰 숫자</dt><dd>지금 소음 크기입니다. 숫자 옆 Fast(0.125초)는 빠른 변화를 따라가고, Slow(1초)는 덜 흔들려 읽기 쉽습니다. 설정에서 바꿉니다. 색 막대는 초록 → 노랑 → 빨강, 빨강은 경고 기준 ${s.alertLevel} dB 이상입니다. 밝은 칸 하나는 최대값입니다.</dd>
         <dt>최소·평균·최대</dt><dd>측정을 시작하거나 ↻ 초기화를 누른 뒤의 값입니다. 평균은 에너지 평균(Leq)입니다.</dd>
         <dt>A · C · Z</dt><dd>주파수 가중치. <b>A</b> 보통 소음(사람 귀에 가깝게) · <b>C</b> 엔진·부밍음처럼 저음이 큰 소리 · <b>Z</b> 거르지 않은 소리. 그래프 오른쪽 위 설정 버튼에서 바꿉니다.</dd>
-        <dt>주파수 그래프</dt><dd>위쪽 큰 그래프. 가로는 주파수(20 Hz – 20 kHz), 세로는 dB입니다. 누르면 십자선 커서가 그 주파수의 값을 보여 주고, 한 번 더 누르면 커서 B로 두 곳을 비교합니다. 끌어서 옮기고 × 로 지웁니다. 두 손가락으로 벌리거나 좁히면 주파수 범위가 바뀌고, "전체 보기"로 돌아갑니다.</dd>
+        <dt>주파수 그래프</dt><dd>위쪽 큰 그래프. 가로는 주파수(20 Hz – 20 kHz), 세로는 dB입니다. 누르면 커서가 그 주파수의 <b>지금 값</b>(파란 선)과 <b>최대값</b>(빨간 선)을 함께 보여 줍니다. 다른 곳을 누르거나 끌어서 옮기고 × 로 지웁니다. 두 손가락으로 벌리거나 좁히면 주파수 범위가 바뀌고, "전체 보기"로 돌아갑니다.</dd>
         <dt>⚙ 차트 메뉴</dt><dd>그래프 오른쪽 위 버튼. 차트 스타일(면 · 선 · 막대), <b>최대값 추적</b>·<b>최소값 추적</b>(최근 큰·작은 값을 따라가다 초당 12 dB씩 돌아오는 점선), <b>피크 홀드</b>(초기화 뒤 가장 큰 값), <b>미니멈 홀드</b>(초기화 뒤 가장 작은 값, 주황), 홀드 재설정(이 선들만 새로 시작), 축 범위, <b>측정 · 그래프 설정</b>(마이크, 가중치, Fast/Slow, 정해진 시간, 속도, 시간축 길이, FFT, 화면 밝기 — 햇빛 아래에서는 "밝게").</dd>
         <dt>축 범위</dt><dd>차트 메뉴의 "축 범위"에서 주파수 범위(전체 · 저음 · 중음 · 고음 또는 직접 입력)와 각 그래프의 dB 범위(자동 / 직접)를 정합니다. "처음대로"로 되돌립니다.</dd>
         <dt>시간축 그래프</dt><dd>아래쪽 작은 그래프. 가로는 측정 시간, 세로는 dB(큰 숫자와 같은 값), 점선은 평균입니다. 보이는 시간(30초 · 1분 · 5분)은 그래프 설정에서 바꿉니다.</dd>
+        <dt>가로 · 세로</dt><dd>보기 버튼 오른쪽 <b>가로</b>를 누르면 가로 화면이 됩니다(휴대폰 위쪽이 왼쪽으로 가게 돌려 잡으세요). 아이폰처럼 화면 방향을 고정할 수 없는 휴대폰에서는 화면을 돌려서 보여 줍니다. <b>세로</b>를 누르면 돌아옵니다. 휴대폰 자동 회전이 켜져 있으면 그냥 돌려도 됩니다.</dd>
         <dt>보기</dt><dd>${MODES.map((m) => m.label).join(' · ')}. 맨 위 버튼으로 바꿉니다.</dd>
         <dt>● 녹음</dt><dd>측정 버튼과 따로 움직입니다. 누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 그래프 위 빨간 시계가 녹음 길이), 측정을 일시정지해도 녹음은 계속됩니다. 정지해도 측정은 그대로 이어지고, 녹음은 파일 탭에 들어가 "분석 보기"로 바로 열 수 있습니다.</dd>
         <dt>▶ ⏸ 측정</dt><dd>측정 시작과 일시정지(화면과 값 고정). 녹음에는 영향을 주지 않습니다.</dd>
         <dt>마이크</dt><dd>평소에는 휴대폰 마이크로 잽니다. 외부 측정 마이크(iMM-6C 등)는 꽂은 뒤 그래프 설정의 "마이크"에서 고르면 되고, 쓰는 동안 이름이 화면 위에 보입니다. 외부 마이크는 설정 → 마이크 보정에서 따로 보정하고, 함께 받은 보정 파일을 넣으면 저음·고음 오차도 바로잡습니다.</dd>
+        <dt>🎥 영상</dt><dd>녹음 버튼 옆 <b>영상</b>을 누르면 화면의 값과 그래프를 소리와 함께 영상 파일로 녹화합니다(최대 ${MAX_VIDEO_SEC / 60}분). 한 번 더 누르면 멈추고 "보내기"로 카톡·메일에 보냅니다.</dd>
+        <dt>오디오 세부정보</dt><dd>차트 메뉴 맨 아래. 쓰는 마이크, 보정값, 샘플링 레이트, 지연, 브라우저가 소리 처리(에코·잡음 제거, 자동 음량)를 껐는지 보여 줍니다. 값이 이상할 때 먼저 보세요.</dd>
         <dt>⏱ 정해진 시간 측정</dt><dd>누르면 처음부터 ${s.timedSec}초(그래프 설정에서 5초 · 10초 · 30초 · 1분)만큼 재고 저절로 멈춘 뒤 저장 창을 엽니다. 버튼 둘레가 차오르고, 다시 누르거나 일시정지하면 취소됩니다.</dd>
         <dt>속도 (GPS)</dt><dd>그래프 설정에서 켜면 차 속도가 그래프 위(노란 숫자)와 시간축 그래프(노란 선)에 나오고, 저장 기록에 평균·최고 속도가 남습니다. 위치 자체는 저장하지 않습니다.</dd>
         <dt>전후 비교</dt><dd>기록 화면의 "실시간과 비교"를 누르면 그 기록의 평균 스펙트럼이 보라 점선(기준)으로 실시간 그래프에 겹쳐지고, 평균 차이가 함께 나옵니다. "다른 기록과 비교"는 기록끼리 겹쳐 봅니다.</dd>
@@ -362,9 +432,12 @@ async function renderAnalyzer() {
   if (!MODES.some((m) => m.id === getSettings().view)) saveSettings({ view: 'spectrum' }); // e.g. the old gauge or "both" view
   const s = getSettings();
   view.innerHTML = `
-    <section class="analyzer" data-state="off" data-rec="off" data-timed="off">
-      <div class="an-modes" role="group" aria-label="보기">
-        ${MODES.map((m) => `<button type="button" class="mode" data-mode="${m.id}" aria-label="${m.label}" aria-pressed="${s.view === m.id}">${m.icon}</button>`).join('')}
+    <section class="analyzer" data-state="off" data-rec="off" data-timed="off" data-video="off">
+      <div class="an-top">
+        <div class="an-modes" role="group" aria-label="보기">
+          ${MODES.map((m) => `<button type="button" class="mode" data-mode="${m.id}" aria-label="${m.label}" aria-pressed="${s.view === m.id}">${m.icon}</button>`).join('')}
+        </div>
+        <button type="button" class="an-rotate" data-act="rotate" aria-label="가로 화면으로">${ICON.rotate}<span>가로</span></button>
       </div>
       <div class="an-sub">
         <button type="button" class="an-preset" id="a-preset" aria-haspopup="menu" aria-expanded="false" aria-label="측정 상황: ${presetOf(s.preset).name}"><span>${presetOf(s.preset).name}</span>${ICON.chevron}</button>
@@ -386,6 +459,7 @@ async function renderAnalyzer() {
         <div class="trace-plot" id="a-trace"></div>
         <div class="chart-tools">
           <p class="rec-badge" id="a-rec-badge" hidden><i></i>녹음 <b id="a-rec-time">00:00</b></p>
+          <p class="rec-badge video-badge" id="a-video-badge" hidden><i></i>영상 <b id="a-video-time">00:00</b></p>
           <button type="button" class="zoom-chip" data-act="zoom-reset" id="a-zoom" hidden>전체 보기</button>
           <p class="speed-badge" id="a-speed" hidden>– km/h</p>
           <p class="ref-chip" id="a-ref" hidden><i aria-hidden="true"></i><span id="a-ref-name"></span><b id="a-ref-diff"></b><button type="button" class="ref-close" data-act="ref-off" aria-label="기준 비교 끄기">×</button></p>
@@ -401,6 +475,7 @@ async function renderAnalyzer() {
       <div class="an-controls">
         <div class="ctl-group rec-group" role="group" aria-label="녹음">
           <button type="button" class="ctl ctl-rec" data-act="rec" aria-label="녹음 시작"><i class="rec-mark"></i><span class="ctl-cap" id="a-rec-cap">녹음</span></button>
+          ${videoType() == null ? '' : `<button type="button" class="ctl ctl-video" data-act="video" aria-label="영상 녹화">${ICON.video}<span class="ctl-cap" id="a-video-cap">영상</span></button>`}
         </div>
         <div class="ctl-group run-group" role="group" aria-label="측정">
           <button type="button" class="ctl ctl-timed" data-act="timed" aria-label="${s.timedSec}초 측정">${ICON.timer}<span class="ctl-cap" id="a-timed-cap">${s.timedSec}초 측정</span></button>
@@ -674,7 +749,7 @@ async function renderAnalyzer() {
       return true;
     }
     const st = getSettings();
-    meter = new Meter(st.offset, st.weighting, st.timeWeighting);
+    meter = new Meter(st.offset, st.weighting, st.timeWeighting, st.window);
     try {
       // the sound buffer also holds a whole timed measurement (up to a minute)
       await meter.start(st.view === 'octave' ? OCTAVE_FFT : st.fftSize, st.audioSec > 0 ? Math.max(st.audioSec, ...TIMED_SECS) : 0, st.micId);
@@ -786,6 +861,7 @@ async function renderAnalyzer() {
     cancelAnimationFrame(raf);
     showTimed(0);
     stopGps();
+    if (video) stopVideo();
     if (meter?.recording) {
       // leaving mid-recording keeps what was recorded, ready in the file tab
       const rate = meter.sampleRate;
@@ -851,7 +927,104 @@ async function renderAnalyzer() {
     holds ||= newHolds(meter.levels.length);
     draw(meter.levels);
     const audio = getSettings().audioSec > 0 ? meter.captureAudio(sec) : Promise.resolve(new Float32Array(0));
-    openSave({ ...snapshot(), timedSec: sec }, audio);
+    if (getSettings().autoSave) saveNow({ ...snapshot(), timedSec: sec }, audio);
+    else openSave({ ...snapshot(), timedSec: sec }, audio);
+  }
+
+  // 바로 저장 (timed measurement with auto-save on): no sheet; the last vehicle number and the sound,
+  // then a message that opens the record to change the memo or vehicle number.
+  async function saveNow(rec, audio) {
+    const st = getSettings();
+    rec.vehicle = st.vehicle || '';
+    const samples = await audio;
+    if (samples.length) {
+      rec.audio = encodeWav(samples, rec.sampleRate);
+      rec.audioSec = round1(samples.length / rec.sampleRate);
+    }
+    await store.putRecord(rec);
+    toast(`${rec.timedSec}초 측정을 저장했습니다${rec.vehicle ? ` (${rec.vehicle})` : ''} · 평균 ${fmtDb(rec.leq)}`, { label: '열기', run: () => (location.hash = `#/record/${encodeURIComponent(rec.id)}`) });
+  }
+
+  // 영상: the readings and the graphs on screen, with the sound, as one video file to send.
+  let video = null;
+  let videoTimer = 0;
+  async function startVideo() {
+    if (video) return stopVideo();
+    if (!(await startMic()) || !meter.running) return;
+    const css = getComputedStyle(html);
+    const v = (name) => css.getPropertyValue(name).trim();
+    try {
+      video = new ScreenVideo({
+        chart: chartBox,
+        audioTrack: meter.stream.getAudioTracks()[0],
+        colors: { bg: v('--bg'), panel: v('--panel'), ink: v('--ink'), sub: v('--ink-2') },
+        readings: () => {
+          const st = getSettings();
+          return {
+            now: $('a-now').textContent,
+            unit: $('a-unit').textContent,
+            tw: $('a-tw').textContent,
+            min: $('a-min').textContent,
+            avg: $('a-leq').textContent,
+            max: $('a-max').textContent,
+            time: `${fmtDate(Date.now())} · 측정 ${$('a-time').textContent}`,
+            extra: [$('a-peak').textContent, !$('a-speed').hidden && $('a-speed').textContent, presetOf(st.preset).name, st.vehicle && `차량 ${st.vehicle}`].filter(Boolean).join(' · '),
+            foot: `${st.company} · 스마트폰 측정 참고값`,
+          };
+        },
+      });
+      video.start();
+    } catch {
+      video = null;
+      return toast('이 브라우저에서는 영상을 녹화할 수 없습니다');
+    }
+    showVideo(true);
+  }
+
+  function showVideo(on) {
+    root.dataset.video = on ? 'on' : 'off';
+    const btn = view.querySelector('[data-act=video]');
+    btn?.setAttribute('aria-label', on ? '영상 정지' : '영상 녹화');
+    if ($('a-video-cap')) $('a-video-cap').textContent = on ? '영상 정지' : '영상';
+    $('a-video-badge').hidden = !on;
+    clearInterval(videoTimer);
+    if (!on) return;
+    $('a-video-time').textContent = '00:00';
+    videoTimer = setInterval(() => {
+      if (!video) return;
+      $('a-video-time').textContent = fmtClock(video.seconds);
+      if (video.seconds >= MAX_VIDEO_SEC) {
+        toast(`영상은 최대 ${MAX_VIDEO_SEC / 60}분입니다`);
+        stopVideo();
+      }
+    }, 250);
+  }
+
+  async function stopVideo() {
+    const v = video;
+    video = null;
+    showVideo(false);
+    if (!v) return;
+    const sec = v.seconds;
+    const blob = await v.stop();
+    if (!blob.size) return toast('영상이 녹화되지 않았습니다');
+    const st = getSettings();
+    const name = `소음영상_${fileStamp(Date.now())}.${videoExt(blob.type)}`;
+    const { dlg, close } = openSheet(`
+      <div class="sheet-form">
+        <h2>영상 녹화 끝</h2>
+        <p>영상 ${fmtClock(sec)} · ${(blob.size / 1048576).toFixed(1)} MB · ${videoExt(blob.type).toUpperCase()}</p>
+        <p class="fine">그래프와 소리가 함께 담겼습니다. 이 창을 닫으면 영상은 남지 않으니, 필요하면 지금 보내거나 저장하세요.</p>
+        <div class="sheet-actions">
+          <button type="button" class="btn btn-quiet" data-close>닫기</button>
+          <button type="button" class="btn btn-primary" data-act="video-send">보내기</button>
+        </div>
+      </div>`);
+    dlg.querySelector('[data-act=video-send]').onclick = async () => {
+      const result = await deliverFile(blob, name, { title: '실시간 소음 분석 영상', text: `[실시간 소음 분석 영상] ${st.company}\n※ 스마트폰 측정 참고값` });
+      if (result === 'downloaded') toast('영상을 저장했습니다');
+      if (result !== 'cancelled') close();
+    };
   }
 
   // Everything needed to look at this moment again later.
@@ -883,6 +1056,7 @@ async function renderAnalyzer() {
       offset: meter.offset,
       weighting: meter.weighting,
       timeWeighting: meter.timeWeighting,
+      window: meter.window,
       unit: meter.unit,
       calibrated: !!micProf?.calibratedAt,
       mic: meter.inputLabel,
@@ -953,11 +1127,13 @@ async function renderAnalyzer() {
         ${segRow('weighting', '주파수 가중치', WEIGHTINGS.map((w) => [w, `${w}특성`]), st.weighting, `<span id="f-weight-note">${WEIGHT_NOTE[st.weighting]}</span> 바꾸면 최소·평균·최대가 새로 시작합니다.`)}
         ${segRow('timeWeighting', '시간 가중 (큰 숫자)', [['F', 'Fast 0.125초'], ['S', 'Slow 1초']], st.timeWeighting, 'Slow는 숫자가 덜 흔들려 읽기 쉽습니다. 바꾸면 최소·평균·최대가 새로 시작합니다.')}
         ${segRow('timed', '정해진 시간 측정 (⏱ 버튼)', TIMED_SECS.map((n) => [n, n < 60 ? `${n}초` : '1분']), st.timedSec, '누르면 처음부터 이 시간만큼 재고 멈춘 뒤 저장 창을 엽니다.')}
+        ${segRow('autoSave', '정해진 시간 측정이 끝나면', [['off', '저장 창 열기'], ['on', '바로 저장']], st.autoSave ? 'on' : 'off', '바로 저장은 마지막 차량번호로 소리와 함께 저장하고, 알림의 "열기"로 메모를 고칠 수 있습니다. 여러 대를 이어서 잴 때 빠릅니다.')}
         ${segRow('gps', '속도 (GPS)', [['off', '끔'], ['on', '켬']], st.gps ? 'on' : 'off', '켜면 위치 권한을 묻고, 차 속도를 그래프 위와 시간축 그래프(노란 선), 저장 기록에 함께 남깁니다. 위치는 저장하지 않습니다.')}
         <h3 class="sheet-sub">그래프</h3>
         ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
         ${segRow('fft', 'FFT 크기', FFT_SIZES.map((n) => [n, n]), st.fftSize, '클수록 주파수를 잘게 나누지만 반응이 느려집니다. 1/3 옥타브 보기는 늘 32768로 계산합니다.')}
         ${segRow('scale', '주파수 축', [['log', '로그'], ['linear', '선형']], st.scale, '주파수 그래프를 두 손가락으로 벌리거나 좁혀도 범위가 바뀝니다.')}
+        ${segRow('window', '창 함수', Object.entries(FFT_WINDOWS).map(([k, w]) => [k, w.name]), st.window, 'Blackman(기본): 새어 나가는 성분이 가장 적어 큰 소리 옆의 작은 성분까지 보입니다(봉우리는 조금 넓음). Hanning: 봉우리가 좁아 가까운 두 주파수를 가르기 좋은 일반 분석용. Hamming: 봉우리 바로 옆은 깨끗하지만 멀리까지 조금씩 새어 바닥이 높아 보일 수 있습니다. 큰 숫자(전체 dB)는 바뀌지 않습니다.')}
         ${segRow('theme', '화면 밝기', [['dark', '어둡게'], ['light', '밝게 (햇빛 아래)']], st.theme)}
         <button type="button" class="btn btn-wide" data-close>닫기</button>
       </div>`);
@@ -985,9 +1161,59 @@ async function renderAnalyzer() {
     };
     bindSegs(dlg, (key, v) => {
       const numeric = { trace: 'traceSec', fft: 'fftSize', timed: 'timedSec' };
-      change(key === 'gps' ? { gps: v === 'on' } : numeric[key] ? { [numeric[key]]: Number(v) } : { [key]: v });
+      change(key === 'gps' || key === 'autoSave' ? { [key]: v === 'on' } : numeric[key] ? { [numeric[key]]: Number(v) } : { [key]: v });
       if (key === 'weighting') dlg.querySelector('#f-weight-note').textContent = WEIGHT_NOTE[v];
     });
+  }
+
+  // "오디오 세부정보": what is being measured with, as the browser reports it, for finding out why a
+  // reading looks wrong (another microphone, sound processing left on, no calibration ...).
+  function detailsSheet() {
+    const st = getSettings();
+    const t = meter?.trackSettings || {};
+    const ctx = meter?.ctx;
+    const ms = (sec) => (Number.isFinite(sec) && sec > 0 ? `${(sec * 1000).toFixed(1)} ms` : '알 수 없음');
+    const proc = (v) => (v === true ? '<b class="warn">켜짐 ⚠</b>' : v === false ? '꺼짐' : '알 수 없음');
+    const prof = micProf || micProfile(st, st.lastMic);
+    const row = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
+    const on = !!meter;
+    openSheet(`
+      <div class="sheet-form details">
+        <h2>오디오 세부정보</h2>
+        ${on ? '' : '<p class="fine">측정을 시작하면 마이크와 오디오 값이 나옵니다.</p>'}
+        <h3 class="sheet-sub">마이크</h3>
+        <dl class="meta">
+          ${row('입력', esc(micName(meter?.inputLabel || st.lastMic)))}
+          ${row('보정값', `${prof.offset} dB · ${prof.calibratedAt ? `${fmtShortDate(prof.calibratedAt)} 보정` : '<b class="warn">보정 안 됨</b>'}`)}
+          ${row('보정 파일', prof.cal ? esc(calFileState(prof)) : '없음')}
+        </dl>
+        <h3 class="sheet-sub">측정 설정</h3>
+        <dl class="meta">
+          ${row('주파수 가중치', `${st.weighting}특성 (${unitOf(st.weighting)})`)}
+          ${row('시간 가중', `${TW_NAME[st.timeWeighting]} (${st.timeWeighting === 'S' ? '1초' : '0.125초'})`)}
+          ${row('FFT 크기', on ? `${meter.analyser.fftSize} (칸 ${meter.binHz.toFixed(2)} Hz)` : st.fftSize)}
+          ${row('창 함수', `${FFT_WINDOWS[st.window]?.name || 'Blackman'} (${(meter?.window || st.window) === 'blackman' ? '브라우저 분석기' : '앱에서 계산'})`)}
+          ${row('저장할 때 남길 소리', st.audioSec ? `${st.audioSec}초` : '남기지 않음')}
+        </dl>
+        <h3 class="sheet-sub">오디오</h3>
+        <dl class="meta">
+          ${row('샘플링 레이트', on ? `${ctx.sampleRate} Hz` : '-')}
+          ${row('채널', on && t.channelCount ? `${t.channelCount}` : on ? '1 (모노로 분석)' : '-')}
+          ${row('입력 지연', on ? ms(t.latency) : '-')}
+          ${row('처리 지연', on ? ms(ctx.baseLatency) : '-')}
+          ${row('에코 제거', on ? proc(t.echoCancellation) : '-')}
+          ${row('잡음 제거', on ? proc(t.noiseSuppression) : '-')}
+          ${row('자동 음량 조절', on ? proc(t.autoGainControl) : '-')}
+        </dl>
+        ${on && [t.echoCancellation, t.noiseSuppression, t.autoGainControl].includes(true) ? '<p class="alert">브라우저가 소리 처리를 끄지 않았습니다. 값이 실제와 다를 수 있으니 다른 브라우저(크롬·사파리 최신)로 열어 보세요.</p>' : ''}
+        <h3 class="sheet-sub">앱</h3>
+        <dl class="meta">
+          ${row('버전', `v${APP_VERSION}`)}
+          ${row('화면', `${html.dataset.layout === 'landscape' ? '가로' : '세로'}${html.dataset.rotate === 'on' ? ' (돌려 보기)' : html.dataset.lock === 'on' ? ' (가로 고정)' : ''} · ${st.theme === 'light' ? '밝게' : '어둡게'}`)}
+        </dl>
+        <p class="fine">스마트폰 측정값은 참고값입니다.</p>
+        <button type="button" class="btn btn-wide" data-close>닫기</button>
+      </div>`);
   }
 
   // Settings changed (by hand, from a menu, or by a measurement situation): the live view follows.
@@ -1005,6 +1231,11 @@ async function renderAnalyzer() {
       clearReadings();
     }
     if (st.fftSize !== prev.fftSize) applyFft();
+    if (st.window !== prev.window && meter) {
+      meter.setWindow(st.window);
+      resetDisplays();
+      holdFrom = performance.now() + 400;
+    }
     if (st.timedSec !== prev.timedSec && !meter?.timed) showTimed(0);
     if (st.theme !== prev.theme) {
       applyTheme(st.theme);
@@ -1158,6 +1389,7 @@ async function renderAnalyzer() {
           <button type="button" role="menuitem" data-act="hold-reset">${ICON.reset}홀드 재설정</button>
           <button type="button" role="menuitem" data-act="ranges">${ICON.axes}축 범위</button>
           <button type="button" role="menuitem" data-act="more">${ICON.sliders}<span class="mi-text">측정 · 그래프 설정<small>마이크 · 가중치 · 정해진 시간 · 속도 · FFT · 화면 밝기</small></span></button>
+          <button type="button" role="menuitem" data-act="details">${ICON.info}오디오 세부정보</button>
         </div>`;
     };
     menu = openMenu(anchor, html(), () => (menu = null), 'menu-chart');
@@ -1176,6 +1408,9 @@ async function renderAnalyzer() {
       } else if (b.dataset.act === 'ranges') {
         menu.close();
         rangeSheet();
+      } else if (b.dataset.act === 'details') {
+        menu.close();
+        detailsSheet();
       }
       if (menu) menu.menu.innerHTML = html(); // ticks and colour swatches follow the choice
       if (meter?.paused && holds) draw(meter.levels);
@@ -1206,6 +1441,7 @@ async function renderAnalyzer() {
     showRunning(meter.paused);
   };
   timedBtn.onclick = () => (meter?.timed ? cancelTimed() : startTimed());
+  view.querySelector('[data-act=video]')?.addEventListener('click', () => startVideo());
   // Recording is separate from measuring: it does not resume a paused measurement, pausing does not
   // stop it, and stopping it leaves the measurement running. It only turns the microphone on if needed.
   recBtn.onclick = async () => {
@@ -1227,6 +1463,8 @@ async function renderAnalyzer() {
     openSave(snapshot(), audio);
   };
   view.querySelector('[data-act=help]').onclick = helpSheet;
+  view.querySelector('[data-act=rotate]').onclick = toggleLandscape;
+  updateLayout();
   view.querySelector('[data-act=ref-off]').onclick = refOff;
   $('a-zoom').hidden = s.freqMin === FMIN && s.freqMax === FMAX;
   $('a-zoom').onclick = () => change({ freqMin: FMIN, freqMax: FMAX });
@@ -1316,6 +1554,7 @@ async function renderFile() {
     const a = analyzeSound(decoded.samples, decoded.rate, calibrated ? prof.offset : 0, {
       weighting: st.weighting,
       timeWeighting: st.timeWeighting,
+      window: st.window,
       correction: calibrated ? calCorrection(prof.cal) : null,
     });
     const range = rangeFor(a.max);
@@ -1389,7 +1628,7 @@ async function renderFile() {
       const t = player.currentTime;
       chart.update(
         { freqs: a.freqs, cur: atPosition ? frameAt(a, t) : a.avg, max: a.max, min: st2.minHold ? a.min : null, peaks: atPosition ? [] : a.peaks },
-        { scale: st2.scale, fmin: st2.freqMin, fmax: st2.freqMax, style: st2.style, range: st2.specDb || range, unit },
+        { scale: st2.scale, fmin: st2.freqMin, fmax: st2.freqMax, style: st2.style, range: st2.specDb || range, unit, cursorLabels: { cur: atPosition ? '재생 위치' : '평균', max: '최대' } },
       );
       $('fa-legend').innerHTML = legendHtml(st2.style, [
         ['cur', atPosition ? `재생 위치 ${fmtClock(t)}` : '전체 평균'],
@@ -1469,6 +1708,7 @@ async function renderFile() {
           range,
         },
         fftSize: 4096,
+        window: a.window,
         sampleRate: decoded.rate,
         offset: a.offset,
         weighting: a.weighting,
@@ -1680,7 +1920,7 @@ async function renderRecord(id) {
             ${fromFile ? `<dt>파일</dt><dd>${esc(rec.fileName)}</dd>` : `<dt>저장 순간</dt><dd>${fmtDb(rec.laf)} ${unit}</dd>`}
             ${'speedAvg' in rec || 'speed' in rec ? `<dt>속도</dt><dd>${speedText(rec)}</dd>` : ''}
             ${rec.device ? `<dt>휴대폰</dt><dd>${esc(rec.device)}${rec.importedAt ? ` <small>(${fmtShortDate(rec.importedAt)} 백업에서 넣음)</small>` : ''}</dd>` : ''}
-            <dt>분석 설정</dt><dd>${rec.weighting || 'A'}특성 · ${TW_NAME[rec.timeWeighting || 'F']} · FFT ${rec.fftSize} · ${unit.startsWith('dBFS') ? '파일 디지털 레벨(dBFS) 기준' : `${esc(micName(rec.mic))} ${rec.calibrated ? '보정됨' : '보정 안 됨 (참고값)'}${rec.micCal ? ' · 보정 파일' : ''}`}</dd>
+            <dt>분석 설정</dt><dd>${rec.weighting || 'A'}특성 · ${TW_NAME[rec.timeWeighting || 'F']} · FFT ${rec.fftSize} · ${FFT_WINDOWS[rec.window || 'blackman']?.name || 'Blackman'} 창 · ${unit.startsWith('dBFS') ? '파일 디지털 레벨(dBFS) 기준' : `${esc(micName(rec.mic))} ${rec.calibrated ? '보정됨' : '보정 안 됨 (참고값)'}${rec.micCal ? ' · 보정 파일' : ''}`}</dd>
           </dl>
         </section>
       </div>
@@ -1703,7 +1943,7 @@ async function renderRecord(id) {
     min: sp.min ? Float32Array.from(sp.min) : null,
     peaks: rec.peaks,
   };
-  const recOpts = { scale: 'log', style: s.style, range: sp.range, unit };
+  const recOpts = { scale: 'log', style: s.style, range: sp.range, unit, cursorLabels: { cur: fromFile ? '평균' : '저장 순간', max: '최대' } };
   chart.update(recData, recOpts);
 
   // Comparison with another record: its average spectrum dashed over this one, and the two averages.
@@ -1768,6 +2008,7 @@ async function renderRecord(id) {
         const a = analyzeSound(samples, rate, rec.offset ?? s.offset, {
           weighting: rec.weighting || 'A',
           timeWeighting: rec.timeWeighting || 'F',
+          window: rec.window || 'blackman',
           correction: rec.micCal ? calCorrection(micProfile(s, rec.mic).cal) : null,
         });
         gram?.setStatic(a.frames, a.freqs, a.duration, { labels: fromFile ? 'absolute' : 'relative', unit });
@@ -1902,17 +2143,26 @@ async function renderSettings() {
             <select id="f-cal-mic"><option value="">휴대폰 기본 마이크</option></select></label>
           <p><strong id="cal-mic">${esc(micName(calTarget))}</strong> · 보정값 <strong id="cal-offset">${calProf.offset} dB</strong> · <span id="cal-date">${calDate(calProf)}</span></p>
           <p class="fine">휴대폰·마이크마다 감도가 달라 하나씩 보정해야 값이 맞습니다. 평소에는 휴대폰 마이크로 재고, 외부 측정 마이크(iMM-6C 등)는 꽂은 뒤 위에서 골라 따로 보정합니다.</p>
-          <ol class="guide">
+          <div class="cal-modes">${segRow('calMode', '기준', [['meter', '기준 소음계'], ['calibrator', '음향 교정기']], 'meter')}</div>
+          <ol class="guide" data-mode="meter">
             <li>정밀 소음계(기준기)와 휴대폰을 나란히 두세요.</li>
             <li>공회전 소리처럼 일정한 소리가 나게 하세요.</li>
             <li>아래 버튼을 누르고, 같은 5초 동안 소음계의 평균값(Leq, A특성)을 읽으세요.</li>
             <li>소음계 값을 입력하고 적용을 누르세요.</li>
           </ol>
+          <ol class="guide" data-mode="calibrator" hidden>
+            <li>음향 교정기(1 kHz, 94 dB 또는 114 dB)를 마이크에 끼우고 켜세요. 외부 측정 마이크에 맞는 어댑터를 쓰세요.</li>
+            <li>교정기 레벨을 고르고 아래 버튼을 누르세요.</li>
+            <li>측정이 끝나면 적용을 누르세요. 1 kHz에서는 A특성이 0 dB라 교정기 값 그대로 맞춥니다.</li>
+          </ol>
+          <div class="cal-ref-pick" data-mode="calibrator" hidden>${segRow('calRef', '교정기 레벨', [['94', '94 dB'], ['114', '114 dB']], '94')}</div>
           <button type="button" class="btn btn-wide" data-act="cal-measure">보정 측정 (5초)</button>
+          <p class="cal-live" id="cal-live" hidden></p>
           <div class="cal-result" id="cal-result" hidden>
-            <p>휴대폰 측정값 <strong id="cal-phone">-</strong> dB(A)</p>
+            <p>휴대폰 측정값 <strong id="cal-phone">-</strong> dB(A) · <span id="cal-stab"></span></p>
+            <p class="alert" id="cal-warn" hidden></p>
             <div class="inline-form">
-              <label class="field field-num"><span>소음계 값</span><input id="f-cal-ref" type="number" inputmode="decimal" step="0.1"></label>
+              <label class="field field-num"><span id="cal-ref-label">소음계 값</span><input id="f-cal-ref" type="number" inputmode="decimal" step="0.1"></label>
               <button type="button" class="btn btn-primary" data-act="cal-apply">적용</button>
             </div>
           </div>
@@ -1984,10 +2234,28 @@ async function renderSettings() {
     showCal();
   };
 
+  // 기준 소음계 (read its Leq over the same 5 s) or 음향 교정기 (a known 1 kHz tone, 94 or 114 dB)
+  let calMode = 'meter';
+  let calRef = 94;
+  const STAB_TEXT = { good: '안정성 좋음', fair: '안정성 보통', poor: '안정성 낮음 ⚠' };
+  const stabText = (st) => (st ? `${STAB_TEXT[st.grade]} (±${st.sd.toFixed(1)} dB)` : '안정성 확인 중');
+  bindSegs(view.querySelector('.cal-modes'), (key, v) => {
+    calMode = v;
+    view.querySelectorAll('[data-mode]').forEach((el) => (el.hidden = el.dataset.mode !== v));
+    $('cal-ref-label').textContent = v === 'calibrator' ? '교정기 값' : '소음계 값';
+    $('cal-result').hidden = true;
+  });
+  bindSegs(view.querySelector('.cal-ref-pick'), (key, v) => {
+    calRef = Number(v);
+    if (calMode === 'calibrator' && !$('cal-result').hidden) $('f-cal-ref').value = calRef;
+  });
+
   view.querySelector('[data-act=cal-measure]').onclick = async (e) => {
     const btn = e.currentTarget;
     btn.disabled = true;
     calMic.disabled = true;
+    $('cal-result').hidden = true;
+    const levels = []; // time-weighted levels after the warm-up, for the stability
     calMeter = new Meter(calProf.offset);
     try {
       await calMeter.start(4096, 0, calDevice);
@@ -2000,6 +2268,12 @@ async function renderSettings() {
         calMic.value = calDevice = '';
         toast('고른 마이크가 없어 휴대폰 기본 마이크를 보정합니다');
       }
+      calMeter.onLevel = (db) => {
+        if (calMeter.warming) return;
+        levels.push(db);
+        $('cal-live').hidden = false;
+        $('cal-live').textContent = `지금 ${fmtDb(db)} dB(A) · ${stabText(calStability(levels, calMode))}`;
+      };
       if (!calMeter.running) await calMeter.wake();
       const until = Date.now() + 12000;
       while (calMeter.elapsed < 5) {
@@ -2008,9 +2282,25 @@ async function renderSettings() {
         await sleep(100);
       }
       calPhone = calMeter.leq;
+      const stab = calStability(levels, calMode);
+      // a calibrator plays 1 kHz: check that this is what the microphone hears
+      const spec = calMeter.spectrum();
+      let top = 1;
+      for (let k = 2; k < spec.length; k++) if (spec[k] > spec[top]) top = k;
+      const toneHz = calMeter.freqs[top];
+      const warn = [
+        stab?.grade === 'poor' && '소리가 일정하지 않아 보정이 틀릴 수 있습니다. 조용한 곳에서 다시 재 보세요.',
+        calMode === 'calibrator' && Math.abs(Math.log2(toneHz / 1000)) > 0.15 && `가장 큰 소리가 ${fmtHz(toneHz)}입니다. 교정기(1 kHz)가 마이크에 제대로 끼워졌는지 확인하세요.`,
+      ].filter(Boolean);
       $('cal-phone').textContent = fmtDb(calPhone);
+      $('cal-stab').textContent = stabText(stab);
+      $('cal-stab').className = `stab-${stab?.grade || 'fair'}`;
+      $('cal-warn').textContent = warn.join(' ');
+      $('cal-warn').hidden = !warn.length;
+      $('f-cal-ref').value = calMode === 'calibrator' ? calRef : '';
       $('cal-result').hidden = false;
-      $('f-cal-ref').focus();
+      $('cal-live').hidden = true;
+      if (calMode !== 'calibrator') $('f-cal-ref').focus();
     } catch (err) {
       if (err?.code !== 'cancelled') toast(err.message);
     } finally {
@@ -2023,7 +2313,7 @@ async function renderSettings() {
   };
   view.querySelector('[data-act=cal-apply]').onclick = () => {
     const ref = parseFloat($('f-cal-ref').value);
-    if (!Number.isFinite(ref) || ref < 20 || ref > 140 || !Number.isFinite(calPhone)) return toast('소음계 값을 확인해 주세요');
+    if (!Number.isFinite(ref) || ref < 20 || ref > 140 || !Number.isFinite(calPhone)) return toast(calMode === 'calibrator' ? '교정기 값을 확인해 주세요' : '소음계 값을 확인해 주세요');
     const offset = round1(calProf.offset + (ref - calPhone));
     saveSettings(saveMicProfile(getSettings(), calTarget, { offset, calibratedAt: Date.now() }));
     calProf = micProfile(getSettings(), calTarget);
@@ -2094,6 +2384,7 @@ async function renderSettings() {
 /* ---------- boot ---------- */
 
 applyTheme(getSettings().theme);
+updateLayout();
 window.addEventListener('hashchange', route);
 route();
 

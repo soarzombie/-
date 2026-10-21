@@ -22,7 +22,7 @@ export class OctaveView {
   }
 
   resize() {
-    const r = this.host.getBoundingClientRect();
+    const r = { width: this.host.clientWidth, height: this.host.clientHeight }; // layout size, also when turned sideways
     this.dpr = Math.min(3, window.devicePixelRatio || 1);
     this.w = Math.max(1, Math.floor(r.width));
     this.h = Math.max(1, Math.floor(r.height));

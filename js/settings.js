@@ -1,6 +1,6 @@
 // Per-device settings (kept in localStorage).
 
-export const APP_VERSION = '0.12.0';
+export const APP_VERSION = '0.13.1';
 
 const KEY = 'noise-meter:settings:v1';
 
@@ -13,7 +13,9 @@ const DEFAULTS = {
   traceSec: 30, // seconds shown in the time-axis graph: 30 | 60 | 300
   timedSec: 10, // "N초 측정" button: 5 | 10 | 30 | 60
   gps: false, // 속도 (GPS): show and keep the vehicle speed with the measurement
+  autoSave: false, // a timed measurement saves at once (last vehicle number) instead of opening the save sheet
   theme: 'dark', // 화면 밝기: 'dark' | 'light' (sunlight)
+  window: 'blackman', // FFT 창 함수: 'hann' | 'hamming' | 'blackman' (the analyser's own)
   device: '', // this phone's name, kept with its records and shown on other phones after a backup
   weighting: 'A', // frequency weighting 'A' | 'C' | 'Z', for levels and spectrum alike
   timeWeighting: 'F', // level detector 'F' (Fast 125 ms) | 'S' (Slow 1 s)
