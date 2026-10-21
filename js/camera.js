@@ -31,6 +31,10 @@ export class CameraWindow {
     this.bindDrag();
   }
 
+  get on() {
+    return !!this.stream;
+  }
+
   // Resolves once the camera shows; rejects when it cannot be used (no camera, not allowed) or the window
   // was closed while the camera was asked for.
   async open(facing = this.facing) {

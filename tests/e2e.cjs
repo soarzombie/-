@@ -373,7 +373,7 @@ async function cursorDb(page, hz) {
   await shot(page, 'sideways-menu');
   await page.keyboard.press('Escape');
   // the camera window is dragged in the page's own directions: down the screen is right on the page
-  await page.getByRole('button', { name: '영상 녹화' }).click();
+  await page.getByRole('button', { name: '카메라 창 열기' }).click();
   await page.waitForSelector('#a-cam:not([hidden])');
   const camAt = () => page.locator('#a-cam').evaluate((e) => [e.offsetLeft, e.offsetTop]);
   const sideCam0 = await camAt();
@@ -395,10 +395,8 @@ async function cursorDb(page, hz) {
   await page.mouse.move(sb.x + sb.width / 2, sb.y + sb.height / 2, { steps: 5 });
   await page.mouse.up();
   assert.deepEqual(await camAt(), sideCam0, 'and back');
-  await page.getByRole('button', { name: '영상 정지' }).click();
-  await page.waitForSelector('dialog.sheet h2:has-text("영상 녹화 끝")');
-  await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
-  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+  await page.getByRole('button', { name: '카메라 창 닫기' }).click();
+  await page.waitForSelector('#a-cam', { state: 'hidden' });
   // as on an iPhone, the camera's picture stays portrait while the page is turned: a fake portrait
   // camera, red above and blue below, shows red at the top of the screen (upright for the person holding
   // the phone sideways) and, in the video, red on the left of the window (the page's own up is right)
@@ -422,8 +420,10 @@ async function cursorDb(page, hz) {
       return Promise.resolve(cv.captureStream(15));
     };
   });
-  await page.getByRole('button', { name: '영상 녹화' }).click();
+  await page.getByRole('button', { name: '카메라 창 열기' }).click();
   await page.waitForSelector('#a-cam:not([hidden])');
+  await page.getByRole('button', { name: '영상 녹화 시작' }).click();
+  await page.waitForSelector('#a-video-badge:not([hidden])');
   const tc = await page.locator('#a-cam').evaluate((e) => ({ cw: e.parentElement.clientWidth, x: e.offsetLeft, y: e.offsetTop, w: e.offsetWidth, h: e.offsetHeight, t: e.querySelector('video').style.transform }));
   assert.ok(tc.w > tc.h && /rotate\(-90deg\)/.test(tc.t), `a portrait camera is shown turned, as a wide window: ${JSON.stringify(tc)}`);
   await page.waitForTimeout(1500);
@@ -435,7 +435,7 @@ async function cursorDb(page, hz) {
     console.log(`turned camera on screen: top ${top}, bottom ${bottom}`);
     assert.ok(near(top, [255, 0, 0]) && near(bottom, [0, 0, 255]), 'upright on screen');
   }
-  await page.getByRole('button', { name: '영상 정지' }).click();
+  await page.getByRole('button', { name: '영상 녹화 정지' }).click();
   await page.waitForSelector('dialog.sheet h2:has-text("영상 녹화 끝")');
   const [tv] = await Promise.all([page.waitForEvent('download'), page.locator('dialog.sheet').getByRole('button', { name: '보내기' }).click()]);
   if (HAVE_FFMPEG) {
@@ -447,6 +447,7 @@ async function cursorDb(page, hz) {
     assert.ok(near(left, [255, 0, 0]) && near(right, [0, 0, 255]), 'upright in the video');
   }
   await page.waitForSelector('dialog.sheet', { state: 'detached' });
+  await page.getByRole('button', { name: '카메라 창 닫기' }).click();
   await page.evaluate(() => (navigator.mediaDevices.getUserMedia = window.e2eRealGum));
   await page.getByRole('button', { name: '세로 화면으로' }).click();
   await page.waitForFunction(() => document.documentElement.dataset.layout === 'portrait' && document.documentElement.dataset.rotate === 'off');
@@ -957,12 +958,14 @@ async function cursorDb(page, hz) {
   await chartSettings(page, { autoSave: 'off' });
   await page.evaluate(async () => (await import('./js/settings.js')).saveSettings({ vehicle: '' }));
 
-  // 영상: the readings, graphs and the camera window with the sound as one video file, offered to send
-  // when it stops; the camera window (Chromium's fake camera here) is dragged to another place
-  await page.getByRole('button', { name: '영상 녹화' }).click();
-  await page.waitForSelector('#a-video-badge:not([hidden])');
+  // 영상, as in the reference app: the button opens the camera window (Chromium's fake camera here),
+  // which is dragged to another place; while it is open the red button records the readings, graphs and
+  // the camera window with the sound as one video file, offered to send when it stops
+  await page.getByRole('button', { name: '카메라 창 열기' }).click();
   await page.waitForSelector('#a-cam:not([hidden])');
   assert.ok(await page.locator('#a-cam video').evaluate((v) => v.videoWidth > 0 && !v.paused), 'the camera shows');
+  assert.ok(await page.locator('#a-video-badge').isHidden(), 'not recording yet');
+  assert.equal(await page.locator('#a-rec-cap').textContent(), '녹화', 'the red button records a video now');
   const camBox = await page.locator('#a-cam').boundingBox();
   const chartArea = await page.locator('.an-chart').boundingBox();
   await page.mouse.move(camBox.x + camBox.width / 2, camBox.y + camBox.height / 2);
@@ -975,6 +978,10 @@ async function cursorDb(page, hz) {
   assert.ok(Math.abs(moved.x + moved.width - (chartArea.x + chartArea.width - 1)) < 2, `camera window kept inside the graph (${moved.x + moved.width} vs ${chartArea.x + chartArea.width})`);
   const camPos = await page.evaluate(async () => (await import('./js/settings.js')).getSettings().camPos);
   assert.ok(camPos && camPos[0] === 1 && camPos[1] > 0, `camera place remembered (${camPos})`);
+  await shot(page, 'camera-open');
+  await page.getByRole('button', { name: '영상 녹화 시작' }).click();
+  await page.waitForSelector('#a-video-badge:not([hidden])');
+  assert.equal(await page.locator('.analyzer').getAttribute('data-rec'), 'off', 'a video, not a sound recording');
   await page.waitForTimeout(2600);
   assert.match(await page.locator('#a-video-time').textContent(), /00:0[2-4]/);
   await shot(page, 'video');
@@ -984,7 +991,7 @@ async function cursorDb(page, hz) {
     const e = document.querySelector('#a-cam');
     return { cw: c.clientWidth, x: e.offsetLeft, y: e.offsetTop, w: e.offsetWidth, h: e.offsetHeight };
   });
-  await page.getByRole('button', { name: '영상 정지' }).click();
+  await page.getByRole('button', { name: '영상 녹화 정지' }).click();
   await page.waitForSelector('dialog.sheet h2:has-text("영상 녹화 끝")');
   const vText = await page.locator('dialog.sheet p').first().textContent();
   assert.match(await page.locator('dialog.sheet .fine').textContent(), /카메라 화면/);
@@ -1009,8 +1016,12 @@ async function cursorDb(page, hz) {
     assert.ok(inCam.reduce((a, v, i) => a + Math.abs(v - graph[i]), 0) > 60, 'the camera picture is in the video');
   }
   await page.waitForSelector('dialog.sheet', { state: 'detached' });
-  assert.ok(await page.locator('#a-cam').isHidden(), 'the camera window closes with the video');
+  assert.ok(await page.locator('#a-cam').isVisible(), 'the camera window stays open for the next video');
+  assert.equal(await page.locator('#a-rec-cap').textContent(), '녹화');
+  await page.getByRole('button', { name: '카메라 창 닫기' }).click();
+  await page.waitForSelector('#a-cam', { state: 'hidden' });
   assert.equal(await page.locator('#a-cam video').evaluate((v) => v.srcObject), null, 'the camera is off');
+  assert.equal(await page.locator('#a-rec-cap').textContent(), '녹음', 'and the red button records sound again');
 
   // attached file: 3 s of 1 kHz (77.0 dB(A)) then 3 s of 100 Hz (71.9 dB(A))
   // (passed as a buffer: Playwright here cannot attach files from non-ASCII paths, and the Korean name

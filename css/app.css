@@ -333,11 +333,13 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 .ctl:active { transform: scale(0.95); }
 .ctl:disabled { opacity: 0.6; }
 .rec-mark { width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: all 0.15s; }
-.analyzer[data-rec="on"] .rec-mark { width: 19px; height: 19px; border-radius: 5px; }
-.analyzer[data-rec="on"] .ctl-rec { box-shadow: 0 0 0 5px rgb(255 79 94 / 28%); }
-.analyzer[data-rec="on"] #a-rec-cap { color: var(--rec); font-weight: 800; }
-.analyzer[data-video="on"] .ctl-video { color: var(--rec); box-shadow: 0 0 0 4px rgb(255 79 94 / 25%); }
-.analyzer[data-video="on"] #a-video-cap { color: var(--rec); font-weight: 800; }
+/* the red button while it records sound or (camera window open) a video */
+.analyzer:is([data-rec="on"], [data-video="rec"]) .rec-mark { width: 19px; height: 19px; border-radius: 5px; }
+.analyzer:is([data-rec="on"], [data-video="rec"]) .ctl-rec { box-shadow: 0 0 0 5px rgb(255 79 94 / 28%); }
+.analyzer:is([data-rec="on"], [data-video="rec"]) #a-rec-cap { color: var(--rec); font-weight: 800; }
+/* 영상 lit while the camera window is open */
+.analyzer:is([data-video="on"], [data-video="rec"]) .ctl-video { color: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 30%, transparent); }
+.analyzer:is([data-video="on"], [data-video="rec"]) #a-video-cap { color: var(--accent); font-weight: 800; }
 /* timed measurement: the ring around the button fills up as the seconds go by */
 .ctl-timed::before { content: ""; position: absolute; inset: -4px; border-radius: 50%; padding: 3px; background: conic-gradient(var(--accent) calc(var(--p, 0) * 360deg), var(--ring) 0); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; opacity: 0; pointer-events: none; }
 .analyzer[data-timed="on"] .ctl-timed::before { opacity: 1; }
@@ -400,7 +402,7 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 :root[data-layout="landscape"] .ctl-main, :root[data-layout="landscape"] .ctl-rec { width: 48px; height: 48px; }
 :root[data-layout="landscape"] .ctl-main svg { width: 24px; height: 24px; }
 :root[data-layout="landscape"] .rec-mark { width: 20px; height: 20px; }
-:root[data-layout="landscape"] .analyzer[data-rec="on"] .rec-mark { width: 18px; height: 18px; }
+:root[data-layout="landscape"] .analyzer:is([data-rec="on"], [data-video="rec"]) .rec-mark { width: 18px; height: 18px; }
 :root[data-layout="landscape"] .ctl-cap { display: none; }
 :root[data-layout="landscape"] .an-nav { display: flex; }
 :root[data-layout="landscape"] .an-nav a { width: 42px; height: 42px; }
