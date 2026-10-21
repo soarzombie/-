@@ -33,6 +33,7 @@
   --cursor: #5cc8ff;
   --rec-bg: rgb(60 10 16 / 85%);
   --rec-ink: #ffd6da;
+  --cam-edge: rgb(255 255 255 / 85%);
   --strong: #ffffff;
   --ring: rgb(255 255 255 / 12%);
   color-scheme: dark;
@@ -64,6 +65,7 @@
   --cursor: #0a7fc0;
   --rec-bg: rgb(255 236 238 / 94%);
   --rec-ink: #a4111f;
+  --cam-edge: #ffffff;
   --strong: #0f1216;
   --ring: rgb(0 0 0 / 10%);
   color-scheme: light;
@@ -226,30 +228,27 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 }
 .chart-plot, .gram-plot, .octave-plot, .trace-plot { position: absolute; inset: 8px 8px 4px 4px; }
 .spectrum-canvas { display: block; }
-.chart-tools { position: absolute; top: 8px; right: 8px; z-index: 3; display: flex; flex-wrap: wrap-reverse; justify-content: flex-end; align-items: center; gap: 8px; max-width: calc(100% - 46px); }
-.an-peak {
-  padding: 3px 12px;
-  border-radius: 999px;
-  background: var(--chip-bg);
-  border: 1px solid var(--line);
-  font-size: 15px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  pointer-events: none;
-}
+.chart-tools { position: absolute; top: 8px; right: 8px; z-index: 3; display: flex; flex-wrap: wrap-reverse; justify-content: flex-end; align-items: center; gap: 6px; max-width: calc(100% - 38px); }
+/* the peak and the speed are not shown over the graph (the user asked for the cursor read-out there;
+   the peak is labelled on the curve, the speed is the yellow line); kept for screen readers and the video */
+.an-peak, .speed-badge { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 /* after a pinch: back to the whole frequency axis */
 .zoom-chip { min-height: 30px; padding: 3px 12px; border-radius: 999px; background: var(--chip-bg); border: 1px solid var(--accent); color: var(--ink); font: inherit; font-size: 14px; font-weight: 700; white-space: nowrap; cursor: pointer; }
 .zoom-chip[hidden] { display: none; }
 .an-chart:is([data-view="gram"], [data-view="octave"]) .zoom-chip { display: none; }
-/* 속도 (GPS), in the colour of its line on the time-axis graph */
-.speed-badge { padding: 3px 10px; border-radius: 999px; background: var(--chip-bg); border: 1px solid color-mix(in srgb, var(--speed) 55%, transparent); color: var(--speed); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none; }
-.speed-badge[hidden] { display: none; }
 /* recording has its own clock, apart from the measuring status */
 .rec-badge { display: flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: var(--rec-bg); border: 1px solid rgb(255 79 94 / 70%); color: var(--rec-ink); font-size: 14px; font-weight: 700; white-space: nowrap; pointer-events: none; }
 .rec-badge i { width: 8px; height: 8px; border-radius: 50%; background: var(--rec); animation: rec-blink 1s steps(2, start) infinite; }
 .rec-badge b { color: var(--strong); font-variant-numeric: tabular-nums; }
 @keyframes rec-blink { to { visibility: hidden; } }
+/* 영상: the camera window over the graph, dragged anywhere on it (and recorded where it sits) */
+.cam-win { position: absolute; left: 0; top: 0; z-index: 2; overflow: hidden; border: 2px solid var(--cam-edge); border-radius: 10px; background: #000; box-shadow: 0 4px 14px rgb(0 0 0 / 40%); touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+.cam-win[hidden] { display: none; }
+.cam-win.dragging { cursor: grabbing; box-shadow: 0 6px 20px rgb(0 0 0 / 55%); }
+.cam-win video { position: absolute; left: 50%; top: 50%; width: 100%; height: 100%; object-fit: cover; transform: translate(-50%, -50%); pointer-events: none; }
+.cam-flip { position: absolute; right: 4px; bottom: 4px; display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%; background: rgb(0 0 0 / 55%); color: #fff; cursor: pointer; }
+.cam-flip[hidden] { display: none; }
+.cam-flip svg { width: 20px; height: 20px; }
 .tool-btn { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--tool-bg); color: var(--ink); cursor: pointer; }
 .tool-btn svg { width: 24px; height: 24px; }
 .chart-overlay {
@@ -334,11 +333,13 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 .ctl:active { transform: scale(0.95); }
 .ctl:disabled { opacity: 0.6; }
 .rec-mark { width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: all 0.15s; }
-.analyzer[data-rec="on"] .rec-mark { width: 19px; height: 19px; border-radius: 5px; }
-.analyzer[data-rec="on"] .ctl-rec { box-shadow: 0 0 0 5px rgb(255 79 94 / 28%); }
-.analyzer[data-rec="on"] #a-rec-cap { color: var(--rec); font-weight: 800; }
-.analyzer[data-video="on"] .ctl-video { color: var(--rec); box-shadow: 0 0 0 4px rgb(255 79 94 / 25%); }
-.analyzer[data-video="on"] #a-video-cap { color: var(--rec); font-weight: 800; }
+/* the red button while it records sound or (camera window open) a video */
+.analyzer:is([data-rec="on"], [data-video="rec"]) .rec-mark { width: 19px; height: 19px; border-radius: 5px; }
+.analyzer:is([data-rec="on"], [data-video="rec"]) .ctl-rec { box-shadow: 0 0 0 5px rgb(255 79 94 / 28%); }
+.analyzer:is([data-rec="on"], [data-video="rec"]) #a-rec-cap { color: var(--rec); font-weight: 800; }
+/* 영상 lit while the camera window is open */
+.analyzer:is([data-video="on"], [data-video="rec"]) .ctl-video { color: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 30%, transparent); }
+.analyzer:is([data-video="on"], [data-video="rec"]) #a-video-cap { color: var(--accent); font-weight: 800; }
 /* timed measurement: the ring around the button fills up as the seconds go by */
 .ctl-timed::before { content: ""; position: absolute; inset: -4px; border-radius: 50%; padding: 3px; background: conic-gradient(var(--accent) calc(var(--p, 0) * 360deg), var(--ring) 0); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; opacity: 0; pointer-events: none; }
 .analyzer[data-timed="on"] .ctl-timed::before { opacity: 1; }
@@ -401,7 +402,7 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 :root[data-layout="landscape"] .ctl-main, :root[data-layout="landscape"] .ctl-rec { width: 48px; height: 48px; }
 :root[data-layout="landscape"] .ctl-main svg { width: 24px; height: 24px; }
 :root[data-layout="landscape"] .rec-mark { width: 20px; height: 20px; }
-:root[data-layout="landscape"] .analyzer[data-rec="on"] .rec-mark { width: 18px; height: 18px; }
+:root[data-layout="landscape"] .analyzer:is([data-rec="on"], [data-video="rec"]) .rec-mark { width: 18px; height: 18px; }
 :root[data-layout="landscape"] .ctl-cap { display: none; }
 :root[data-layout="landscape"] .an-nav { display: flex; }
 :root[data-layout="landscape"] .an-nav a { width: 42px; height: 42px; }
@@ -637,22 +638,22 @@ body[data-view="home"] .toast { bottom: calc(var(--tabbar-h) + 112px + env(safe-
 .an-chart[data-view="spectrum"] .chart-plot { bottom: 30%; }
 .an-chart[data-view="spectrum"] .trace-plot { top: 71%; }
 .an-chart[data-view="spectrum"]::after { content: ""; position: absolute; left: 0; right: 0; top: 70.3%; border-top: 1px solid var(--line); pointer-events: none; }
-.an-chart[data-view="gram"] .an-peak { display: none; }
 .an-chart .chart-plot, .chart-box-rec .chart-plot { touch-action: none; cursor: crosshair; }
 .chart-box-rec .chart-plot { touch-action: pan-y; }
 
-/* single-line strip over the bottom (quietest) part of the plot */
+/* one-line strip at the top of the graph: on the analyzer in the row of the settings button, on the record
+   and file screens in the graph's top right corner */
 .cursor-readout {
   position: absolute;
-  right: 12px;
-  max-width: calc(100% - 50px);
-  bottom: 30px;
+  top: 18px;
+  right: 18px;
+  max-width: calc(100% - 60px);
   z-index: 4;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  padding: 2px 2px 2px 10px;
+  padding: 2px 2px 2px 8px;
   border-radius: 8px;
   background: var(--chip-strong);
   border: 1px solid color-mix(in srgb, var(--cursor) 45%, transparent);
@@ -660,16 +661,16 @@ body[data-view="home"] .toast { bottom: calc(var(--tabbar-h) + 112px + env(safe-
   font-variant-numeric: tabular-nums;
   pointer-events: none;
 }
-.an-chart[data-view="spectrum"] .cursor-readout { bottom: calc(30% + 28px); }
+.chart-tools .cursor-readout { position: static; max-width: 100%; }
 .an-chart:is([data-view="gram"], [data-view="octave"]) .cursor-readout { display: none; }
-.cr-lines { display: flex; flex-wrap: wrap; gap: 0 12px; min-width: 0; }
+.cr-lines { display: flex; flex-wrap: wrap; gap: 0 9px; min-width: 0; }
 .cr-lines span { white-space: nowrap; }
 .cr-lines em { font-style: normal; font-weight: 700; }
 .cr-hz { color: var(--cursor); font-weight: 700; }
-.cr-cur, .cr-max { display: inline-flex; align-items: center; gap: 4px; }
+.cr-cur, .cr-max { display: inline-flex; align-items: center; gap: 3px; }
+.cr-lines .sw { width: 11px; }
 .cr-close { pointer-events: auto; flex-shrink: 0; width: 26px; height: 26px; border: 0; border-radius: 6px; background: var(--panel-2); color: var(--ink); font-size: 17px; line-height: 1; cursor: pointer; }
 .chart-card { position: relative; }
-.chart-card .cursor-readout { right: 18px; bottom: 70px; }
 
 .legend .fine { font-size: 12px; }
 

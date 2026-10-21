@@ -7,6 +7,7 @@ import { micProfile, saveMicProfile, parseCalFile, calCorrection, calStability }
 import { trackSpeed, STALE_SEC } from './gps.js';
 import { backupBlob, readBackup, importPlan } from './backup.js';
 import { ScreenVideo, videoType, videoExt, MAX_VIDEO_SEC } from './video.js';
+import { CameraWindow, cameraSupported } from './camera.js';
 import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
 import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds, FFT_WINDOWS } from './dsp.js';
 import * as store from './store.js';
@@ -37,6 +38,7 @@ const ICON = {
   info: svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><circle class="fill" cx="12" cy="7.8" r="1.2"/>'),
   chevron: svg('<path d="M7 10l5 5 5-5"/>'),
   axes: svg('<path d="M4 4v16h16"/><path d="M8 8h3M8 12h6M8 16h9"/>'),
+  flip: svg('<path d="M4.5 10a7.5 7.5 0 0 1 13.6-3.4"/><path d="M18.5 3.5v3.6h-3.6"/><path d="M19.5 14a7.5 7.5 0 0 1-13.6 3.4"/><path d="M5.5 20.5v-3.6h3.6"/>'),
   rotate: svg('<rect x="2.5" y="8" width="13" height="9" rx="2"/><path d="M12.5 3.5a7 7 0 0 1 8 7.5"/><path d="M18.5 9.5l2 1.5 1.5-2"/>'),
   video: svg('<rect x="2.5" y="6.5" width="13" height="11" rx="2.5"/><path d="M15.5 10.5l6-3.5v10l-6-3.5z"/>'),
   timer: svg('<circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4l2.6 2M9.5 3h5M12 3v2.5"/>'),
@@ -413,13 +415,13 @@ function helpSheet() {
         <dt>시간축 그래프</dt><dd>아래쪽 작은 그래프. 가로는 측정 시간, 세로는 dB(큰 숫자와 같은 값), 점선은 평균입니다. 보이는 시간(30초 · 1분 · 5분)은 그래프 설정에서 바꿉니다.</dd>
         <dt>가로 · 세로</dt><dd>보기 버튼 오른쪽 <b>가로</b>를 누르면 가로 화면이 됩니다(휴대폰 위쪽이 왼쪽으로 가게 돌려 잡으세요). 아이폰처럼 화면 방향을 고정할 수 없는 휴대폰에서는 화면을 돌려서 보여 줍니다. <b>세로</b>를 누르면 돌아옵니다. 휴대폰 자동 회전이 켜져 있으면 그냥 돌려도 됩니다.</dd>
         <dt>보기</dt><dd>${MODES.map((m) => m.label).join(' · ')}. 맨 위 버튼으로 바꿉니다.</dd>
-        <dt>● 녹음</dt><dd>측정 버튼과 따로 움직입니다. 누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 그래프 위 빨간 시계가 녹음 길이), 측정을 일시정지해도 녹음은 계속됩니다. 정지해도 측정은 그대로 이어지고, 녹음은 파일 탭에 들어가 "분석 보기"로 바로 열 수 있습니다.</dd>
+        <dt>● 녹음</dt><dd>측정 버튼과 따로 움직입니다. 누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 그래프 위 빨간 시계가 녹음 길이), 측정을 일시정지해도 녹음은 계속됩니다. 정지해도 측정은 그대로 이어지고, 녹음은 파일 탭에 들어가 "분석 보기"로 바로 열 수 있습니다. 카메라 창(🎥 영상)이 떠 있는 동안에는 영상 녹화 버튼이 됩니다.</dd>
         <dt>▶ ⏸ 측정</dt><dd>측정 시작과 일시정지(화면과 값 고정). 녹음에는 영향을 주지 않습니다.</dd>
         <dt>마이크</dt><dd>평소에는 휴대폰 마이크로 잽니다. 외부 측정 마이크(iMM-6C 등)는 꽂은 뒤 그래프 설정의 "마이크"에서 고르면 되고, 쓰는 동안 이름이 화면 위에 보입니다. 외부 마이크는 설정 → 마이크 보정에서 따로 보정하고, 함께 받은 보정 파일을 넣으면 저음·고음 오차도 바로잡습니다.</dd>
-        <dt>🎥 영상</dt><dd>녹음 버튼 옆 <b>영상</b>을 누르면 화면의 값과 그래프를 소리와 함께 영상 파일로 녹화합니다(최대 ${MAX_VIDEO_SEC / 60}분). 한 번 더 누르면 멈추고 "보내기"로 카톡·메일에 보냅니다.</dd>
+        <dt>🎥 영상</dt><dd>녹음 버튼 옆 <b>영상</b>을 누르면 그래프 위에 카메라 창이 뜹니다. 창은 손가락으로 끌어서 원하는 곳에 두고(다음에도 그 자리), ↻로 앞뒤 카메라를 바꿉니다. 창이 떠 있는 동안 빨간 버튼은 <b>녹화</b>가 되어, 누르면 화면의 값·그래프·카메라 화면을 소리와 함께 영상 파일로 녹화하고(최대 ${MAX_VIDEO_SEC / 60}분) 한 번 더 누르면 멈춘 뒤 "보내기"로 카톡·메일에 보냅니다. <b>영상 끄기</b>를 누르면 카메라 창이 닫히고 빨간 버튼은 다시 녹음이 됩니다. 카메라를 허용하지 않으면 그래프만 녹화합니다.</dd>
         <dt>오디오 세부정보</dt><dd>차트 메뉴 맨 아래. 쓰는 마이크, 보정값, 샘플링 레이트, 지연, 브라우저가 소리 처리(에코·잡음 제거, 자동 음량)를 껐는지 보여 줍니다. 값이 이상할 때 먼저 보세요.</dd>
         <dt>⏱ 정해진 시간 측정</dt><dd>누르면 처음부터 ${s.timedSec}초(그래프 설정에서 5초 · 10초 · 30초 · 1분)만큼 재고 저절로 멈춘 뒤 저장 창을 엽니다. 버튼 둘레가 차오르고, 다시 누르거나 일시정지하면 취소됩니다.</dd>
-        <dt>속도 (GPS)</dt><dd>그래프 설정에서 켜면 차 속도가 그래프 위(노란 숫자)와 시간축 그래프(노란 선)에 나오고, 저장 기록에 평균·최고 속도가 남습니다. 위치 자체는 저장하지 않습니다.</dd>
+        <dt>속도 (GPS)</dt><dd>그래프 설정에서 켜면 차 속도가 시간축 그래프에 노란 선으로 나오고, 저장 기록에 평균·최고 속도가 남습니다. 위치 자체는 저장하지 않습니다.</dd>
         <dt>전후 비교</dt><dd>기록 화면의 "실시간과 비교"를 누르면 그 기록의 평균 스펙트럼이 보라 점선(기준)으로 실시간 그래프에 겹쳐지고, 평균 차이가 함께 나옵니다. "다른 기록과 비교"는 기록끼리 겹쳐 봅니다.</dd>
         <dt>⬇ 저장</dt><dd>지금 그래프와 값, 방금 들린 소리를 차량번호·메모와 함께 기록에 남깁니다.</dd>
       </dl>
@@ -457,6 +459,7 @@ async function renderAnalyzer() {
         <div class="gram-plot" id="a-gram"></div>
         <div class="octave-plot" id="a-octave"></div>
         <div class="trace-plot" id="a-trace"></div>
+        <div class="cam-win" id="a-cam" hidden><video muted playsinline autoplay></video><button type="button" class="cam-flip" aria-label="앞뒤 카메라 바꾸기" hidden>${ICON.flip}</button></div>
         <div class="chart-tools">
           <p class="rec-badge" id="a-rec-badge" hidden><i></i>녹음 <b id="a-rec-time">00:00</b></p>
           <p class="rec-badge video-badge" id="a-video-badge" hidden><i></i>영상 <b id="a-video-time">00:00</b></p>
@@ -464,9 +467,9 @@ async function renderAnalyzer() {
           <p class="speed-badge" id="a-speed" hidden>– km/h</p>
           <p class="ref-chip" id="a-ref" hidden><i aria-hidden="true"></i><span id="a-ref-name"></span><b id="a-ref-diff"></b><button type="button" class="ref-close" data-act="ref-off" aria-label="기준 비교 끄기">×</button></p>
           <p class="an-peak" id="a-peak">피크 –</p>
+          ${cursorBox('a-cursor')}
           <button type="button" class="tool-btn" data-act="chart-settings" aria-label="그래프 설정" aria-haspopup="menu" aria-expanded="false">${ICON.sliders}</button>
         </div>
-        ${cursorBox('a-cursor')}
         <div class="chart-overlay" id="a-overlay">
           <button type="button" class="mic-button" data-act="mic">${ICON.mic}<strong>눌러서 측정 시작</strong></button>
           <p class="overlay-note" id="a-note">처음 한 번은 마이크 사용을 "허용"해 주세요.</p>
@@ -475,7 +478,7 @@ async function renderAnalyzer() {
       <div class="an-controls">
         <div class="ctl-group rec-group" role="group" aria-label="녹음">
           <button type="button" class="ctl ctl-rec" data-act="rec" aria-label="녹음 시작"><i class="rec-mark"></i><span class="ctl-cap" id="a-rec-cap">녹음</span></button>
-          ${videoType() == null ? '' : `<button type="button" class="ctl ctl-video" data-act="video" aria-label="영상 녹화">${ICON.video}<span class="ctl-cap" id="a-video-cap">영상</span></button>`}
+          ${videoType() == null ? '' : `<button type="button" class="ctl ctl-video" data-act="video" aria-label="카메라 창 열기">${ICON.video}<span class="ctl-cap" id="a-video-cap">영상</span></button>`}
         </div>
         <div class="ctl-group run-group" role="group" aria-label="측정">
           <button type="button" class="ctl ctl-timed" data-act="timed" aria-label="${s.timedSec}초 측정">${ICON.timer}<span class="ctl-cap" id="a-timed-cap">${s.timedSec}초 측정</span></button>
@@ -498,6 +501,12 @@ async function renderAnalyzer() {
   const chartBox = view.querySelector('.an-chart');
   const chart = new SpectrumView($('a-chart'), { cursor: true });
   chart.onCursor = bindCursorReadout($('a-cursor'));
+  // the 영상 camera window, dragged where it should sit on the graph
+  const cam = new CameraWindow($('a-cam'), { pos: s.camPos, onMove: (pos) => saveSettings({ camPos: pos }) });
+  let camMode = false; // the camera window is open: the red button records a video (see toggleCamera)
+  let camOpening = false;
+  let video = null;
+  let videoTimer = 0;
   $('a-cursor').querySelector('.cr-close').onclick = () => chart.clearCursors();
   // two fingers pinch the frequency axis; "전체 보기" goes back to 20 Hz – 20 kHz
   let pinchAxis = null;
@@ -836,13 +845,21 @@ async function renderAnalyzer() {
   let recTimer = 0;
   function showRecording(on) {
     root.dataset.rec = on ? 'on' : 'off';
-    recBtn.setAttribute('aria-label', on ? '녹음 정지' : '녹음 시작');
-    $('a-rec-cap').textContent = on ? '녹음 정지' : '녹음';
+    showRecButton();
     $('a-rec-badge').hidden = !on;
     clearInterval(recTimer);
     if (!on) return;
     $('a-rec-time').textContent = '00:00';
     recTimer = setInterval(() => meter?.recording && ($('a-rec-time').textContent = fmtClock(meter.recordedSec)), 250);
+  }
+
+  // The red button: 녹음 (sound alone), or 녹화 (a video) while the camera window is open; a sound
+  // recording already going on is stopped first.
+  function showRecButton() {
+    const [label, cap] =
+      root.dataset.rec === 'on' ? ['녹음 정지', '녹음 정지'] : video ? ['영상 녹화 정지', '녹화 정지'] : camMode ? ['영상 녹화 시작', '녹화'] : ['녹음 시작', '녹음'];
+    recBtn.setAttribute('aria-label', label);
+    $('a-rec-cap').textContent = cap;
   }
 
   let stopping = false;
@@ -861,7 +878,7 @@ async function renderAnalyzer() {
     cancelAnimationFrame(raf);
     showTimed(0);
     stopGps();
-    if (video) stopVideo();
+    closeCamera();
     if (meter?.recording) {
       // leaving mid-recording keeps what was recorded, ready in the file tab
       const rate = meter.sampleRate;
@@ -945,17 +962,42 @@ async function renderAnalyzer() {
     toast(`${rec.timedSec}초 측정을 저장했습니다${rec.vehicle ? ` (${rec.vehicle})` : ''} · 평균 ${fmtDb(rec.leq)}`, { label: '열기', run: () => (location.hash = `#/record/${encodeURIComponent(rec.id)}`) });
   }
 
-  // 영상: the readings and the graphs on screen, with the sound, as one video file to send.
-  let video = null;
-  let videoTimer = 0;
-  async function startVideo() {
-    if (video) return stopVideo();
-    if (!(await startMic()) || !meter.running) return;
+  // 영상, as in the reference app: the 영상 button opens the camera window over the graph (dragged where
+  // it should sit) and closes it again; while it is open the red button records a video of the readings,
+  // the graphs and the camera window with the sound, instead of the sound alone. Without a camera (or
+  // not allowed) the video has the graphs only.
+  async function toggleCamera() {
+    if (camMode) return closeCamera();
+    if (camOpening) return;
+    camOpening = true;
+    try {
+      if (!(await startMic()) || !meter.running) return;
+      const camera = cameraSupported() && (await cam.open().then(() => true, () => false));
+      if (!meter?.running) return cam.close(); // stopped while the camera was asked for
+      camMode = true;
+      showVideo();
+      if (!camera) toast('카메라를 쓸 수 없습니다. 녹화 버튼을 누르면 그래프만 영상으로 녹화합니다');
+      else if (!getSettings().camPos) toast('카메라 창은 끌어서 옮기고, 빨간 녹화 버튼으로 영상 녹화를 시작합니다');
+    } finally {
+      camOpening = false;
+    }
+  }
+
+  function closeCamera() {
+    if (video) stopVideo();
+    camMode = false;
+    cam.close();
+    showVideo();
+  }
+
+  function startVideo() {
+    if (video || !meter?.running) return;
     const css = getComputedStyle(html);
     const v = (name) => css.getPropertyValue(name).trim();
     try {
       video = new ScreenVideo({
         chart: chartBox,
+        camera: cam,
         audioTrack: meter.stream.getAudioTracks()[0],
         colors: { bg: v('--bg'), panel: v('--panel'), ink: v('--ink'), sub: v('--ink-2') },
         readings: () => {
@@ -978,18 +1020,23 @@ async function renderAnalyzer() {
       video = null;
       return toast('이 브라우저에서는 영상을 녹화할 수 없습니다');
     }
-    showVideo(true);
+    video.withCamera = cam.on;
+    showVideo();
   }
 
-  function showVideo(on) {
-    root.dataset.video = on ? 'on' : 'off';
+  // the 영상 button (camera window open or not), the red button (녹음 or 녹화) and the video's clock
+  function showVideo() {
+    root.dataset.video = video ? 'rec' : camMode ? 'on' : 'off';
     const btn = view.querySelector('[data-act=video]');
-    btn?.setAttribute('aria-label', on ? '영상 정지' : '영상 녹화');
-    if ($('a-video-cap')) $('a-video-cap').textContent = on ? '영상 정지' : '영상';
-    $('a-video-badge').hidden = !on;
-    clearInterval(videoTimer);
-    if (!on) return;
+    btn?.setAttribute('aria-label', camMode ? '카메라 창 닫기' : '카메라 창 열기');
+    if ($('a-video-cap')) $('a-video-cap').textContent = camMode ? '영상 끄기' : '영상';
+    showRecButton();
+    const wasOn = !$('a-video-badge').hidden;
+    $('a-video-badge').hidden = !video;
+    if (!video) return clearInterval(videoTimer);
+    if (wasOn) return;
     $('a-video-time').textContent = '00:00';
+    clearInterval(videoTimer);
     videoTimer = setInterval(() => {
       if (!video) return;
       $('a-video-time').textContent = fmtClock(video.seconds);
@@ -1003,7 +1050,7 @@ async function renderAnalyzer() {
   async function stopVideo() {
     const v = video;
     video = null;
-    showVideo(false);
+    showVideo();
     if (!v) return;
     const sec = v.seconds;
     const blob = await v.stop();
@@ -1014,7 +1061,7 @@ async function renderAnalyzer() {
       <div class="sheet-form">
         <h2>영상 녹화 끝</h2>
         <p>영상 ${fmtClock(sec)} · ${(blob.size / 1048576).toFixed(1)} MB · ${videoExt(blob.type).toUpperCase()}</p>
-        <p class="fine">그래프와 소리가 함께 담겼습니다. 이 창을 닫으면 영상은 남지 않으니, 필요하면 지금 보내거나 저장하세요.</p>
+        <p class="fine">${v.withCamera ? '그래프와 카메라 화면, 소리가' : '그래프와 소리가'} 함께 담겼습니다. 이 창을 닫으면 영상은 남지 않으니, 필요하면 지금 보내거나 저장하세요.</p>
         <div class="sheet-actions">
           <button type="button" class="btn btn-quiet" data-close>닫기</button>
           <button type="button" class="btn btn-primary" data-act="video-send">보내기</button>
@@ -1128,7 +1175,7 @@ async function renderAnalyzer() {
         ${segRow('timeWeighting', '시간 가중 (큰 숫자)', [['F', 'Fast 0.125초'], ['S', 'Slow 1초']], st.timeWeighting, 'Slow는 숫자가 덜 흔들려 읽기 쉽습니다. 바꾸면 최소·평균·최대가 새로 시작합니다.')}
         ${segRow('timed', '정해진 시간 측정 (⏱ 버튼)', TIMED_SECS.map((n) => [n, n < 60 ? `${n}초` : '1분']), st.timedSec, '누르면 처음부터 이 시간만큼 재고 멈춘 뒤 저장 창을 엽니다.')}
         ${segRow('autoSave', '정해진 시간 측정이 끝나면', [['off', '저장 창 열기'], ['on', '바로 저장']], st.autoSave ? 'on' : 'off', '바로 저장은 마지막 차량번호로 소리와 함께 저장하고, 알림의 "열기"로 메모를 고칠 수 있습니다. 여러 대를 이어서 잴 때 빠릅니다.')}
-        ${segRow('gps', '속도 (GPS)', [['off', '끔'], ['on', '켬']], st.gps ? 'on' : 'off', '켜면 위치 권한을 묻고, 차 속도를 그래프 위와 시간축 그래프(노란 선), 저장 기록에 함께 남깁니다. 위치는 저장하지 않습니다.')}
+        ${segRow('gps', '속도 (GPS)', [['off', '끔'], ['on', '켬']], st.gps ? 'on' : 'off', '켜면 위치 권한을 묻고, 차 속도를 시간축 그래프(노란 선)와 저장 기록에 함께 남깁니다. 위치는 저장하지 않습니다.')}
         <h3 class="sheet-sub">그래프</h3>
         ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
         ${segRow('fft', 'FFT 크기', FFT_SIZES.map((n) => [n, n]), st.fftSize, '클수록 주파수를 잘게 나누지만 반응이 느려집니다. 1/3 옥타브 보기는 늘 32768로 계산합니다.')}
@@ -1242,6 +1289,7 @@ async function renderAnalyzer() {
       trace.draw();
       gram.draw();
       octave.draw();
+      cam.layout();
     }
     if (st.gps !== prev.gps) {
       if (st.gps) startGps();
@@ -1427,6 +1475,7 @@ async function renderAnalyzer() {
     navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
     menu?.close();
     stopMic();
+    cam.destroy();
     chart.destroy();
     gram.destroy();
     octave.destroy();
@@ -1441,11 +1490,14 @@ async function renderAnalyzer() {
     showRunning(meter.paused);
   };
   timedBtn.onclick = () => (meter?.timed ? cancelTimed() : startTimed());
-  view.querySelector('[data-act=video]')?.addEventListener('click', () => startVideo());
+  view.querySelector('[data-act=video]')?.addEventListener('click', () => toggleCamera());
   // Recording is separate from measuring: it does not resume a paused measurement, pausing does not
   // stop it, and stopping it leaves the measurement running. It only turns the microphone on if needed.
+  // With the camera window open it records a video instead.
   recBtn.onclick = async () => {
     if (meter?.recording) return stopRecording();
+    if (video) return stopVideo();
+    if (camMode) return startVideo();
     if (!(await startMic())) return;
     meter.startRecording();
     showRecording(true);
