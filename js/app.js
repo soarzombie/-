@@ -2,6 +2,7 @@
 // #/ (real-time analyzer), #/file (analyse an attached file), #/history, #/record/<id>, #/settings
 
 import { APP_VERSION, getSettings, saveSettings, rememberVehicle } from './settings.js';
+import { PRESETS, CUSTOM, presetOf, choosePreset, customize } from './presets.js';
 import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
 import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds } from './dsp.js';
 import * as store from './store.js';
@@ -30,6 +31,7 @@ const ICON = {
   mic: svg('<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/>'),
   file: svg('<path d="M9 18V5l10-2v13"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/>'),
   info: svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><circle class="fill" cx="12" cy="7.8" r="1.2"/>'),
+  chevron: svg('<path d="M7 10l5 5 5-5"/>'),
   sliders: svg('<path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17" r="2"/>'),
 };
 
@@ -98,11 +100,11 @@ function openSheet(html) {
 }
 
 // Small menu that drops from a button (like a phone's context menu). Tapping outside or Esc closes it.
-function openMenu(anchor, html, onClose = null) {
+function openMenu(anchor, html, onClose = null, className = '') {
   const layer = document.createElement('div');
   layer.className = 'menu-layer';
   const menu = document.createElement('div');
-  menu.className = 'menu';
+  menu.className = `menu ${className}`.trim();
   menu.setAttribute('role', 'menu');
   menu.innerHTML = html;
   document.body.append(layer, menu);
@@ -123,6 +125,11 @@ function openMenu(anchor, html, onClose = null) {
   layer.addEventListener('click', close); // the whole tap lands on the layer, not on what is under it
   anchor.setAttribute('aria-expanded', 'true');
   return { menu, close };
+}
+
+// A setting changed by hand: a chosen measurement situation (presets.js) becomes 사용자 지정.
+function changeSettings(patch) {
+  return saveSettings(customize(getSettings(), patch));
 }
 
 async function keepScreenOn() {
@@ -263,6 +270,7 @@ function helpSheet() {
     <div class="sheet-form help">
       <h2>화면 보는 법</h2>
       <dl class="meta">
+        <dt>측정 상황</dt><dd>왼쪽 위 버튼. <b>공회전</b>·<b>주행</b>·<b>실내</b>를 고르면 가중치·FFT·그래프 모양·추적·홀드·시간축 길이가 그 상황에 맞게 한 번에 바뀝니다. 그 뒤에 직접 바꾸면 <b>사용자 지정</b>이 되고, 사용자 지정을 다시 고르면 직접 맞춰 둔 설정으로 돌아옵니다.</dd>
         <dt>큰 숫자</dt><dd>지금 소음 크기입니다 (0.125초 Fast). 색 막대는 초록 → 노랑 → 빨강, 빨강은 경고 기준 ${s.alertLevel} dB 이상입니다. 밝은 칸 하나는 최대값입니다.</dd>
         <dt>최소·평균·최대</dt><dd>측정을 시작하거나 ↻ 초기화를 누른 뒤의 값입니다. 평균은 에너지 평균(Leq)입니다.</dd>
         <dt>A · C · Z</dt><dd>주파수 가중치. <b>A</b> 보통 소음(사람 귀에 가깝게) · <b>C</b> 엔진·부밍음처럼 저음이 큰 소리 · <b>Z</b> 거르지 않은 소리. 그래프 오른쪽 위 설정 버튼에서 바꿉니다.</dd>
@@ -288,7 +296,7 @@ async function renderAnalyzer() {
         ${MODES.map((m) => `<button type="button" class="mode" data-mode="${m.id}" aria-label="${m.label}" aria-pressed="${s.view === m.id}">${m.icon}</button>`).join('')}
       </div>
       <div class="an-sub">
-        <span class="an-weight" id="a-weight">${s.weighting}특성</span>
+        <button type="button" class="an-preset" id="a-preset" aria-haspopup="menu" aria-expanded="false" aria-label="측정 상황: ${presetOf(s.preset).name}"><span>${presetOf(s.preset).name}</span>${ICON.chevron}</button>
         <p class="an-mode-name" id="a-mode-name">${MODES.find((m) => m.id === s.view)?.name || ''}</p>
         <p class="an-status"><i class="rec-dot"></i><span id="a-state">대기</span><b id="a-time">00:00</b></p>
       </div>
@@ -665,26 +673,59 @@ async function renderAnalyzer() {
         <button type="button" class="btn btn-wide" data-close>닫기</button>
       </div>`);
     bindSegs(dlg, (key, v) => {
-      if (key === 'weighting') {
-        saveSettings({ weighting: v });
-        dlg.querySelector('#f-weight-note').textContent = WEIGHT_NOTE[v];
-        $('a-weight').textContent = `${v}특성`;
-        $('a-unit').textContent = unitOf(v);
-        gram.unit = unitOf(v);
-        if (meter) meter.setWeighting(v);
-        clearReadings();
-      } else if (key === 'trace') {
-        saveSettings({ traceSec: Number(v) });
-        trace.configure({ windowSec: Number(v) });
-        trace.draw();
-      } else if (key === 'fft') {
-        saveSettings({ fftSize: Number(v) });
-        applyFft();
-      } else {
-        saveSettings({ scale: v });
-        gram.configure({ scale: v });
-      }
-      if (meter?.paused && holds) draw(meter.levels);
+      change(key === 'weighting' ? { weighting: v } : key === 'trace' ? { traceSec: Number(v) } : key === 'fft' ? { fftSize: Number(v) } : { scale: v });
+      if (key === 'weighting') dlg.querySelector('#f-weight-note').textContent = WEIGHT_NOTE[v];
+    });
+  }
+
+  // Settings changed (by hand, from a menu, or by a measurement situation): the live view follows.
+  function applyLive(prev) {
+    const st = getSettings();
+    if (st.weighting !== prev.weighting) {
+      $('a-unit').textContent = unitOf(st.weighting);
+      gram.unit = unitOf(st.weighting);
+      if (meter) meter.setWeighting(st.weighting);
+      clearReadings();
+    }
+    if (st.fftSize !== prev.fftSize) applyFft();
+    if (st.scale !== prev.scale) gram.configure({ scale: st.scale });
+    if (st.traceSec !== prev.traceSec) {
+      trace.configure({ windowSec: st.traceSec || 30 });
+      trace.draw();
+    }
+    const p = presetOf(st.preset);
+    $('a-preset').firstElementChild.textContent = p.name;
+    $('a-preset').setAttribute('aria-label', `측정 상황: ${p.name}`);
+    if (meter?.paused && holds) draw(meter.levels);
+  }
+
+  function change(patch) {
+    const prev = getSettings();
+    changeSettings(patch);
+    applyLive(prev);
+  }
+
+  // "측정 상황" (the reference app's "사용자 지정 ⌄"): one choice sets several settings at once.
+  function presetMenu() {
+    if (menu) return menu.close();
+    const st = getSettings();
+    menu = openMenu(
+      $('a-preset'),
+      `<div class="menu-group"><p class="menu-head">측정 상황</p>
+        ${[...PRESETS, CUSTOM].map((p) => `<button type="button" role="menuitemradio" aria-checked="${st.preset === p.id}" data-preset="${p.id}"><span class="mi-text">${p.name}<small>${p.note}</small></span></button>`).join('')}
+      </div>
+      <p class="menu-foot">고른 뒤에 설정을 직접 바꾸면 '사용자 지정'이 됩니다.</p>`,
+      () => (menu = null),
+      'menu-preset',
+    );
+    menu.menu.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-preset]');
+      if (!b) return;
+      const prev = getSettings();
+      saveSettings(choosePreset(prev, b.dataset.preset));
+      menu.close();
+      applyLive(prev);
+      toast(`측정 상황: ${presetOf(b.dataset.preset).name}`);
     });
   }
 
@@ -709,12 +750,12 @@ async function renderAnalyzer() {
           <button type="button" role="menuitem" data-act="more">${ICON.sliders}가중치 · 시간축 · FFT · 축</button>
         </div>`;
     };
-    menu = openMenu(anchor, html(), () => (menu = null));
+    menu = openMenu(anchor, html(), () => (menu = null), 'menu-chart');
     menu.menu.addEventListener('click', (e) => {
       const b = e.target.closest('button');
       if (!b) return;
-      if (b.dataset.style) saveSettings({ style: b.dataset.style });
-      else if (b.dataset.toggle) saveSettings({ [b.dataset.toggle]: !getSettings()[b.dataset.toggle] });
+      if (b.dataset.style) change({ style: b.dataset.style });
+      else if (b.dataset.toggle) change({ [b.dataset.toggle]: !getSettings()[b.dataset.toggle] });
       else if (b.dataset.act === 'hold-reset') {
         resetHolds();
         menu.close();
@@ -771,6 +812,7 @@ async function renderAnalyzer() {
   };
   view.querySelector('[data-act=help]').onclick = helpSheet;
   view.querySelector('[data-act=chart-settings]').onclick = chartMenu;
+  $('a-preset').onclick = presetMenu;
   view.querySelectorAll('.mode').forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
 
   if ((await micPermission()) === 'granted') startMic();
@@ -957,18 +999,18 @@ async function renderFile() {
         const st2 = getSettings();
         if (b.dataset.opt === 'unit' || b.dataset.opt === 'weighting') {
           if (b.dataset.opt === 'unit') saveSettings({ fileUnit: st2.fileUnit === 'fs' ? 'cal' : 'fs' });
-          else saveSettings({ weighting: WEIGHTINGS[(WEIGHTINGS.indexOf(st2.weighting) + 1) % WEIGHTINGS.length] });
+          else changeSettings({ weighting: WEIGHTINGS[(WEIGHTINGS.indexOf(st2.weighting) + 1) % WEIGHTINGS.length] });
           teardown?.();
           teardown = await showAnalysis(file, decoded);
           return;
         }
         if (b.dataset.opt === 'style') {
           const style = STYLE_ORDER[(STYLE_ORDER.indexOf(st2.style) + 1) % STYLE_ORDER.length];
-          saveSettings({ style });
+          changeSettings({ style });
           b.querySelector('b').textContent = STYLE_NAME[style];
         } else {
           const scale = st2.scale === 'log' ? 'linear' : 'log';
-          saveSettings({ scale });
+          changeSettings({ scale });
           b.querySelector('b').textContent = scale === 'log' ? '로그' : '선형';
           gram.configure({ scale });
         }

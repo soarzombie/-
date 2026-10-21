@@ -182,6 +182,7 @@ async function tapFrequency(page, hz) {
   await page.mouse.click(r.x + x, r.y + r.height * 0.75); // low enough to miss the floating level panel in landscape
 }
 
+const settingsOf = (page) => page.evaluate(() => JSON.parse(localStorage.getItem('noise-meter:settings:v1')));
 const num = async (page, sel) => parseFloat((await page.locator(sel).textContent()).replace(/[^\d.-]/g, ''));
 const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
 
@@ -334,6 +335,36 @@ async function chartSettings(page, picks, shotName) {
   assert.notEqual(await page.locator('#a-time').textContent(), '00:00', 'hold reset keeps measuring time');
   assert.ok(leqBefore !== '–' && (await page.locator('#a-leq').textContent()) !== '–', 'and the levels');
 
+  // measurement situations: one choice sets several settings; a change by hand makes it 사용자 지정;
+  // 사용자 지정 brings back the own mix
+  const pickPreset = async (name) => {
+    await page.locator('#a-preset').click();
+    await page.getByRole('menuitemradio', { name: new RegExp(`^${name}`) }).click();
+    await page.waitForSelector('.menu', { state: 'detached' });
+    assert.match(await page.locator('#a-preset').textContent(), new RegExp(name));
+  };
+  assert.match(await page.locator('#a-preset').textContent(), /사용자 지정/);
+  const own = await settingsOf(page);
+  await pickPreset('공회전');
+  let st = await settingsOf(page);
+  assert.deepEqual([st.preset, st.fftSize, st.style, st.peakHold, st.minHold, st.traceSec], ['idle', 16384, 'line', true, true, 60]);
+  await page.getByRole('button', { name: '그래프 설정' }).click();
+  assert.equal(await page.locator('.menu [data-style=line]').getAttribute('aria-checked'), 'true', 'chart menu shows it');
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(600);
+  await shot(page, 'preset-idle');
+  await chartMenu(page, { style: 'bar' });
+  assert.match(await page.locator('#a-preset').textContent(), /사용자 지정/, 'changed by hand');
+  await pickPreset('주행');
+  st = await settingsOf(page);
+  assert.deepEqual([st.preset, st.fftSize, st.style, st.maxTrack, st.traceSec], ['drive', 4096, 'fill', true, 300]);
+  await pickPreset('사용자 지정');
+  st = await settingsOf(page);
+  assert.deepEqual([st.preset, st.fftSize, st.style, st.minHold, st.traceSec], ['custom', 16384, 'bar', true, 60], 'the own mix (공회전 + 막대)');
+  // back to the settings the rest of this run expects
+  await chartMenu(page, { style: own.style });
+  await chartSettings(page, { fft: String(own.fftSize), trace: String(own.traceSec) });
+
   // help sheet
   await page.getByRole('button', { name: '도움말' }).click();
   await page.waitForSelector('dialog.sheet .help');
@@ -468,7 +499,6 @@ async function chartSettings(page, picks, shotName) {
   for (const [w, weight] of [['C', -0.3], ['Z', 0], ['A', -19.1]]) {
     await chartSettings(page, { weighting: w }, w === 'C' ? 'settings-sheet' : null);
     assert.equal(await page.locator('#a-unit').textContent(), `dB(${w})`);
-    assert.equal(await page.locator('#a-weight').textContent(), `${w}특성`);
     await page.waitForTimeout(1800);
     const v = await num(page, '#a-now');
     const leq = await num(page, '#a-leq');
@@ -556,6 +586,10 @@ async function chartSettings(page, picks, shotName) {
     await page.waitForTimeout(500);
     await shot(page, `main-${name}-bars`);
     await chartMenu(page, {}, `chart-menu-${name}`);
+    await page.locator('#a-preset').click();
+    await page.getByRole('menu').waitFor();
+    await shot(page, `preset-menu-${name}`);
+    await page.keyboard.press('Escape');
     await chartMenu(page, { style: 'fill', off: ['maxTrack', 'minTrack', 'minHold'] });
     await setMode(page, 'octave');
     await page.waitForTimeout(2500);

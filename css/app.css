@@ -111,7 +111,10 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 .mode[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
 
 .an-sub { grid-area: sub; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px; margin-top: -2px; }
-.an-weight { justify-self: start; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; font-weight: 700; color: var(--ink-2); }
+.an-preset { justify-self: start; display: inline-flex; align-items: center; gap: 1px; min-width: 0; min-height: 30px; padding: 0 5px 0 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-2); color: var(--ink); font: inherit; font-size: 13px; font-weight: 700; white-space: nowrap; cursor: pointer; }
+.an-preset span { overflow: hidden; text-overflow: ellipsis; }
+.an-preset svg { flex-shrink: 0; width: 17px; height: 17px; color: var(--ink-2); }
+.an-preset[aria-expanded="true"] { border-color: var(--accent); }
 .an-mode-name { font-size: 15px; font-weight: 600; color: var(--ink-2); text-align: center; }
 .an-status { justify-self: end; display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); white-space: nowrap; }
 .an-status b { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
@@ -286,7 +289,8 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
   .mode { height: 38px; }
   .mode svg { width: 23px; height: 23px; }
   /* the status line sits in the top row of the floating level panel */
-  .an-sub { grid-area: chart; align-self: start; justify-self: start; z-index: 5; display: flex; gap: 10px; margin: 15px 0 0 54px; pointer-events: none; }
+  .an-sub { grid-area: chart; align-self: start; justify-self: start; z-index: 5; display: flex; align-items: center; gap: 10px; margin: 13px 0 0 52px; pointer-events: none; }
+  .an-preset { pointer-events: auto; min-height: 28px; }
   .an-mode-name { display: none; }
   .an-level {
     grid-area: chart;
@@ -295,7 +299,7 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
     z-index: 4;
     width: clamp(290px, 44%, 330px);
     margin: 8px 0 0 40px;
-    padding: 34px 4px 6px;
+    padding: 40px 4px 6px;
     grid-template-columns: 38px minmax(0, 1fr) 38px;
     column-gap: 2px;
     background: rgb(21 24 29 / 82%);
@@ -686,10 +690,14 @@ select {
 .menu button .sw { margin-left: auto; }
 .menu [role="menuitem"] svg { position: absolute; left: 13px; width: 21px; height: 21px; color: var(--accent); }
 /* phone on its side: styles and curves side by side */
+/* measurement situations: name with a short line about what it sets */
+.mi-text { display: grid; gap: 1px; padding: 7px 0; }
+.mi-text small { max-width: 270px; font-size: 12px; font-weight: 500; line-height: 1.35; color: var(--ink-3); white-space: normal; }
+.menu-foot { margin-top: 6px; padding: 8px 16px 4px; border-top: 1px solid var(--line); font-size: 12px; color: var(--ink-3); max-width: 330px; }
 @media (orientation: landscape) and (max-height: 520px) {
-  .menu { display: grid; grid-template-columns: auto auto; }
-  .menu-group + .menu-group { border-top: 0; margin-top: 0; padding-top: 0; }
-  .menu-group:nth-child(2) { border-left: 1px solid var(--line); }
+  .menu-chart { display: grid; grid-template-columns: auto auto; }
+  .menu-chart .menu-group + .menu-group { border-top: 0; margin-top: 0; padding-top: 0; }
+  .menu-chart .menu-group:nth-child(2) { border-left: 1px solid var(--line); }
   .menu-wide { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
   .menu button { min-height: 40px; }
 }

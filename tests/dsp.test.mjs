@@ -28,6 +28,7 @@ import {
 import { analyzeSound, frameAt } from '../js/analysis.js';
 import { encodeWav, decodeWav } from '../js/audio.js';
 import { columnRange } from '../js/timeline.js';
+import { PRESETS, PRESET_KEYS, choosePreset, customize, presetOf } from '../js/presets.js';
 
 // IEC 61672-1 A-weighting (dB) at the exact base-10 octave frequencies 1000 * 10^(0.3n).
 const IEC_A = [
@@ -464,4 +465,29 @@ test('holds: peak and minimum hold keep the extremes, tracking curves drift back
   assert.equal(h.minTrack[2], 70, 'min tracking comes up to the level');
   assert.equal(h.max[1], 60, 'peak hold stays');
   assert.equal(h.min[2], 40, 'minimum hold stays');
+});
+
+test('measurement situations: choosing one sets all its values, 사용자 지정 comes back as it was', () => {
+  const mine = { preset: 'custom', custom: null, weighting: 'C', fftSize: 2048, style: 'bar', scale: 'linear', peakHold: false, minHold: false, maxTrack: false, minTrack: true, traceSec: 30, view: 'gram' };
+  for (const p of PRESETS) assert.deepEqual(Object.keys(p.values).sort(), [...PRESET_KEYS].sort(), `${p.name} sets every key`);
+  // custom -> idle: idle values, and the own mix is kept
+  let st = { ...mine, ...choosePreset(mine, 'idle') };
+  assert.equal(st.preset, 'idle');
+  assert.deepEqual([st.weighting, st.fftSize, st.style, st.minHold, st.traceSec], ['A', 16384, 'line', true, 60]);
+  assert.equal(st.view, 'gram', 'the view is not part of a situation');
+  assert.equal(st.custom.style, 'bar');
+  // idle -> drive keeps the same remembered mix
+  st = { ...st, ...choosePreset(st, 'drive') };
+  assert.deepEqual([st.preset, st.fftSize, st.maxTrack, st.traceSec, st.custom.fftSize], ['drive', 4096, true, 300, 2048]);
+  // back to custom: exactly the own mix
+  st = { ...st, ...choosePreset(st, 'custom') };
+  assert.equal(st.preset, 'custom');
+  for (const k of PRESET_KEYS) assert.equal(st[k], mine[k], k);
+  // a change by hand while a situation is chosen makes it 사용자 지정, other changes do not
+  const idle = { ...mine, ...choosePreset(mine, 'idle') };
+  assert.deepEqual(customize(idle, { style: 'fill' }), { style: 'fill', preset: 'custom' });
+  assert.deepEqual(customize(idle, { style: 'line' }), { style: 'line' }, 'same value: still 공회전');
+  assert.deepEqual(customize(idle, { view: 'octave' }), { view: 'octave' });
+  assert.deepEqual(customize(mine, { style: 'fill' }), { style: 'fill' });
+  assert.equal(presetOf('nope').id, 'custom');
 });

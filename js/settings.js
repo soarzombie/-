@@ -1,6 +1,6 @@
 // Per-device settings (kept in localStorage).
 
-export const APP_VERSION = '0.8.0';
+export const APP_VERSION = '0.9.0';
 
 const KEY = 'noise-meter:settings:v1';
 
@@ -15,6 +15,8 @@ const DEFAULTS = {
   style: 'fill', // 'fill' | 'line' | 'bar'
   fftSize: 4096,
   scale: 'log',
+  preset: 'custom', // measurement situation (presets.js): 'idle' | 'drive' | 'indoor' | 'custom'
+  custom: null, // the user's own mix, kept while a situation is chosen
   // curves over the spectrum
   peakHold: true, // maximum since reset
   minHold: false, // minimum since reset
