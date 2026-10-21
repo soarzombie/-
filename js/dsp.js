@@ -132,6 +132,32 @@ export function bandLevels(levels, idx, count = BANDS.length, out = new Float32A
   return out;
 }
 
+// Per-bin curves kept beside the live spectrum: peak hold (max since reset), minimum hold, and two
+// tracking curves that follow the spectrum's highs / lows and drift back at `rate` dB per second.
+export const TRACK_DB_PER_SEC = 12;
+
+export function newHolds(n) {
+  return {
+    max: new Float32Array(n).fill(-Infinity),
+    min: new Float32Array(n).fill(Infinity),
+    maxTrack: new Float32Array(n).fill(-Infinity),
+    minTrack: new Float32Array(n).fill(Infinity),
+  };
+}
+
+// dt: seconds since the last update. Bin 0 (DC) is left alone.
+export function updateHolds(h, cur, dt, rate = TRACK_DB_PER_SEC) {
+  const fall = rate * dt;
+  for (let k = 1; k < cur.length; k++) {
+    const v = cur[k];
+    if (v > h.max[k]) h.max[k] = v;
+    if (v < h.min[k]) h.min[k] = v;
+    h.maxTrack[k] = Math.max(v, h.maxTrack[k] - fall);
+    h.minTrack[k] = Math.min(v, h.minTrack[k] + fall);
+  }
+  return h;
+}
+
 export function binLevels(dbBins, table, offset, out = new Float32Array(dbBins.length)) {
   for (let k = 0; k < dbBins.length; k++) out[k] = dbBins[k] + table[k] + offset;
   return out;

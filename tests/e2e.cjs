@@ -192,8 +192,31 @@ async function setMode(page, mode) {
 }
 
 // Graph settings sheet: pick values by key, e.g. { style: 'line', fft: '8192' }.
+// Chart menu (the chart button): { style: 'line', on: ['minHold'], off: ['peakHold'] }.
+async function chartMenu(page, { style, on = [], off = [] } = {}, shotName) {
+  await page.getByRole('button', { name: '그래프 설정' }).click();
+  const menu = page.getByRole('menu');
+  await menu.waitFor();
+  if (style) {
+    await menu.locator(`[data-style=${style}]`).click();
+    assert.equal(await menu.locator(`[data-style=${style}]`).getAttribute('aria-checked'), 'true', `style ${style}`);
+  }
+  for (const [keys, want] of [[on, 'true'], [off, 'false']]) {
+    for (const key of keys) {
+      const b = menu.locator(`[data-toggle=${key}]`);
+      if ((await b.getAttribute('aria-checked')) !== want) await b.click();
+      assert.equal(await b.getAttribute('aria-checked'), want, `${key} ${want}`);
+    }
+  }
+  if (shotName) await shot(page, shotName);
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.menu', { state: 'detached' });
+}
+
+// The rest of the graph settings: chart menu -> last item -> sheet.
 async function chartSettings(page, picks, shotName) {
   await page.getByRole('button', { name: '그래프 설정' }).click();
+  await page.getByRole('menuitem', { name: /가중치/ }).click();
   const sheet = page.locator('dialog.sheet');
   for (const [key, v] of Object.entries(picks)) {
     const b = sheet.locator(`.seg[data-key=${key}] button[data-v="${v}"]`);
@@ -280,13 +303,36 @@ async function chartSettings(page, picks, shotName) {
   await chartSettings(page, { trace: '30' });
   assert.match(await page.locator('#a-mode-name').textContent(), /주파수 \+ 시간축/);
 
-  // graph settings: style, max hold, FFT size, axis
-  await chartSettings(page, { style: 'line', hold: 'off', fft: '8192', scale: 'linear' });
+  // chart menu: style and curves; graph settings sheet: FFT size, axis
+  await chartMenu(page, { style: 'line', on: ['maxTrack', 'minTrack', 'minHold'], off: ['peakHold'] });
+  await chartSettings(page, { fft: '8192', scale: 'linear' });
   await page.waitForTimeout(800);
   await shot(page, 'tone-linear');
-  await chartSettings(page, { style: 'fill', hold: 'on', fft: '4096', scale: 'log' });
+  await chartMenu(page, { style: 'bar' });
+  await page.waitForTimeout(300);
+  await shot(page, 'tone-bars');
+  await chartMenu(page, { style: 'fill', on: ['peakHold'], off: ['maxTrack', 'minTrack'] });
+  await chartSettings(page, { fft: '4096', scale: 'log' });
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('noise-meter:settings:v1')));
-  assert.deepEqual([saved.style, saved.hold, saved.fftSize, saved.scale, saved.view], ['fill', true, 4096, 'log', 'spectrum']);
+  assert.deepEqual(
+    [saved.style, saved.peakHold, saved.minHold, saved.maxTrack, saved.minTrack, saved.fftSize, saved.scale, saved.view],
+    ['fill', true, true, false, false, 4096, 'log', 'spectrum'],
+  );
+  assert.ok(!('hold' in saved), 'old single max switch is gone');
+  // tapping outside closes the menu, also when the tap is on the chart button itself
+  await page.getByRole('button', { name: '그래프 설정' }).click();
+  await page.getByRole('menu').waitFor();
+  await page.getByRole('button', { name: '그래프 설정' }).click({ force: true });
+  await page.waitForTimeout(500);
+  assert.equal(await page.locator('.menu').count(), 0, 'menu closed');
+  // hold reset starts the curves again but not the levels
+  const leqBefore = await page.locator('#a-leq').textContent();
+  await page.getByRole('button', { name: '그래프 설정' }).click();
+  await page.getByRole('menuitem', { name: '홀드 재설정' }).click();
+  await page.waitForSelector('#toast:not([hidden])');
+  assert.equal(await page.locator('.menu').count(), 0);
+  assert.notEqual(await page.locator('#a-time').textContent(), '00:00', 'hold reset keeps measuring time');
+  assert.ok(leqBefore !== '–' && (await page.locator('#a-leq').textContent()) !== '–', 'and the levels');
 
   // help sheet
   await page.getByRole('button', { name: '도움말' }).click();
@@ -310,10 +356,13 @@ async function chartSettings(page, picks, shotName) {
     const req = indexedDB.open('noise-meter');
     req.onsuccess = () => {
       const all = req.result.transaction('records').objectStore('records').getAll();
-      all.onsuccess = () => resolve([all.result[0].spectrum.freqs[0], all.result[0].spectrum.freqs.at(-1)]);
+      all.onsuccess = () => {
+        const sp = all.result[0].spectrum;
+        resolve([sp.freqs[0], sp.freqs.at(-1), sp.min?.length, sp.min?.every((v, i) => v <= sp.max[i])]);
+      };
     };
   }));
-  assert.deepEqual(span, [20, 20000], 'saved spectrum spans 20 Hz – 20 kHz');
+  assert.deepEqual(span, [20, 20000, 241, true], 'saved spectrum spans 20 Hz – 20 kHz, with the minimum hold'); 
   const [csv] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: /엑셀/ }).click()]);
   const csvText = fs.readFileSync(await csv.path(), 'utf8');
   assert.ok(csvText.startsWith('\uFEFF일시,출처,차량번호'), 'CSV header with BOM');
@@ -459,7 +508,7 @@ async function chartSettings(page, picks, shotName) {
   await page.mouse.click(tl.x + 30 + (tl.width - 36) * 0.9, tl.y + tl.height / 2);
   const t = await page.evaluate(() => document.querySelector('#fa-audio').currentTime);
   assert.ok(Math.abs(t - 5.4) < 0.4, `seek to ${t}`);
-  assert.match(await page.locator('#fa-cur-label').textContent(), /재생 위치/);
+  assert.match(await page.locator('#fa-legend').textContent(), /재생 위치/);
   await page.getByRole('button', { name: '기록에 저장' }).click();
   await page.locator('dialog.sheet').getByRole('button', { name: '저장' }).click();
   await page.waitForSelector('#toast:not([hidden])');
@@ -491,14 +540,23 @@ async function chartSettings(page, picks, shotName) {
     await page.waitForTimeout(3500);
     await shot(page, `main-${name}-gram`);
     await setMode(page, 'spectrum');
-    await chartSettings(page, { style: 'line' });
+    await chartMenu(page, { style: 'line' });
     await page.waitForTimeout(2500);
     await tapFrequency(page, 1250);
     await tapFrequency(page, 125);
     await page.waitForTimeout(300);
     await shot(page, `main-${name}-line`);
     await page.locator('#a-cursor .cr-close').click();
-    await chartSettings(page, { style: 'fill' });
+    await chartMenu(page, { style: 'fill' });
+    // the curves from the chart menu, then the menu itself
+    await chartMenu(page, { style: 'line', on: ['maxTrack', 'minTrack', 'minHold'] });
+    await page.waitForTimeout(2500);
+    await shot(page, `main-${name}-curves`);
+    await chartMenu(page, { style: 'bar' });
+    await page.waitForTimeout(500);
+    await shot(page, `main-${name}-bars`);
+    await chartMenu(page, {}, `chart-menu-${name}`);
+    await chartMenu(page, { style: 'fill', off: ['maxTrack', 'minTrack', 'minHold'] });
     await setMode(page, 'octave');
     await page.waitForTimeout(2500);
     await shot(page, `main-${name}-octave`);
@@ -509,6 +567,7 @@ async function chartSettings(page, picks, shotName) {
     await shot(page, `main-${name}-trace`);
     await page.locator('#a-cursor .cr-close').click();
     await page.getByRole('button', { name: '그래프 설정' }).click();
+    await page.getByRole('menuitem', { name: /가중치/ }).click();
     await page.waitForTimeout(200);
     await shot(page, `settings-sheet-${name}`);
     await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();

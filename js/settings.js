@@ -1,6 +1,6 @@
 // Per-device settings (kept in localStorage).
 
-export const APP_VERSION = '0.7.1';
+export const APP_VERSION = '0.8.0';
 
 const KEY = 'noise-meter:settings:v1';
 
@@ -12,10 +12,14 @@ const DEFAULTS = {
   view: 'spectrum', // 'spectrum' (frequency graph + time-axis graph below) | 'gram' (spectrogram) | 'octave' (1/3-octave bars)
   traceSec: 30, // seconds shown in the time-axis graph: 30 | 60 | 300
   weighting: 'A', // frequency weighting 'A' | 'C' | 'Z', for levels and spectrum alike
-  style: 'fill', // 'fill' | 'line'
+  style: 'fill', // 'fill' | 'line' | 'bar'
   fftSize: 4096,
   scale: 'log',
-  hold: true,
+  // curves over the spectrum
+  peakHold: true, // maximum since reset
+  minHold: false, // minimum since reset
+  maxTrack: false, // follows the highs, drifts back down
+  minTrack: false, // follows the lows, drifts back up
   audioSec: 10, // seconds of sound kept for "save"; 0 = off
   fileUnit: 'cal', // attached files: 'cal' = this phone's calibration, dB; 'fs' = digital level, dBFS
   alertLevel: 85, // the level bar turns red from here, dB
@@ -35,6 +39,8 @@ export function getSettings() {
   } catch {
     saved = {};
   }
+  if ('hold' in saved && !('peakHold' in saved)) saved.peakHold = saved.hold; // before 0.8 there was one switch
+  delete saved.hold;
   cache = { ...DEFAULTS, ...saved };
   return cache;
 }

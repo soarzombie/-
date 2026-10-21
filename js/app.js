@@ -3,10 +3,10 @@
 
 import { APP_VERSION, getSettings, saveSettings, rememberVehicle } from './settings.js';
 import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
-import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels } from './dsp.js';
+import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds } from './dsp.js';
 import * as store from './store.js';
 import { esc, fmtDb, fmtHz, fmtClock, fmtDate, fmtDay, fmtShortDate, fmtTime, fileStamp } from './format.js';
-import { SpectrumView } from './spectrum.js';
+import { SpectrumView, curveLook } from './spectrum.js';
 import { SpectrogramView } from './spectrogram.js';
 import { encodeWav, decodeAudioFile } from './audio.js';
 import { analyzeSound, frameAt } from './analysis.js';
@@ -97,6 +97,34 @@ function openSheet(html) {
   return { dlg, close };
 }
 
+// Small menu that drops from a button (like a phone's context menu). Tapping outside or Esc closes it.
+function openMenu(anchor, html, onClose = null) {
+  const layer = document.createElement('div');
+  layer.className = 'menu-layer';
+  const menu = document.createElement('div');
+  menu.className = 'menu';
+  menu.setAttribute('role', 'menu');
+  menu.innerHTML = html;
+  document.body.append(layer, menu);
+  const a = anchor.getBoundingClientRect();
+  const m = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(a.right - m.width, window.innerWidth - m.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(a.bottom + 6, window.innerHeight - m.height - 8))}px`;
+  const onKey = (e) => e.key === 'Escape' && close();
+  const close = () => {
+    if (!menu.isConnected) return;
+    layer.remove();
+    menu.remove();
+    document.removeEventListener('keydown', onKey);
+    anchor.setAttribute('aria-expanded', 'false');
+    onClose?.();
+  };
+  document.addEventListener('keydown', onKey);
+  layer.addEventListener('click', close); // the whole tap lands on the layer, not on what is under it
+  anchor.setAttribute('aria-expanded', 'true');
+  return { menu, close };
+}
+
 async function keepScreenOn() {
   try {
     return (await navigator.wakeLock?.request('screen')) || null;
@@ -132,6 +160,12 @@ function bindCursorReadout(el) {
     el.hidden = !html;
     el.querySelector('.cr-lines').innerHTML = html;
   };
+}
+
+// Legend: [curve, text] pairs in the style's colours (see curveLook).
+function legendHtml(style, items) {
+  const look = curveLook(style);
+  return items.map(([key, text]) => `<span class="lg"><i class="sw sw-${look[key][1]}" style="--c:${look[key][0]}" aria-hidden="true"></i>${text}</span>`).join('');
 }
 
 const cursorBox = (id) =>
@@ -188,6 +222,16 @@ const MODES = [
   { id: 'octave', name: '1/3 옥타브', label: '1/3 옥타브 막대', icon: svg('<path stroke-width="2.6" d="M5.5 19v-5M9.5 19v-9M13.5 19v-13M17.5 19v-7"/>') },
 ];
 const OCTAVE_FFT = 16384; // 2.9 Hz bins, so even the 25 Hz band has some
+const CHART_STYLES = [['fill', '면'], ['line', '선'], ['bar', '막대']];
+const STYLE_ORDER = CHART_STYLES.map(([v]) => v);
+const STYLE_NAME = Object.fromEntries(CHART_STYLES);
+// setting, menu text, curve (for the colour swatch)
+const OVERLAYS = [
+  ['maxTrack', '최대값 추적', 'maxTrack'],
+  ['minTrack', '최소값 추적', 'minTrack'],
+  ['peakHold', '피크 홀드', 'max'],
+  ['minHold', '미니멈 홀드', 'min'],
+];
 const WEIGHT_NOTE = {
   A: '사람 귀에 가깝게 저음·고음을 줄여서 잽니다. 보통 소음은 A.',
   C: '저음까지 거의 그대로 잽니다. 엔진·부밍음처럼 저음이 큰 소리, 아주 큰 소리.',
@@ -223,6 +267,7 @@ function helpSheet() {
         <dt>최소·평균·최대</dt><dd>측정을 시작하거나 ↻ 초기화를 누른 뒤의 값입니다. 평균은 에너지 평균(Leq)입니다.</dd>
         <dt>A · C · Z</dt><dd>주파수 가중치. <b>A</b> 보통 소음(사람 귀에 가깝게) · <b>C</b> 엔진·부밍음처럼 저음이 큰 소리 · <b>Z</b> 거르지 않은 소리. 그래프 오른쪽 위 설정 버튼에서 바꿉니다.</dd>
         <dt>주파수 그래프</dt><dd>위쪽 큰 그래프. 가로는 주파수(20 Hz – 20 kHz), 세로는 dB입니다. 누르면 십자선 커서가 그 주파수의 값을 보여 주고, 한 번 더 누르면 커서 B로 두 곳을 비교합니다. 끌어서 옮기고 × 로 지웁니다.</dd>
+        <dt>⚙ 차트 메뉴</dt><dd>그래프 오른쪽 위 버튼. 차트 스타일(면 · 선 · 막대), <b>최대값 추적</b>·<b>최소값 추적</b>(최근 큰·작은 값을 따라가다 초당 12 dB씩 돌아오는 점선), <b>피크 홀드</b>(초기화 뒤 가장 큰 값), <b>미니멈 홀드</b>(초기화 뒤 가장 작은 값, 주황), 홀드 재설정(이 선들만 새로 시작), 가중치·시간축·FFT·축 설정.</dd>
         <dt>시간축 그래프</dt><dd>아래쪽 작은 그래프. 가로는 측정 시간, 세로는 dB(큰 숫자와 같은 값), 점선은 평균입니다. 보이는 시간(30초 · 1분 · 5분)은 그래프 설정에서 바꿉니다.</dd>
         <dt>보기</dt><dd>${MODES.map((m) => m.label).join(' · ')}. 맨 위 버튼으로 바꿉니다.</dd>
         <dt>● 녹음</dt><dd>측정 버튼과 따로 움직입니다. 누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 그래프 위 빨간 시계가 녹음 길이), 측정을 일시정지해도 녹음은 계속됩니다. 정지해도 측정은 그대로 이어지고, 녹음은 파일 탭에 들어가 "분석 보기"로 바로 열 수 있습니다.</dd>
@@ -262,7 +307,7 @@ async function renderAnalyzer() {
         <div class="chart-tools">
           <p class="rec-badge" id="a-rec-badge" hidden><i></i>녹음 <b id="a-rec-time">00:00</b></p>
           <p class="an-peak" id="a-peak">피크 –</p>
-          <button type="button" class="tool-btn" data-act="chart-settings" aria-label="그래프 설정">${ICON.sliders}</button>
+          <button type="button" class="tool-btn" data-act="chart-settings" aria-label="그래프 설정" aria-haspopup="menu" aria-expanded="false">${ICON.sliders}</button>
         </div>
         ${cursorBox('a-cursor')}
         <div class="chart-overlay" id="a-overlay">
@@ -305,12 +350,15 @@ async function renderAnalyzer() {
   let meter = null;
   let raf = 0;
   let wake = null;
-  let hold = null; // per-bin maximum since reset
+  let holds = null; // per-bin peak / minimum hold and max / min tracking (newHolds)
   let avgPow = null; // slowly averaged spectrum, for steady peak labels
   let peaks = [];
   let bandIdx = null; // analyser bin -> 1/3-octave band
-  let bandHold = null;
+  let bandHolds = null; // { max, min } per band
+  let lastFrameAt = 0;
+  let holdFrom = 0; // no hold updates before this time (the analyser settles after an FFT size change)
   let lastPeakAt = 0;
+  let menu = null; // the open chart menu
   let lastRowAt = 0;
   let range = [-20, 100];
   let octRange = [0, 100];
@@ -321,14 +369,35 @@ async function renderAnalyzer() {
   const draw = (cur) => {
     const st = getSettings();
     if (st.view === 'octave') {
-      bandHold ||= new Float32Array(BANDS.length).fill(-Infinity);
+      bandHolds ||= { max: new Float32Array(BANDS.length).fill(-Infinity), min: new Float32Array(BANDS.length).fill(Infinity) };
       const bands = bandLevels(cur, bandIdx);
-      for (let b = 0; b < bands.length; b++) if (bands[b] > bandHold[b]) bandHold[b] = bands[b];
-      const top = Math.max(meter.laf, ...bandHold);
+      if (holds) {
+        // (holds exists once the warm-up is over)
+        for (let b = 0; b < bands.length; b++) {
+          if (bands[b] > bandHolds.max[b]) bandHolds.max[b] = bands[b];
+          if (bands[b] < bandHolds.min[b]) bandHolds.min[b] = bands[b];
+        }
+      }
+      const top = Math.max(meter.laf, ...bandHolds.max);
       if (top > octRange[1] - 4 && octRange[1] < 140) octRange = [octRange[0] + 20, octRange[1] + 20];
-      octave.update({ bands, max: st.hold ? bandHold : null, total: meter.laf }, { range: octRange, unit: unit(), style: st.style });
+      octave.update(
+        { bands, max: st.peakHold ? bandHolds.max : null, min: st.minHold ? bandHolds.min : null, total: meter.laf },
+        { range: octRange, unit: unit(), style: st.style },
+      );
     } else {
-      chart.update({ freqs: meter.freqs, cur, max: st.hold ? hold : null, peaks }, { scale: st.scale, style: st.style, range, unit: unit() });
+      const h = holds || {};
+      chart.update(
+        {
+          freqs: meter.freqs,
+          cur,
+          max: st.peakHold ? h.max : null,
+          min: st.minHold ? h.min : null,
+          maxTrack: st.maxTrack ? h.maxTrack : null,
+          minTrack: st.minTrack ? h.minTrack : null,
+          peaks,
+        },
+        { scale: st.scale, style: st.style, range, unit: unit() },
+      );
     }
   };
 
@@ -340,13 +409,18 @@ async function renderAnalyzer() {
     $('a-state').textContent = paused ? '일시정지' : '측정 중';
   }
 
-  function resetDisplays() {
-    hold = null;
-    avgPow = null;
-    peaks = [];
-    bandHold = null;
+  // "홀드 재설정": the curves over the spectrum start again; levels and the time axis go on
+  function resetHolds() {
+    holds = null;
+    bandHolds = null;
     range = [-20, 100];
     octRange = [0, 100];
+  }
+
+  function resetDisplays() {
+    resetHolds();
+    avgPow = null;
+    peaks = [];
     $('a-peak').textContent = '피크 –';
   }
 
@@ -368,6 +442,7 @@ async function renderAnalyzer() {
     if (meter.analyser.fftSize !== want) {
       meter.setFftSize(want);
       resetDisplays();
+      holdFrom = performance.now() + 400;
     }
     bandIdx = bandIndex(meter.freqs);
   }
@@ -385,14 +460,17 @@ async function renderAnalyzer() {
     }
     if (meter.paused) return;
     const cur = meter.spectrum();
-    if (!hold || hold.length !== cur.length) {
-      hold = new Float32Array(cur.length).fill(-Infinity);
-      avgPow = new Float64Array(cur.length);
+    if (!avgPow || avgPow.length !== cur.length) avgPow = new Float64Array(cur.length);
+    // holds start after the warm-up, like the levels, so start-up silence is not the minimum
+    if (!meter.warming && now >= holdFrom) {
+      if (!holds || holds.max.length !== cur.length) holds = newHolds(cur.length);
+      updateHolds(holds, cur, Math.min(0.25, (now - lastFrameAt) / 1000));
     }
+    lastFrameAt = now;
     let top = -Infinity;
     for (let k = 1; k < cur.length; k++) {
-      if (cur[k] > hold[k]) hold[k] = cur[k];
-      if (hold[k] > top) top = hold[k];
+      const v = holds ? holds.max[k] : cur[k];
+      if (v > top) top = v;
       avgPow[k] += (10 ** (cur[k] / 10) - avgPow[k]) * 0.1;
     }
     if (top > range[1] - 4 && range[1] < 140) range = [range[0], range[1] + 20];
@@ -535,7 +613,8 @@ async function renderAnalyzer() {
       spectrum: {
         freqs: Array.from(grid.centres, (f) => Math.round(f * 10) / 10),
         cur: keep(reduceRanges(meter.levels, meter.freqs, idx, grid.centres)),
-        max: keep(reduceRanges(hold, meter.freqs, idx, grid.centres)),
+        max: keep(reduceRanges(holds.max, meter.freqs, idx, grid.centres)),
+        ...(st.minHold ? { min: keep(reduceRanges(holds.min, meter.freqs, idx, grid.centres)) } : {}),
         range: [...range],
       },
       fftSize: meter.analyser.fftSize,
@@ -571,7 +650,7 @@ async function renderAnalyzer() {
     view.querySelectorAll('.mode').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === id)));
     $('a-mode-name').textContent = MODES.find((m) => m.id === id).name;
     applyFft();
-    if (meter?.paused && hold) draw(meter.levels);
+    if (meter?.paused && holds) draw(meter.levels);
   }
 
   function chartSettings() {
@@ -580,9 +659,7 @@ async function renderAnalyzer() {
       <div class="sheet-form chart-sheet">
         <h2>그래프 설정</h2>
         ${segRow('weighting', '주파수 가중치', WEIGHTINGS.map((w) => [w, `${w}특성`]), st.weighting, `<span id="f-weight-note">${WEIGHT_NOTE[st.weighting]}</span> 바꾸면 최소·평균·최대가 새로 시작합니다.`)}
-        ${segRow('style', '그래프 모양', [['fill', '면'], ['line', '선']], st.style)}
         ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
-        ${segRow('hold', '최대값', [['on', '표시'], ['off', '숨김']], st.hold ? 'on' : 'off')}
         ${segRow('fft', 'FFT 크기', FFT_SIZES.map((n) => [n, n]), st.fftSize, '클수록 주파수를 잘게 나누지만 반응이 느려집니다. 1/3 옥타브 보기는 늘 16384로 계산합니다.')}
         ${segRow('scale', '주파수 축', [['log', '로그'], ['linear', '선형']], st.scale)}
         <button type="button" class="btn btn-wide" data-close>닫기</button>
@@ -596,21 +673,58 @@ async function renderAnalyzer() {
         gram.unit = unitOf(v);
         if (meter) meter.setWeighting(v);
         clearReadings();
-      } else if (key === 'style') saveSettings({ style: v });
-      else if (key === 'trace') {
+      } else if (key === 'trace') {
         saveSettings({ traceSec: Number(v) });
         trace.configure({ windowSec: Number(v) });
         trace.draw();
-      }
-      else if (key === 'hold') saveSettings({ hold: v === 'on' });
-      else if (key === 'fft') {
+      } else if (key === 'fft') {
         saveSettings({ fftSize: Number(v) });
         applyFft();
       } else {
         saveSettings({ scale: v });
         gram.configure({ scale: v });
       }
-      if (meter?.paused && hold) draw(meter.levels);
+      if (meter?.paused && holds) draw(meter.levels);
+    });
+  }
+
+  // The chart button's menu, after the reference app: chart style, tracking / hold curves, hold reset,
+  // and the rest of the graph settings.
+  function chartMenu() {
+    if (menu) return menu.close();
+    const anchor = view.querySelector('[data-act=chart-settings]');
+    const html = () => {
+      const st = getSettings();
+      const look = curveLook(st.style);
+      const sw = (key) => `<i class="sw sw-${look[key][1]}" style="--c:${look[key][0]}" aria-hidden="true"></i>`;
+      return `
+        <div class="menu-group"><p class="menu-head">차트 스타일</p>
+          ${CHART_STYLES.map(([v, t]) => `<button type="button" role="menuitemradio" aria-checked="${st.style === v}" data-style="${v}">${t}</button>`).join('')}
+        </div>
+        <div class="menu-group"><p class="menu-head">추적 · 홀드</p>
+          ${OVERLAYS.map(([key, t, curve]) => `<button type="button" role="menuitemcheckbox" aria-checked="${!!st[key]}" data-toggle="${key}">${t}${sw(curve)}</button>`).join('')}
+        </div>
+        <div class="menu-group menu-wide">
+          <button type="button" role="menuitem" data-act="hold-reset">${ICON.reset}홀드 재설정</button>
+          <button type="button" role="menuitem" data-act="more">${ICON.sliders}가중치 · 시간축 · FFT · 축</button>
+        </div>`;
+    };
+    menu = openMenu(anchor, html(), () => (menu = null));
+    menu.menu.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.dataset.style) saveSettings({ style: b.dataset.style });
+      else if (b.dataset.toggle) saveSettings({ [b.dataset.toggle]: !getSettings()[b.dataset.toggle] });
+      else if (b.dataset.act === 'hold-reset') {
+        resetHolds();
+        menu.close();
+        toast('홀드를 다시 시작합니다');
+      } else if (b.dataset.act === 'more') {
+        menu.close();
+        chartSettings();
+      }
+      if (menu) menu.menu.innerHTML = html(); // ticks and colour swatches follow the choice
+      if (meter?.paused && holds) draw(meter.levels);
     });
   }
 
@@ -621,6 +735,7 @@ async function renderAnalyzer() {
   document.addEventListener('visibilitychange', onVisibility);
   cleanup = () => {
     document.removeEventListener('visibilitychange', onVisibility);
+    menu?.close();
     stopMic();
     chart.destroy();
     gram.destroy();
@@ -649,13 +764,13 @@ async function renderAnalyzer() {
     if (meter.paused) draw(meter.levels);
   };
   view.querySelector('[data-act=save]').onclick = () => {
-    if (!meter || !hold || meter.elapsed < 1) return toast('측정을 시작한 뒤에 저장할 수 있습니다');
+    if (!meter || !holds || meter.elapsed < 1) return toast('측정을 시작한 뒤에 저장할 수 있습니다');
     // grab the sound first: it is "what was just heard", before the sheet takes any time
     const audio = getSettings().audioSec > 0 ? meter.captureAudio() : Promise.resolve(new Float32Array(0));
     openSave(snapshot(), audio);
   };
   view.querySelector('[data-act=help]').onclick = helpSheet;
-  view.querySelector('[data-act=chart-settings]').onclick = chartSettings;
+  view.querySelector('[data-act=chart-settings]').onclick = chartMenu;
   view.querySelectorAll('.mode').forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
 
   if ((await micPermission()) === 'granted') startMic();
@@ -745,13 +860,13 @@ async function renderFile() {
         <section class="card chart-card fa-chart">
           <div class="chart-box-rec"><div class="chart-plot" id="fa-chart"></div></div>
           ${cursorBox('fa-cursor')}
-          <p class="legend" data-style="${st.style}"><i class="lg-cur"></i><span id="fa-cur-label">전체 평균</span> <i class="lg-max"></i>전체 최대
+          <p class="legend"><span class="lg-items" id="fa-legend"></span>
             <button type="button" class="link" id="fa-avg" hidden>전체 평균 보기</button></p>
         </section>
         <div class="an-options" role="group" aria-label="분석 설정">
           <button type="button" class="opt" data-opt="unit"><span>레벨 기준</span><b>${calibrated ? `보정 ${unitOf(st.weighting)}` : '파일 dBFS'}</b></button>
           <button type="button" class="opt" data-opt="weighting"><span>가중치</span><b>${st.weighting}특성</b></button>
-          <button type="button" class="opt" data-opt="style"><span>모양</span><b>${st.style === 'line' ? '선' : '면'}</b></button>
+          <button type="button" class="opt" data-opt="style"><span>모양</span><b>${STYLE_NAME[st.style]}</b></button>
           <button type="button" class="opt" data-opt="scale"><span>주파수 축</span><b>${st.scale === 'log' ? '로그' : '선형'}</b></button>
         </div>
         <section class="stats-grid">
@@ -801,10 +916,14 @@ async function renderFile() {
       const st2 = getSettings();
       const t = player.currentTime;
       chart.update(
-        { freqs: a.freqs, cur: atPosition ? frameAt(a, t) : a.avg, max: a.max, peaks: atPosition ? [] : a.peaks },
+        { freqs: a.freqs, cur: atPosition ? frameAt(a, t) : a.avg, max: a.max, min: st2.minHold ? a.min : null, peaks: atPosition ? [] : a.peaks },
         { scale: st2.scale, style: st2.style, range, unit },
       );
-      $('fa-cur-label').textContent = atPosition ? `재생 위치 ${fmtClock(t)}` : '전체 평균';
+      $('fa-legend').innerHTML = legendHtml(st2.style, [
+        ['cur', atPosition ? `재생 위치 ${fmtClock(t)}` : '전체 평균'],
+        ['max', '전체 최대'],
+        ...(st2.minHold ? [['min', '전체 최소']] : []),
+      ]);
       $('fa-avg').hidden = !atPosition;
       gram.setPlayhead(atPosition ? t : null);
       timeline.setPlayhead(atPosition ? t : null);
@@ -844,10 +963,9 @@ async function renderFile() {
           return;
         }
         if (b.dataset.opt === 'style') {
-          const style = st2.style === 'line' ? 'fill' : 'line';
+          const style = STYLE_ORDER[(STYLE_ORDER.indexOf(st2.style) + 1) % STYLE_ORDER.length];
           saveSettings({ style });
-          b.querySelector('b').textContent = style === 'line' ? '선' : '면';
-          result.querySelector('.legend').dataset.style = style;
+          b.querySelector('b').textContent = STYLE_NAME[style];
         } else {
           const scale = st2.scale === 'log' ? 'linear' : 'log';
           saveSettings({ scale });
@@ -871,7 +989,13 @@ async function renderFile() {
         elapsed: round1(a.duration),
         clipped: a.clipped,
         peaks: a.peaks.map((p) => ({ hz: Math.round(p.hz), db: round1(p.db) })),
-        spectrum: { freqs: avg.freqs, cur: avg.values, max: forRecord(a.max, a.freqs).values, range },
+        spectrum: {
+          freqs: avg.freqs,
+          cur: avg.values,
+          max: forRecord(a.max, a.freqs).values,
+          ...(getSettings().minHold ? { min: forRecord(a.min, a.freqs).values } : {}),
+          range,
+        },
         fftSize: 4096,
         sampleRate: decoded.rate,
         offset: a.offset,
@@ -983,7 +1107,11 @@ async function renderRecord(id) {
         <section class="card chart-card">
           <div class="chart-box-rec"><div class="chart-plot" id="rec-chart"></div></div>
           ${cursorBox('rec-cursor')}
-          <p class="legend" data-style="${s.style}"><i class="lg-cur"></i>${fromFile ? '전체 평균' : '저장 순간'} <i class="lg-max"></i>${fromFile ? '전체 최대' : '측정 중 최대'} <span class="fine">· 그래프를 누르면 커서</span></p>
+          <p class="legend">${legendHtml(s.style, [
+            ['cur', fromFile ? '전체 평균' : '저장 순간'],
+            ['max', fromFile ? '전체 최대' : '측정 중 최대'],
+            ...(rec.spectrum.min ? [['min', fromFile ? '전체 최소' : '측정 중 최소']] : []),
+          ])} <span class="fine">· 그래프를 누르면 커서</span></p>
         </section>
         <section class="stats-grid">
           <div><span>평균</span><b>${fmtDb(rec.leq)}</b><small>${unit}</small></div>
@@ -1022,7 +1150,7 @@ async function renderRecord(id) {
   view.querySelector('#rec-cursor .cr-close').onclick = () => chart.clearCursors();
   const sp = rec.spectrum;
   chart.update(
-    { freqs: Float32Array.from(sp.freqs), cur: Float32Array.from(sp.cur), max: Float32Array.from(sp.max), peaks: rec.peaks },
+    { freqs: Float32Array.from(sp.freqs), cur: Float32Array.from(sp.cur), max: Float32Array.from(sp.max), min: sp.min ? Float32Array.from(sp.min) : null, peaks: rec.peaks },
     { scale: 'log', style: s.style, range: sp.range, unit },
   );
   let gram = null;

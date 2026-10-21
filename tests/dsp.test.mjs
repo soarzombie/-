@@ -11,6 +11,8 @@ import {
   BANDS,
   bandIndex,
   bandLevels,
+  newHolds,
+  updateHolds,
   sosMagnitude,
   binLevelTable,
   binLevels,
@@ -317,6 +319,8 @@ test('analyzeSound of a two-part file: energy-average Leq, max/min of the parts,
   assert.ok(Math.abs(loudestAt(frameAt(r, 1.5)) - 1000) < 40, 'early frame is the 1 kHz part');
   assert.ok(Math.abs(loudestAt(frameAt(r, 4.5)) - 100) < 8, 'late frame is the 100 Hz part');
   assert.ok(r.frames.length <= 1501 && r.frames[0].length === 400);
+  for (const i of [50, 200, 350]) assert.ok(r.min[i] <= r.avg[i] + 1e-4 && r.avg[i] <= r.max[i] + 1e-4, `min <= avg <= max at ${i}`);
+  assert.ok(r.max[100] - r.min[100] > 20, 'a part with and a part without the 100 Hz tone');
 });
 
 test('third-octave bands run 25 Hz – 20 kHz and sum the bins that fall in them', () => {
@@ -441,4 +445,23 @@ test('columnRange gives the lowest and highest level per pixel column without ga
   const part = columnRange(values, 4, 10, 3);
   assert.deepEqual(Array.from(part.hi), [60, 60, 58]);
   assert.deepEqual(Array.from(part.lo), [49, 54, 53]);
+});
+
+test('holds: peak and minimum hold keep the extremes, tracking curves drift back at 12 dB/s', () => {
+  const h = newHolds(3);
+  updateHolds(h, Float32Array.from([0, 60, 40]), 0.1);
+  assert.deepEqual([h.max[1], h.min[1], h.maxTrack[1], h.minTrack[1]], [60, 60, 60, 60]);
+  assert.equal(h.max[0], -Infinity, 'DC left alone');
+  updateHolds(h, Float32Array.from([0, 30, 70]), 0.5); // bin 1 drops 30 dB, bin 2 rises 30 dB
+  assert.equal(h.max[1], 60);
+  assert.equal(h.min[1], 30);
+  assert.ok(Math.abs(h.maxTrack[1] - 54) < 1e-5, `max tracking falls 6 dB in 0.5 s: ${h.maxTrack[1]}`);
+  assert.equal(h.minTrack[1], 30, 'min tracking follows a drop at once');
+  assert.equal(h.maxTrack[2], 70, 'max tracking follows a rise at once');
+  assert.ok(Math.abs(h.minTrack[2] - 46) < 1e-5, `min tracking rises 6 dB in 0.5 s: ${h.minTrack[2]}`);
+  for (let i = 0; i < 10; i++) updateHolds(h, Float32Array.from([0, 30, 70]), 0.5);
+  assert.equal(h.maxTrack[1], 30, 'max tracking comes down to the level');
+  assert.equal(h.minTrack[2], 70, 'min tracking comes up to the level');
+  assert.equal(h.max[1], 60, 'peak hold stays');
+  assert.equal(h.min[2], 40, 'minimum hold stays');
 });

@@ -23,6 +23,7 @@ export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFra
   const lv = new Float32Array(bins);
   const pow = new Float64Array(bins);
   const max = new Float32Array(bins).fill(-Infinity);
+  const min = new Float32Array(bins).fill(Infinity);
   const frames = [];
   for (let start = 0; start <= span; start += hop) {
     frameSpectrum(samples, start, fftSize, raw);
@@ -30,6 +31,7 @@ export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFra
     for (let k = 1; k < bins; k++) {
       pow[k] += 10 ** (lv[k] / 10);
       if (lv[k] > max[k]) max[k] = lv[k];
+      if (lv[k] < min[k]) min[k] = lv[k];
     }
     frames.push(reduceRanges(lv, freqs, idx, FRAME_GRID.centres, new Float32Array(FRAME_GRID.centres.length)));
   }
@@ -53,6 +55,7 @@ export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFra
     frameStart: fftSize / 2 / rate, // centre of the first frame
     avg: reduceRanges(avg, freqs, idx, FRAME_GRID.centres),
     max: reduceRanges(max, freqs, idx, FRAME_GRID.centres),
+    min: reduceRanges(min, freqs, idx, FRAME_GRID.centres), // quietest frame per point (minimum hold)
   };
 }
 

@@ -421,10 +421,13 @@ textarea { resize: vertical; }
 .chart-card { padding: 10px; }
 .chart-box-rec { position: relative; height: clamp(230px, 62vw, 340px); }
 .chart-box-rec .chart-plot { inset: 0; }
-.legend { display: flex; gap: 14px; align-items: center; font-size: 13px; color: var(--ink-2); padding: 0 6px; }
-.legend i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; margin-right: -8px; }
-.lg-cur { background: rgb(214 58 72 / 90%); }
-.lg-max { background: rgb(120 126 138 / 80%); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; font-size: 13px; color: var(--ink-2); padding: 0 6px; }
+.lg-items { display: contents; }
+.lg { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+/* colour swatches for curves (legends and the chart menu) */
+.sw { display: inline-block; flex-shrink: 0; width: 16px; height: 10px; border-radius: 2px; background: var(--c); }
+.sw-line { height: 3px; }
+.sw-dash { height: 0; border-top: 3px dashed var(--c); border-radius: 0; background: none; }
 .stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .stats-grid div { display: grid; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; }
 .stats-grid span { font-size: 13px; color: var(--ink-3); font-weight: 700; }
@@ -560,8 +563,6 @@ body[data-view="home"] .toast { bottom: calc(var(--tabbar-h) + 112px + env(safe-
 .chart-card { position: relative; }
 .chart-card .cursor-readout { right: 18px; bottom: 70px; }
 
-.legend[data-style="line"] .lg-cur { background: #e3f36a; height: 3px; }
-.legend[data-style="line"] .lg-max { background: #ff6fae; height: 3px; }
 .legend .fine { font-size: 12px; }
 
 .audio-card audio { width: 100%; height: 44px; }
@@ -641,4 +642,54 @@ select {
   .sheet { max-height: 96vh; }
   .chart-sheet { grid-template-columns: 1fr 1fr; gap: 10px 16px; }
   .chart-sheet > h2, .chart-sheet > .btn { grid-column: 1 / -1; }
+}
+
+/* ---------- chart menu (drops from the chart button) ---------- */
+
+.menu-layer { position: fixed; inset: 0; z-index: 40; }
+.menu {
+  position: fixed;
+  z-index: 41;
+  width: max-content;
+  min-width: 240px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow: auto;
+  padding: 6px 0;
+  background: rgb(28 31 38 / 97%);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 14px 40px rgb(0 0 0 / 55%);
+  backdrop-filter: blur(14px);
+}
+.menu-group + .menu-group { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
+.menu-head { padding: 6px 16px 2px 44px; font-size: 13px; font-weight: 600; color: var(--ink-3); }
+.menu button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 16px 0 44px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 16px;
+  text-align: left;
+  cursor: pointer;
+}
+.menu button:active { background: var(--panel-2); }
+.menu button[aria-checked="true"]::before { content: "✓"; position: absolute; left: 17px; font-weight: 800; color: var(--accent); }
+.menu button .sw { margin-left: auto; }
+.menu [role="menuitem"] svg { position: absolute; left: 13px; width: 21px; height: 21px; color: var(--accent); }
+/* phone on its side: styles and curves side by side */
+@media (orientation: landscape) and (max-height: 520px) {
+  .menu { display: grid; grid-template-columns: auto auto; }
+  .menu-group + .menu-group { border-top: 0; margin-top: 0; padding-top: 0; }
+  .menu-group:nth-child(2) { border-left: 1px solid var(--line); }
+  .menu-wide { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
+  .menu button { min-height: 40px; }
 }

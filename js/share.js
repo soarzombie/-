@@ -63,11 +63,13 @@ export function renderCard(rec, settings) {
   g.translate(56, 524);
   const sp = rec.spectrum;
   const line = settings.style === 'line';
-  drawSpectrum(g, W - 112, 680, { freqs: Float32Array.from(sp.freqs), cur: Float32Array.from(sp.cur), max: Float32Array.from(sp.max), peaks: rec.peaks }, { scale: 'log', style: settings.style, range: sp.range, unit: rec.unit, fontScale: 2.2 });
+  const data = { freqs: Float32Array.from(sp.freqs), cur: Float32Array.from(sp.cur), max: Float32Array.from(sp.max), min: sp.min ? Float32Array.from(sp.min) : null, peaks: rec.peaks };
+  drawSpectrum(g, W - 112, 680, data, { scale: 'log', style: settings.style, range: sp.range, unit: rec.unit, fontScale: 2.2 });
   g.restore();
 
   const what = fromFile ? ['전체 평균', '전체 최대'] : ['저장 순간', '측정 중 최대'];
-  text(`${line ? '노랑' : '빨강'}: ${what[0]} · ${line ? '분홍' : '회색'}: ${what[1]} · ${rec.calibrated ? '마이크 보정됨' : '보정 안 됨'} · 참고값`, 64, H - 70, 26, CARD.sub, 400);
+  const minText = sp.min ? ` · 주황: ${fromFile ? '전체 최소' : '측정 중 최소'}` : '';
+  text(`${line ? '파랑' : '빨강'}: ${what[0]} · ${line ? '빨강' : '회색'}: ${what[1]}${minText} · ${rec.calibrated ? '마이크 보정됨' : '보정 안 됨'} · 참고값`, 64, H - 70, 26, CARD.sub, 400);
   return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
 }
 

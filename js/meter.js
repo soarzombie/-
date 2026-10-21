@@ -227,6 +227,11 @@ export class Meter {
     });
   }
 
+  // True for the first 0.5 s after start / reset, while filters and the analyser settle.
+  get warming() {
+    return this.samples < this.warmUntil;
+  }
+
   get elapsed() {
     return this.stats.n / this.sampleRate;
   }

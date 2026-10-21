@@ -1,6 +1,7 @@
 // Real-time FFT spectrum: x = frequency 20 Hz – 20 kHz (log) or 0 – 20 kHz (linear), y = weighted dB per FFT bin.
-// Style 'fill': red area = current, grey area = maximum held since reset.
-// Style 'line': yellow line = current, pink line = maximum.
+// Style 'fill': red area = current, grey area = peak hold (maximum since reset); 'bar': the same as bars;
+// 'line': blue line = current, red line = peak hold. Over any style: orange = minimum hold, dashed light
+// red / light orange = max / min tracking.
 // Labels mark the strongest tonal peaks; cursors A/B are crosshairs that read exact values. drawSpectrum() is
 // also used for the share image, and the layout helpers keep the spectrogram aligned with it.
 
@@ -17,8 +18,11 @@ export const SPECTRUM_COLORS = {
   maxLine: 'rgba(170, 176, 188, 0.7)',
   cur: 'rgba(214, 58, 72, 0.9)',
   curLine: '#ffe3e6',
-  lineCur: '#e3f36a',
-  lineMax: '#ff6fae',
+  lineCur: '#5aa2ff',
+  lineMax: '#ff5a66',
+  minHold: '#ffa53d',
+  maxTrack: '#ff9aa5',
+  minTrack: '#ffd08a',
   cursor: '#5cc8ff',
   label: '#ffffff',
   labelBg: 'rgba(12, 14, 18, 0.72)',
@@ -26,6 +30,18 @@ export const SPECTRUM_COLORS = {
 };
 
 const hzLabel = (f) => (f >= 1000 ? `${f / 1000}k` : String(f));
+
+// What each curve looks like in a style, for legends: [colour, 'area' | 'line' | 'dash'].
+export function curveLook(style, c = SPECTRUM_COLORS) {
+  const line = style === 'line';
+  return {
+    cur: line ? [c.lineCur, 'line'] : ['#d63a48', 'area'],
+    max: line ? [c.lineMax, 'line'] : ['#787e8a', 'area'],
+    min: [c.minHold, 'line'],
+    maxTrack: [c.maxTrack, 'dash'],
+    minTrack: [c.minTrack, 'dash'],
+  };
+}
 
 // Plot rectangle inside a w x h drawing; shared by the spectrum and the spectrogram.
 export function plotBox(w, h, k = 1, xLabels = true) {
@@ -78,7 +94,7 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
   const font = (size, weight = 500) => `${weight} ${size}px ${c.font}`;
   const [lo, hi] = opts.range || [-20, 100];
   const scale = opts.scale || 'log';
-  const line = opts.style === 'line';
+  const style = opts.style || 'fill';
   const xLabels = opts.xLabels !== false;
   const { freqs } = data;
   const box = plotBox(w, h, k, xLabels);
@@ -116,30 +132,58 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
   const key = `${Math.round(x1 - x0)}|${scale}|${freqs.length}|${freqs[1]}|${freqs[freqs.length - 1]}`;
   if (cache.key !== key) Object.assign(cache, { key, cols: columnsFor(freqs, box, scale) });
   const cols = cache.cols;
-  const curve = (levels, out, fill, stroke, width) => {
-    reduceRanges(levels, freqs, cols.idx, cols.centres, out);
-    if (fill) {
-      g.beginPath();
-      g.moveTo(x0, yBot);
-      for (let i = 0; i < cols.n; i++) g.lineTo(x0 + i + 0.5, y(out[i]));
-      g.lineTo(x0 + cols.n, yBot);
-      g.closePath();
-      g.fillStyle = fill;
-      g.fill();
-    }
+  const reduce = (levels, name) => reduceRanges(levels, freqs, cols.idx, cols.centres, (cols[name] ||= new Float32Array(cols.n)));
+  const area = (out, fill, stroke) => {
+    g.beginPath();
+    g.moveTo(x0, yBot);
+    for (let i = 0; i < cols.n; i++) g.lineTo(x0 + i + 0.5, y(out[i]));
+    g.lineTo(x0 + cols.n, yBot);
+    g.closePath();
+    g.fillStyle = fill;
+    g.fill();
+    trace(out, stroke, 1.2);
+  };
+  const trace = (out, stroke, width, dash = null) => {
     g.beginPath();
     for (let i = 0; i < cols.n; i++) g[i ? 'lineTo' : 'moveTo'](x0 + i + 0.5, y(out[i]));
     g.strokeStyle = stroke;
     g.lineWidth = width * k;
+    g.setLineDash(dash ? dash.map((d) => d * k) : []);
     g.stroke();
+    g.setLineDash([]);
+  };
+  // bars a few pixels wide, each as high as the loudest column in it
+  const bars = (out, fill) => {
+    const bw = Math.max(3, Math.round(4 * k));
+    g.fillStyle = fill;
+    for (let i = 0; i < cols.n; i += bw) {
+      let v = -Infinity;
+      for (let j = i; j < Math.min(cols.n, i + bw); j++) if (out[j] > v) v = out[j];
+      if (!(v > lo)) continue;
+      const yy = y(v);
+      g.fillRect(x0 + i, yy, bw - 1, yBot - yy);
+    }
   };
   g.save();
   g.beginPath();
   g.rect(x0, yTop, x1 - x0, yBot - yTop);
   g.clip();
   g.lineJoin = 'round';
-  if (data.max) curve(data.max, cols.max, line ? null : c.max, line ? c.lineMax : c.maxLine, line ? 1.4 : 1.2);
-  if (data.cur) curve(data.cur, cols.cur, line ? null : c.cur, line ? c.lineCur : c.curLine, line ? 1.6 : 1.2);
+  if (data.max) {
+    const out = reduce(data.max, 'max');
+    if (style === 'line') trace(out, c.lineMax, 1.4);
+    else if (style === 'bar') bars(out, c.max);
+    else area(out, c.max, c.maxLine);
+  }
+  if (data.cur) {
+    const out = reduce(data.cur, 'cur');
+    if (style === 'line') trace(out, c.lineCur, 1.6);
+    else if (style === 'bar') bars(out, c.cur);
+    else area(out, c.cur, c.curLine);
+  }
+  if (data.min) trace(reduce(data.min, 'min'), c.minHold, 1.4);
+  if (data.maxTrack) trace(reduce(data.maxTrack, 'maxTrack'), c.maxTrack, 1.2, [5, 3]);
+  if (data.minTrack) trace(reduce(data.minTrack, 'minTrack'), c.minTrack, 1.2, [5, 3]);
   g.restore();
 
   // peak labels

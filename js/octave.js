@@ -1,10 +1,11 @@
-// 1/3-octave bars, 25 Hz – 20 kHz: one bar per band (energy sum of the FFT bins in it), a mark
-// for each band's maximum since reset, and the overall level as a last, wider bar.
+// 1/3-octave bars, 25 Hz – 20 kHz: one bar per band (energy sum of the FFT bins in it), marks for
+// each band's maximum (peak hold) and minimum (minimum hold) since reset, and the overall level as a
+// last, wider bar.
 
 import { BANDS } from './dsp.js';
 import { SPECTRUM_COLORS } from './spectrum.js';
 
-const BAR = { fill: 'rgba(214, 58, 72, 0.9)', top: '#ffe3e6', line: '#e3f36a', total: '#5c6474', mark: '#c9ced8' };
+const BAR = { fill: 'rgba(214, 58, 72, 0.9)', top: '#ffe3e6', total: '#5c6474', mark: '#c9ced8' };
 
 export class OctaveView {
   constructor(host) {
@@ -32,8 +33,8 @@ export class OctaveView {
     this.draw();
   }
 
-  // bands / max: dB per band (BANDS order); total: overall level.
-  // opts: { range: [lo, hi], unit, style: 'fill' | 'line' }
+  // bands / max / min: dB per band (BANDS order); total: overall level.
+  // opts: { range: [lo, hi], unit, style: 'fill' | 'line' | 'bar' }
   update(data, opts = {}) {
     this.data = data;
     this.opts = opts;
@@ -77,14 +78,14 @@ export class OctaveView {
     const n = BANDS.length;
     const slot = (x1 - x0) / (n + 3);
     const gap = Math.max(1, slot * 0.18);
-    const { bands, max, total } = this.data;
+    const { bands, max, min, total } = this.data;
     BANDS.forEach((b, i) => {
       const bx = x0 + i * slot + gap / 2;
       const bw = slot - gap;
       const v = bands[i];
       if (Number.isFinite(v) && v > lo) {
         const yy = y(v);
-        g.fillStyle = line ? BAR.line : BAR.fill;
+        g.fillStyle = line ? c.lineCur : BAR.fill;
         g.globalAlpha = line ? 0.85 : 1;
         g.fillRect(bx, yy, bw, yBot - yy);
         g.globalAlpha = 1;
@@ -97,6 +98,11 @@ export class OctaveView {
       if (Number.isFinite(m) && m > lo) {
         g.fillStyle = line ? c.lineMax : BAR.mark;
         g.fillRect(bx, y(m) - 1.5 * k, bw, 3 * k);
+      }
+      const n0 = min?.[i];
+      if (Number.isFinite(n0) && n0 > lo) {
+        g.fillStyle = c.minHold;
+        g.fillRect(bx, y(n0) - 1.5 * k, bw, 3 * k);
       }
       if (b.major) {
         g.fillStyle = c.axis;
