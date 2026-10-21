@@ -507,6 +507,8 @@ button.record-row { width: 100%; border: 0; background: none; font: inherit; tex
 .rr-time { font-size: 14px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .rr-main { display: grid; min-width: 0; }
 .rr-main strong { font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rr-dev { margin-left: 4px; padding: 0 6px; border-radius: 6px; background: var(--panel-2); font-size: 11px; font-weight: 600; color: var(--ink-2); vertical-align: 2px; }
+.backup-card { margin-top: 16px; display: grid; gap: 10px; }
 .rr-main span { font-size: 13px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rr-value { display: grid; grid-template-columns: auto auto; gap: 0 6px; align-items: baseline; font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
 .rr-value small { font-size: 11px; font-weight: 600; color: var(--ink-3); }

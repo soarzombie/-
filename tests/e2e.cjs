@@ -792,6 +792,36 @@ async function cursorDb(page, hz) {
   assert.ok(Math.abs(cmpD - (fileLeq - expected2)) < 0.5, 'difference of the averages');
   assert.match(await page.locator('.chart-card .legend').textContent(), /비교: /);
   await shot(page, 'compare-records', true);
+
+  // office sharing: this phone sends all its records (with their sound) as one file; a second phone takes
+  // in the ones it does not have, labelled with the first phone's name; doing it again adds nothing
+  await page.locator('.tabbar a[data-tab=history]').click();
+  await page.getByRole('button', { name: '기록 백업 보내기' }).click();
+  await page.locator('dialog.sheet #f-device').fill('정비팀 1호');
+  await shot(page, 'backup-sheet');
+  const [bak] = await Promise.all([page.waitForEvent('download'), page.locator('dialog.sheet').getByRole('button', { name: '파일 만들기' }).click()]);
+  const bakPath = path.join(tmp, 'backup.nmb');
+  await bak.saveAs(bakPath);
+  assert.equal((await settingsOf(page)).device, '정비팀 1호');
+  const office = await newPage(browser, base, errors, { mic: false, seed: { device: '사무실' } });
+  await office.evaluate(() => (location.hash = '#/history'));
+  await office.waitForSelector('.empty-hint');
+  await office.setInputFiles('#f-backup', { name: 'backup.nmb', mimeType: 'application/octet-stream', buffer: fs.readFileSync(bakPath) });
+  await office.waitForFunction(() => /정비팀 1호의 기록 2건을 넣었습니다/.test(document.querySelector('#toast')?.textContent || ''));
+  await office.waitForSelector('.record-row');
+  assert.equal(await office.locator('.record-row').count(), 2);
+  assert.equal(await office.locator('.rr-dev').first().textContent(), '정비팀 1호');
+  await shot(office, 'backup-imported');
+  await office.locator('.record-row').filter({ hasText: '5초 측정' }).click();
+  await office.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
+  assert.match(await office.locator('.meta dt:has-text("휴대폰") + dd').textContent(), /정비팀 1호 \(\d{4}\.\d\d\.\d\d 백업에서 넣음\)/);
+  assert.ok(await office.getByRole('button', { name: '소리 파일 보내기' }).isVisible(), 'the sound came along');
+  await office.evaluate(() => (location.hash = '#/history'));
+  await office.waitForSelector('.record-row');
+  await office.setInputFiles('#f-backup', { name: 'backup.nmb', mimeType: 'application/octet-stream', buffer: fs.readFileSync(bakPath) });
+  await office.waitForFunction(() => /새 기록이 없습니다 \(2건 모두 이미 있음\)/.test(document.querySelector('#toast')?.textContent || ''));
+  assert.equal(await office.locator('.record-row').count(), 2);
+  await office.context().close();
   await browser.close();
 
   // Run 3: cabin-like noise, screenshots in both orientations

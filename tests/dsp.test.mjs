@@ -34,6 +34,7 @@ import { PRESETS, PRESET_KEYS, choosePreset, customize, presetOf } from '../js/p
 import { micProfile, saveMicProfile, parseCalFile, calCorrection } from '../js/mics.js';
 import { Meter } from '../js/meter.js';
 import { haversine, trackSpeed } from '../js/gps.js';
+import { backupBlob, readBackup, importPlan } from '../js/backup.js';
 
 // IEC 61672-1 A-weighting (dB) at the exact base-10 octave frequencies 1000 * 10^(0.3n).
 const IEC_A = [
@@ -692,4 +693,34 @@ test('pinch zoom on the frequency axis keeps the frequencies under the fingers',
   // linear: 5 kHz – 10 kHz spread over the plot
   assert.deepEqual(pinchRange('linear', box, 5000, 10000, 30, 330), [5000, 10000]);
   assert.deepEqual(pinchRange('linear', box, 1000, 3000, 80, 180), [20, 6000], 'from 0 Hz on a linear axis');
+});
+
+test('backup file: records and their sound go in one file and come back; another phone adds only new ones', async () => {
+  const sound = new Blob([new Uint8Array([1, 2, 3, 4, 5, 250])], { type: 'audio/wav' });
+  const sp = { freqs: [20, 20000], cur: [40, 30], max: [50, 40] };
+  const records = [
+    { id: 'a', ts: 1, leq: 70.1, vehicle: '12가 3456', memo: '한글 메모 "따옴표"', spectrum: sp, audio: sound, device: '정비팀 1호' },
+    { id: 'b', ts: 2, leq: 65, spectrum: sp },
+    { id: 'c', ts: 3, leq: 60, spectrum: sp, audio: new Blob([new Uint8Array([9, 8, 7])], { type: 'audio/wav' }) },
+  ];
+  const file = backupBlob(records, { device: '정비팀 1호', app: '0.12.0' });
+  const back = await readBackup(file);
+  assert.equal(back.device, '정비팀 1호');
+  assert.deepEqual(back.records.map((r) => r.id), ['a', 'b', 'c']);
+  assert.equal(back.records[0].memo, '한글 메모 "따옴표"');
+  assert.deepEqual([...new Uint8Array(await back.records[0].audio.arrayBuffer())], [1, 2, 3, 4, 5, 250]);
+  assert.equal(back.records[0].audio.type, 'audio/wav');
+  assert.equal(back.records[1].audio, undefined);
+  assert.deepEqual([...new Uint8Array(await back.records[2].audio.arrayBuffer())], [9, 8, 7]);
+  // the other phone already has 'b'; 'c' has no phone name of its own and takes the backup's
+  const plan = importPlan(['b', 'x'], back, 99);
+  assert.deepEqual(plan.add.map((r) => r.id), ['a', 'c']);
+  assert.equal(plan.skipped, 1);
+  assert.deepEqual(plan.add.map((r) => [r.device, r.importedAt]), [['정비팀 1호', 99], ['정비팀 1호', 99]]);
+  // not a backup / cut short
+  await assert.rejects(readBackup(new Blob(['hello world, not a backup'])), /백업 파일이 아닙니다/);
+  await assert.rejects(readBackup(file.slice(0, 40)), /잘렸거나/);
+  const cut = await readBackup(file.slice(0, file.size - 2)); // the last sound is cut off
+  assert.equal(cut.records[2].audio, undefined);
+  assert.ok(cut.records[0].audio.size === 6);
 });

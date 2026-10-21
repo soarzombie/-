@@ -5,6 +5,7 @@ import { APP_VERSION, getSettings, saveSettings, rememberVehicle } from './setti
 import { PRESETS, CUSTOM, presetOf, choosePreset, customize } from './presets.js';
 import { micProfile, saveMicProfile, parseCalFile, calCorrection } from './mics.js';
 import { trackSpeed, STALE_SEC } from './gps.js';
+import { backupBlob, readBackup, importPlan } from './backup.js';
 import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
 import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds } from './dsp.js';
 import * as store from './store.js';
@@ -887,6 +888,7 @@ async function renderAnalyzer() {
       mic: meter.inputLabel,
       micCal: micProf?.calName || '',
       ...(ref ? { refId: ref.id } : {}),
+      device: st.device || '',
       ...(geoWatch != null ? { speed: round1(speed()), speedAvg: spd.n ? round1(spd.sum / spd.n) : null, speedMax: spd.n ? round1(spd.max) : null } : {}),
       vehicle: '',
       memo: '',
@@ -1474,6 +1476,7 @@ async function renderFile() {
         calibrated: calibrated && !!prof.calibratedAt,
         mic: calibrated ? st.lastMic : '',
         micCal: calibrated && prof.cal ? prof.calName : '',
+        device: st.device || '',
         vehicle: '',
         memo: '',
         app: APP_VERSION,
@@ -1522,14 +1525,24 @@ async function renderHistory() {
   view.innerHTML = `
     <div class="page">
       <h1 class="page-title">측정 기록</h1>
-      <input type="search" id="f-search" placeholder="차량번호·메모로 찾기" aria-label="차량번호·메모로 찾기">
+      <input type="search" id="f-search" placeholder="차량번호·메모·휴대폰 이름으로 찾기" aria-label="차량번호·메모·휴대폰 이름으로 찾기">
       <div id="h-list"></div>
-      <div class="action-bar"><button class="btn" data-act="csv">엑셀 파일로 받기</button></div>
+      <div class="action-bar">
+        <button class="btn" data-act="csv">엑셀 파일로 받기</button>
+        <button class="btn" data-act="backup">기록 백업 보내기</button>
+      </div>
+      <section class="card backup-card">
+        <h2>다른 휴대폰의 기록 넣기</h2>
+        <p class="fine">다른 휴대폰에서 "기록 백업 보내기"로 받은 파일을 넣으면, 이 휴대폰에 없는 기록만 소리와 함께 더합니다. 사무실 휴대폰 한 대에 모아 볼 때 씁니다.</p>
+        <label class="btn btn-wide" for="f-backup">백업 파일 넣기</label>
+        <input type="file" id="f-backup" hidden>
+      </section>
     </div>`;
   let current = all;
+  const own = getSettings().device;
   const update = () => {
     const q = view.querySelector('#f-search').value.replace(/\s/g, '');
-    current = all.filter((r) => !q || `${r.vehicle}${r.memo}`.replace(/\s/g, '').includes(q));
+    current = all.filter((r) => !q || `${r.vehicle}${r.memo}${r.device || ''}`.replace(/\s/g, '').includes(q));
     const groups = new Map();
     current.forEach((r) => {
       const day = fmtDay(r.ts);
@@ -1537,7 +1550,7 @@ async function renderHistory() {
       groups.get(day).push(r);
     });
     view.querySelector('#h-list').innerHTML = current.length
-      ? [...groups].map(([day, rows]) => `<h2 class="day-head">${day}</h2><ul class="record-list">${rows.map(recordRow).join('')}</ul>`).join('')
+      ? [...groups].map(([day, rows]) => `<h2 class="day-head">${day}</h2><ul class="record-list">${rows.map((r) => recordRow(r, own)).join('')}</ul>`).join('')
       : `<p class="empty-hint">${all.length ? '찾는 기록이 없습니다.' : '측정 화면에서 저장 버튼을 누르면 여기에 쌓입니다.'}</p>`;
   };
   update();
@@ -1547,15 +1560,66 @@ async function renderHistory() {
     const result = await deliverFile(recordsCsv(current), `소음분석기록_${fileStamp(Date.now())}.csv`, { title: '소음 분석 기록' });
     if (result === 'downloaded') toast('엑셀에서 열 수 있는 파일(CSV)을 저장했습니다');
   };
+  view.querySelector('[data-act=backup]').onclick = () => backupSheet(all);
+  view.querySelector('#f-backup').onchange = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const backup = await readBackup(file);
+      const { add, skipped } = importPlan(all.map((r) => r.id), backup);
+      for (const r of add) {
+        // read each sound out of the file now: the picked file may not stay readable
+        if (r.audio) r.audio = new Blob([await r.audio.arrayBuffer()], { type: r.audio.type || 'audio/wav' });
+        await store.putRecord(r);
+      }
+      const from = backup.device ? `${backup.device}의 ` : '';
+      toast(add.length ? `${from}기록 ${add.length}건을 넣었습니다${skipped ? ` (이미 있는 ${skipped}건은 건너뜀)` : ''}` : `새 기록이 없습니다 (${skipped}건 모두 이미 있음)`);
+      if (add.length) route();
+    } catch (err) {
+      toast(err.message || '백업 파일을 읽지 못했습니다');
+    }
+  };
 }
 
-function recordRow(r) {
-  return `<li><a class="record-row" href="#/record/${encodeURIComponent(r.id)}">${recordRowInner(r, fmtTime(r.ts))}</a></li>`;
+// "기록 백업 보내기": this phone's name (shown on the records on the other phone), then one file.
+function backupSheet(records) {
+  if (!records.length) return toast('보낼 기록이 없습니다');
+  const st = getSettings();
+  const bytes = records.reduce((n, r) => n + (r.audio?.size || 0) + 4000, 0);
+  const { dlg, close } = openSheet(`
+    <form class="sheet-form">
+      <h2>기록 백업 보내기</h2>
+      <p>기록 <b>${records.length}건</b>${records.some((r) => r.audio) ? ', 저장된 소리 포함' : ''} · 약 ${Math.max(0.1, bytes / 1048576).toFixed(1)} MB</p>
+      <label class="field"><span>이 휴대폰 이름 <small>(다른 휴대폰에서 기록 옆에 표시)</small></span>
+        <input id="f-device" value="${esc(st.device)}" placeholder="예: 정비팀 1호" maxlength="20" autocomplete="off"></label>
+      <p class="fine">파일 하나로 받아 메신저·메일로 사무실 휴대폰에 보내고, 그 휴대폰의 기록 화면에서 "백업 파일 넣기"로 넣습니다.</p>
+      <div class="sheet-actions">
+        <button type="button" class="btn btn-quiet" data-close>취소</button>
+        <button class="btn btn-primary" type="submit">파일 만들기</button>
+      </div>
+    </form>`);
+  dlg.querySelector('form').onsubmit = async (e) => {
+    e.preventDefault();
+    const device = dlg.querySelector('#f-device').value.trim();
+    saveSettings({ device });
+    const own = records.map((r) => (r.device || r.importedAt ? r : { ...r, device }));
+    const name = `소음기록백업_${(device || '휴대폰').replace(/[\s\\/:*?"<>|]/g, '')}_${fileStamp(Date.now())}.nmb`;
+    close();
+    const result = await deliverFile(backupBlob(own, { device, app: APP_VERSION }), name, { title: '소음 분석 기록 백업' });
+    if (result === 'downloaded') toast('백업 파일을 저장했습니다. 메신저·메일로 보내세요.');
+  };
 }
 
-function recordRowInner(r, when = fmtWhen(r.ts)) {
+function recordRow(r, own = '') {
+  return `<li><a class="record-row" href="#/record/${encodeURIComponent(r.id)}">${recordRowInner(r, fmtTime(r.ts), own)}</a></li>`;
+}
+
+// A record in a list; the phone it came from when that is another one.
+function recordRowInner(r, when = fmtWhen(r.ts), own = getSettings().device) {
+  const from = r.device && r.device !== own ? ` <small class="rr-dev">${esc(r.device)}</small>` : '';
   return `<span class="rr-time">${when}</span>
-    <span class="rr-main"><strong>${esc(r.vehicle || (r.source === 'file' ? r.fileName : '차량 미입력'))}</strong><span>${esc(r.memo || `${r.source === 'file' ? '파일' : r.timedSec ? `${r.timedSec}초 측정` : '측정'} ${fmtClock(r.elapsed)}${r.peaks?.[0] ? ` · 피크 ${fmtHz(r.peaks[0].hz)}` : ''}`)}</span></span>
+    <span class="rr-main"><strong>${esc(r.vehicle || (r.source === 'file' ? r.fileName : '차량 미입력'))}${from}</strong><span>${esc(r.memo || `${r.source === 'file' ? '파일' : r.timedSec ? `${r.timedSec}초 측정` : '측정'} ${fmtClock(r.elapsed)}${r.peaks?.[0] ? ` · 피크 ${fmtHz(r.peaks[0].hz)}` : ''}`)}</span></span>
     <span class="rr-value"><small>평균</small>${fmtDb(r.leq)}<small>최대</small>${fmtDb(r.lmax)}</span>`;
 }
 
@@ -1615,6 +1679,7 @@ async function renderRecord(id) {
             <dt>메모</dt><dd class="memo">${esc(rec.memo) || '-'}</dd>
             ${fromFile ? `<dt>파일</dt><dd>${esc(rec.fileName)}</dd>` : `<dt>저장 순간</dt><dd>${fmtDb(rec.laf)} ${unit}</dd>`}
             ${'speedAvg' in rec || 'speed' in rec ? `<dt>속도</dt><dd>${speedText(rec)}</dd>` : ''}
+            ${rec.device ? `<dt>휴대폰</dt><dd>${esc(rec.device)}${rec.importedAt ? ` <small>(${fmtShortDate(rec.importedAt)} 백업에서 넣음)</small>` : ''}</dd>` : ''}
             <dt>분석 설정</dt><dd>${rec.weighting || 'A'}특성 · ${TW_NAME[rec.timeWeighting || 'F']} · FFT ${rec.fftSize} · ${unit.startsWith('dBFS') ? '파일 디지털 레벨(dBFS) 기준' : `${esc(micName(rec.mic))} ${rec.calibrated ? '보정됨' : '보정 안 됨 (참고값)'}${rec.micCal ? ' · 보정 파일' : ''}`}</dd>
           </dl>
         </section>

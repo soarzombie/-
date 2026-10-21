@@ -77,14 +77,14 @@ export function renderCard(rec, settings) {
 
 const CSV_HEAD = [
   '일시', '출처', '차량번호', '메모', '평균 Leq', '최대 Lmax', '최소 Lmin', '저장 순간', '단위', '측정·파일 길이(초)',
-  '피크1 Hz', '피크1 dB', '피크2 Hz', '피크2 dB', 'FFT', '마이크 보정', '과부하', '소리(초)', '정해진 시간(초)', '속도 평균(km/h)', '속도 최고(km/h)',
+  '피크1 Hz', '피크1 dB', '피크2 Hz', '피크2 dB', 'FFT', '마이크 보정', '과부하', '소리(초)', '정해진 시간(초)', '속도 평균(km/h)', '속도 최고(km/h)', '휴대폰',
 ];
 
 export function recordsCsv(records) {
   const rows = records.map((r) => [
     fmtDate(r.ts), r.source === 'file' ? r.fileName : '마이크', r.vehicle, r.memo, r.leq, r.lmax, r.lmin, r.laf, r.unit || 'dB(A)', Math.round(r.elapsed),
     r.peaks?.[0] && Math.round(r.peaks[0].hz), r.peaks?.[0]?.db, r.peaks?.[1] && Math.round(r.peaks[1].hz), r.peaks?.[1]?.db,
-    r.fftSize, r.calibrated ? 'O' : 'X', r.clipped ? 'O' : '', r.audioSec || '', r.timedSec || '', r.speedAvg ?? '', r.speedMax ?? '',
+    r.fftSize, r.calibrated ? 'O' : 'X', r.clipped ? 'O' : '', r.audioSec || '', r.timedSec || '', r.speedAvg ?? '', r.speedMax ?? '', r.device || '',
   ]);
   const csv = [CSV_HEAD, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n');
   // BOM so Excel opens the Korean text as UTF-8.
