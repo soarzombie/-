@@ -190,7 +190,6 @@ async function micPermission() {
   }
 }
 
-// One-line cursor read-out: "A 1,250 Hz 62.3  B 125 Hz 47.6  B−A −14.7 dB" (levels in dB(A)).
 // A saved record as a comparison reference: its average spectrum (a measurement's average since reset,
 // a file's overall average; older measurements only have the moment of saving).
 function refCurve(rec) {
@@ -210,13 +209,14 @@ function refCurve(rec) {
 
 const signed = (d) => `${d >= 0 ? '+' : '−'}${fmtDb(Math.abs(d))}`;
 
-function cursorText(values) {
-  const parts = values.map((v, i) => `<span><b>${'AB'[i]}</b> ${fmtHz(v.hz)} <em>${fmtDb(v.cur)}</em>${Number.isFinite(v.ref) && Number.isFinite(v.cur) ? ` <i class="cr-ref">기준 ${fmtDb(v.ref)} (${signed(v.cur - v.ref)})</i>` : ''}</span>`);
-  if (values.length === 2) {
-    const d = values[1].cur - values[0].cur;
-    parts.push(`<span class="cr-diff">B−A ${d >= 0 ? '+' : ''}${fmtDb(d)} dB</span>`);
-  }
-  return parts.join('');
+// One-line cursor read-out: "1,250 Hz  ▬ 지금 62.3  ▬ 최대 68.1" (each level with its curve's swatch),
+// and the reference when one is shown.
+function cursorText([v]) {
+  const look = curveLook(v.style);
+  const level = (key, cls) =>
+    Number.isFinite(v[key]) ? `<span class="${cls}"><i class="sw sw-${look[key][1]}" style="--c:${look[key][0]}" aria-hidden="true"></i>${v.labels[key]} <em>${fmtDb(v[key])}</em></span>` : '';
+  const ref = Number.isFinite(v.ref) && Number.isFinite(v.cur) ? `<span class="cr-ref">기준 ${fmtDb(v.ref)} (${signed(v.cur - v.ref)})</span>` : '';
+  return `<span class="cr-hz">${fmtHz(v.hz)}</span>${level('cur', 'cr-cur')}${level('max', 'cr-max')}${ref}`;
 }
 
 function bindCursorReadout(el) {
@@ -340,7 +340,7 @@ function helpSheet() {
         <dt>큰 숫자</dt><dd>지금 소음 크기입니다. 숫자 옆 Fast(0.125초)는 빠른 변화를 따라가고, Slow(1초)는 덜 흔들려 읽기 쉽습니다. 설정에서 바꿉니다. 색 막대는 초록 → 노랑 → 빨강, 빨강은 경고 기준 ${s.alertLevel} dB 이상입니다. 밝은 칸 하나는 최대값입니다.</dd>
         <dt>최소·평균·최대</dt><dd>측정을 시작하거나 ↻ 초기화를 누른 뒤의 값입니다. 평균은 에너지 평균(Leq)입니다.</dd>
         <dt>A · C · Z</dt><dd>주파수 가중치. <b>A</b> 보통 소음(사람 귀에 가깝게) · <b>C</b> 엔진·부밍음처럼 저음이 큰 소리 · <b>Z</b> 거르지 않은 소리. 그래프 오른쪽 위 설정 버튼에서 바꿉니다.</dd>
-        <dt>주파수 그래프</dt><dd>위쪽 큰 그래프. 가로는 주파수(20 Hz – 20 kHz), 세로는 dB입니다. 누르면 십자선 커서가 그 주파수의 값을 보여 주고, 한 번 더 누르면 커서 B로 두 곳을 비교합니다. 끌어서 옮기고 × 로 지웁니다. 두 손가락으로 벌리거나 좁히면 주파수 범위가 바뀌고, "전체 보기"로 돌아갑니다.</dd>
+        <dt>주파수 그래프</dt><dd>위쪽 큰 그래프. 가로는 주파수(20 Hz – 20 kHz), 세로는 dB입니다. 누르면 커서가 그 주파수의 <b>지금 값</b>(파란 선)과 <b>최대값</b>(빨간 선)을 함께 보여 줍니다. 다른 곳을 누르거나 끌어서 옮기고 × 로 지웁니다. 두 손가락으로 벌리거나 좁히면 주파수 범위가 바뀌고, "전체 보기"로 돌아갑니다.</dd>
         <dt>⚙ 차트 메뉴</dt><dd>그래프 오른쪽 위 버튼. 차트 스타일(면 · 선 · 막대), <b>최대값 추적</b>·<b>최소값 추적</b>(최근 큰·작은 값을 따라가다 초당 12 dB씩 돌아오는 점선), <b>피크 홀드</b>(초기화 뒤 가장 큰 값), <b>미니멈 홀드</b>(초기화 뒤 가장 작은 값, 주황), 홀드 재설정(이 선들만 새로 시작), 축 범위, <b>측정 · 그래프 설정</b>(마이크, 가중치, Fast/Slow, 정해진 시간, 속도, 시간축 길이, FFT, 화면 밝기 — 햇빛 아래에서는 "밝게").</dd>
         <dt>축 범위</dt><dd>차트 메뉴의 "축 범위"에서 주파수 범위(전체 · 저음 · 중음 · 고음 또는 직접 입력)와 각 그래프의 dB 범위(자동 / 직접)를 정합니다. "처음대로"로 되돌립니다.</dd>
         <dt>시간축 그래프</dt><dd>아래쪽 작은 그래프. 가로는 측정 시간, 세로는 dB(큰 숫자와 같은 값), 점선은 평균입니다. 보이는 시간(30초 · 1분 · 5분)은 그래프 설정에서 바꿉니다.</dd>
@@ -1389,7 +1389,7 @@ async function renderFile() {
       const t = player.currentTime;
       chart.update(
         { freqs: a.freqs, cur: atPosition ? frameAt(a, t) : a.avg, max: a.max, min: st2.minHold ? a.min : null, peaks: atPosition ? [] : a.peaks },
-        { scale: st2.scale, fmin: st2.freqMin, fmax: st2.freqMax, style: st2.style, range: st2.specDb || range, unit },
+        { scale: st2.scale, fmin: st2.freqMin, fmax: st2.freqMax, style: st2.style, range: st2.specDb || range, unit, cursorLabels: { cur: atPosition ? '재생 위치' : '평균', max: '최대' } },
       );
       $('fa-legend').innerHTML = legendHtml(st2.style, [
         ['cur', atPosition ? `재생 위치 ${fmtClock(t)}` : '전체 평균'],
@@ -1703,7 +1703,7 @@ async function renderRecord(id) {
     min: sp.min ? Float32Array.from(sp.min) : null,
     peaks: rec.peaks,
   };
-  const recOpts = { scale: 'log', style: s.style, range: sp.range, unit };
+  const recOpts = { scale: 'log', style: s.style, range: sp.range, unit, cursorLabels: { cur: fromFile ? '평균' : '저장 순간', max: '최대' } };
   chart.update(recData, recOpts);
 
   // Comparison with another record: its average spectrum dashed over this one, and the two averages.

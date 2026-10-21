@@ -256,9 +256,9 @@ async function pickMic(page, label) {
 async function cursorDb(page, hz) {
   await tapFrequency(page, hz);
   await page.waitForSelector('#a-cursor:not([hidden])');
-  const text = await page.locator('#a-cursor .cr-lines span').first().textContent();
+  const db = Number(await page.locator('#a-cursor .cr-cur em').textContent());
   await page.locator('#a-cursor .cr-close').click();
-  return Number(text.replace(/,/g, '').match(/[\d.]+/g)[1]);
+  return db;
 }
 
 (async () => {
@@ -295,17 +295,24 @@ async function cursorDb(page, hz) {
   await page.getByRole('button', { name: '초기화' }).click();
   assert.equal(await page.locator('#a-time').textContent(), '00:00');
 
-  // cursors: A at 1 kHz reads the tone, B adds the difference, x clears
+  // the cursor reads the live level and the maximum at one frequency; another tap moves it; x clears
   await tapFrequency(page, 1000);
   await page.waitForSelector('#a-cursor:not([hidden])');
-  const aText = await page.locator('#a-cursor .cr-lines span').first().textContent();
-  const [aHz, aDb] = aText.replace(/,/g, '').match(/[\d.]+/g).map(Number); // "A 1,000 Hz 74.4"
-
-  console.log(`cursor A: ${aText}`);
+  const hzAt = async () => Number((await page.locator('#a-cursor .cr-hz').textContent()).replace(/[^\d.]/g, ''));
+  const aHz = await hzAt();
+  const aDb = Number(await page.locator('#a-cursor .cr-cur em').textContent());
+  const aMax = Number(await page.locator('#a-cursor .cr-max em').textContent());
+  console.log(`cursor: ${await page.locator('#a-cursor .cr-lines').textContent()}`);
   assert.ok(Math.abs(aHz - 1000) / 1000 < 0.03, 'cursor frequency');
   assert.ok(aDb > 60, 'cursor reads the tone level');
+  assert.ok(aMax >= aDb - 0.5 && aMax - aDb < 3, 'and the maximum there');
+  assert.match(await page.locator('#a-cursor .cr-cur').textContent(), /^지금 /);
+  assert.match(await page.locator('#a-cursor .cr-max').textContent(), /^최대 /);
   await tapFrequency(page, 5000);
-  await page.waitForSelector('#a-cursor .cr-diff');
+  await page.waitForFunction(() => /^5,0\d\d Hz|^4,9\d\d Hz/.test(document.querySelector('#a-cursor .cr-hz')?.textContent || ''));
+  assert.equal(await page.locator('#a-cursor .cr-hz').count(), 1, 'one cursor: the second tap moved it');
+  await tapFrequency(page, 1000);
+  await page.waitForTimeout(300);
   await shot(page, 'cursor');
   await page.locator('#a-cursor .cr-close').click();
   await page.waitForSelector('#a-cursor', { state: 'hidden' });
@@ -459,7 +466,8 @@ async function cursorDb(page, hz) {
   await page.locator('#a-cursor .cr-close').click().catch(() => {});
   await tapFrequency(page, 1000, 500, 2000);
   await page.waitForSelector('#a-cursor:not([hidden])');
-  const [rHz, rDb] = (await page.locator('#a-cursor .cr-lines span').first().textContent()).replace(/,/g, '').match(/[\d.]+/g).map(Number);
+  const rHz = Number((await page.locator('#a-cursor .cr-hz').textContent()).replace(/[^\d.]/g, ''));
+  const rDb = Number(await page.locator('#a-cursor .cr-cur em').textContent());
   console.log(`cursor on 500 Hz – 2 kHz: ${rHz} Hz ${rDb}`);
   assert.ok(Math.abs(rHz - 1000) < 15 && rDb > 60, 'cursor on the narrowed axis');
   await shot(page, 'range-live');
@@ -852,7 +860,6 @@ async function cursorDb(page, hz) {
     await setMode(page, 'spectrum');
     await chartMenu(page, { style: 'line' });
     await page.waitForTimeout(2500);
-    await tapFrequency(page, 1250);
     await tapFrequency(page, 125);
     await page.waitForTimeout(300);
     await shot(page, `main-${name}-line`);

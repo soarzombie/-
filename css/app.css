@@ -654,9 +654,9 @@ body[data-view="home"] .toast { bottom: calc(var(--tabbar-h) + 112px + env(safe-
 .an-chart:is([data-view="gram"], [data-view="octave"]) .cursor-readout { display: none; }
 .cr-lines { display: flex; flex-wrap: wrap; gap: 0 12px; min-width: 0; }
 .cr-lines span { white-space: nowrap; }
-.cr-lines b { color: var(--cursor); margin-right: 1px; }
 .cr-lines em { font-style: normal; font-weight: 700; }
-.cr-diff { color: var(--ink-2); }
+.cr-hz { color: var(--cursor); font-weight: 700; }
+.cr-cur, .cr-max { display: inline-flex; align-items: center; gap: 4px; }
 .cr-close { pointer-events: auto; flex-shrink: 0; width: 26px; height: 26px; border: 0; border-radius: 6px; background: var(--panel-2); color: var(--ink); font-size: 17px; line-height: 1; cursor: pointer; }
 .chart-card { position: relative; }
 .chart-card .cursor-readout { right: 18px; bottom: 70px; }
