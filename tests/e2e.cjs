@@ -540,6 +540,24 @@ async function cursorDb(page, hz) {
     assert.deepEqual([back.freqMin, back.freqMax], [20, 20000]);
   }
 
+  // 창 함수: Hanning is computed in the app; the tone stays at 1 kHz with its level, the big number is the same
+  {
+    const before = await num(page, '#a-now');
+    await chartSettings(page, { window: 'hann' });
+    await page.waitForTimeout(1500);
+    const db = await cursorDb(page, 1000);
+    const peak = await num(page, '#a-peak');
+    console.log(`Hanning window: cursor at 1 kHz ${db}, peak ${peak} Hz, now ${await num(page, '#a-now')} (was ${before})`);
+    assert.ok(Math.abs(peak - 1000) < 10 && db > 60, 'the tone with the Hanning window');
+    assert.ok(Math.abs((await num(page, '#a-now')) - before) < 0.3, 'the level does not depend on the window');
+    await page.getByRole('button', { name: '그래프 설정' }).click();
+    await page.getByRole('menuitem', { name: '오디오 세부정보' }).click();
+    assert.match(await page.locator('dialog.sheet .details').textContent(), /창 함수Hanning \(앱에서 계산\)/);
+    await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
+    await page.waitForSelector('dialog.sheet', { state: 'detached' });
+    await chartSettings(page, { window: 'blackman' });
+  }
+
   // help sheet
   await page.getByRole('button', { name: '도움말' }).click();
   await page.waitForSelector('dialog.sheet .help');

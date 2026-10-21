@@ -10,11 +10,12 @@ export const FRAME_GRID = logGrid(400, 20, 20000);
 // offset: dB added to dBFS (the phone's calibration, or 0 for plain digital level).
 // weighting: 'A' | 'C' | 'Z', for the levels and the spectra alike; timeWeighting: 'F' | 'S';
 // correction: the microphone's frequency-response correction for the spectra (mics.js calCorrection).
-export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFrames = 1500, weighting = 'A', timeWeighting = 'F', correction = null } = {}) {
+// window: the FFT window (dsp.js FFT_WINDOWS), as chosen for the live view.
+export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFrames = 1500, weighting = 'A', timeWeighting = 'F', correction = null, window = 'blackman' } = {}) {
   const levels = levelHistory(samples, rate, offset, 0.1, weighting, tauOf(timeWeighting));
   const bins = fftSize / 2;
   const binHz = rate / fftSize;
-  const table = binLevelTable(bins, binHz, weighting, correction);
+  const table = binLevelTable(bins, binHz, weighting, correction, window);
   const freqs = Float32Array.from({ length: bins }, (_, k) => k * binHz);
   const idx = rangeIndex(freqs, FRAME_GRID.edges);
   const span = Math.max(0, samples.length - fftSize);
@@ -27,7 +28,7 @@ export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFra
   const min = new Float32Array(bins).fill(Infinity);
   const frames = [];
   for (let start = 0; start <= span; start += hop) {
-    frameSpectrum(samples, start, fftSize, raw);
+    frameSpectrum(samples, start, fftSize, raw, window);
     binLevels(raw, table, offset, lv);
     for (let k = 1; k < bins; k++) {
       pow[k] += 10 ** (lv[k] / 10);
@@ -44,6 +45,7 @@ export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFra
     offset,
     weighting,
     timeWeighting,
+    window,
     leq: levels.leq,
     lmax: levels.lmax,
     lmin: levels.lmin,

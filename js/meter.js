@@ -3,7 +3,7 @@
 // which sees every sample, keeps the last few seconds of sound and streams it while recording;
 // the spectrum comes from an AnalyserNode, per bin in dB with the same frequency weighting (A/C/Z).
 
-import { designWeighting, binLevelTable, binLevels, toDb, unitOf, tauOf } from './dsp.js';
+import { designWeighting, binLevelTable, binLevels, toDb, unitOf, tauOf, WindowedSpectrum } from './dsp.js';
 
 const WARMUP_SEC = 0.5; // filter and Fast detector settle; also skips the tap on the screen
 const CLIP_LEVEL = 0.98;
@@ -31,10 +31,11 @@ function micError(code) {
 }
 
 export class Meter {
-  constructor(offset, weighting = 'A', timeWeighting = 'F') {
+  constructor(offset, weighting = 'A', timeWeighting = 'F', window = 'blackman') {
     this.offset = offset;
     this.weighting = weighting;
     this.timeWeighting = timeWeighting;
+    this.window = window; // FFT window: the analyser's own Blackman, or one computed here (WindowedSpectrum)
     this.onLevel = null; // (Fast level, dB) => void, about every 50 ms
     this.recording = null; // { chunks, samples, done } while recording
     this.correction = null; // microphone frequency-response correction (mics.js), for the spectrum
@@ -155,7 +156,8 @@ export class Meter {
     this.analyser.fftSize = n;
     const bins = n / 2;
     this.binHz = this.sampleRate / n;
-    this.table = binLevelTable(bins, this.binHz, this.weighting, this.correction);
+    this.table = binLevelTable(bins, this.binHz, this.weighting, this.correction, this.window);
+    this.windowed = this.window === 'blackman' ? null : new WindowedSpectrum(n, this.window, this.analyser.smoothingTimeConstant);
     this.rawDb = new Float32Array(bins);
     this.levels = new Float32Array(bins);
     this.freqs = Float32Array.from({ length: bins }, (_, k) => k * this.binHz);
@@ -171,6 +173,12 @@ export class Meter {
     this.node?.port.postMessage({ type: 'sos', sos: designWeighting(this.sampleRate, w) });
     if (this.analyser) this.setFftSize(this.analyser.fftSize);
     this.resetStats();
+  }
+
+  // 'hann' | 'hamming' | 'blackman' (dsp.js FFT_WINDOWS). The spectrum changes, the levels do not.
+  setWindow(kind) {
+    this.window = kind;
+    if (this.analyser) this.setFftSize(this.analyser.fftSize);
   }
 
   // Calibration of the microphone in use: offset (dB added to dBFS) and frequency-response correction.
@@ -238,7 +246,12 @@ export class Meter {
 
   // Current spectrum, dB per analyser bin (weighted, calibrated). The array is reused between calls.
   spectrum() {
-    this.analyser.getFloatFrequencyData(this.rawDb);
+    if (this.windowed) {
+      this.analyser.getFloatTimeDomainData(this.windowed.time);
+      this.windowed.run(this.windowed.time, this.rawDb);
+    } else {
+      this.analyser.getFloatFrequencyData(this.rawDb);
+    }
     return binLevels(this.rawDb, this.table, this.offset, this.levels);
   }
 

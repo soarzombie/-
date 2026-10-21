@@ -8,7 +8,7 @@ import { trackSpeed, STALE_SEC } from './gps.js';
 import { backupBlob, readBackup, importPlan } from './backup.js';
 import { ScreenVideo, videoType, videoExt, MAX_VIDEO_SEC } from './video.js';
 import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
-import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds } from './dsp.js';
+import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds, FFT_WINDOWS } from './dsp.js';
 import * as store from './store.js';
 import { esc, fmtDb, fmtHz, fmtClock, fmtDate, fmtDay, fmtShortDate, fmtTime, fmtWhen, fileStamp, speedText } from './format.js';
 import { SpectrumView, curveLook, checkFreqRange, checkDbRange, setChartTheme, sideways, FMIN, FMAX } from './spectrum.js';
@@ -749,7 +749,7 @@ async function renderAnalyzer() {
       return true;
     }
     const st = getSettings();
-    meter = new Meter(st.offset, st.weighting, st.timeWeighting);
+    meter = new Meter(st.offset, st.weighting, st.timeWeighting, st.window);
     try {
       // the sound buffer also holds a whole timed measurement (up to a minute)
       await meter.start(st.view === 'octave' ? OCTAVE_FFT : st.fftSize, st.audioSec > 0 ? Math.max(st.audioSec, ...TIMED_SECS) : 0, st.micId);
@@ -1056,6 +1056,7 @@ async function renderAnalyzer() {
       offset: meter.offset,
       weighting: meter.weighting,
       timeWeighting: meter.timeWeighting,
+      window: meter.window,
       unit: meter.unit,
       calibrated: !!micProf?.calibratedAt,
       mic: meter.inputLabel,
@@ -1132,6 +1133,7 @@ async function renderAnalyzer() {
         ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
         ${segRow('fft', 'FFT 크기', FFT_SIZES.map((n) => [n, n]), st.fftSize, '클수록 주파수를 잘게 나누지만 반응이 느려집니다. 1/3 옥타브 보기는 늘 32768로 계산합니다.')}
         ${segRow('scale', '주파수 축', [['log', '로그'], ['linear', '선형']], st.scale, '주파수 그래프를 두 손가락으로 벌리거나 좁혀도 범위가 바뀝니다.')}
+        ${segRow('window', '창 함수', Object.entries(FFT_WINDOWS).map(([k, w]) => [k, w.name]), st.window, 'Blackman(기본): 새어 나가는 성분이 가장 적어 큰 소리 옆의 작은 성분까지 보입니다(봉우리는 조금 넓음). Hanning: 봉우리가 좁아 가까운 두 주파수를 가르기 좋은 일반 분석용. Hamming: 봉우리 바로 옆은 깨끗하지만 멀리까지 조금씩 새어 바닥이 높아 보일 수 있습니다. 큰 숫자(전체 dB)는 바뀌지 않습니다.')}
         ${segRow('theme', '화면 밝기', [['dark', '어둡게'], ['light', '밝게 (햇빛 아래)']], st.theme)}
         <button type="button" class="btn btn-wide" data-close>닫기</button>
       </div>`);
@@ -1190,7 +1192,7 @@ async function renderAnalyzer() {
           ${row('주파수 가중치', `${st.weighting}특성 (${unitOf(st.weighting)})`)}
           ${row('시간 가중', `${TW_NAME[st.timeWeighting]} (${st.timeWeighting === 'S' ? '1초' : '0.125초'})`)}
           ${row('FFT 크기', on ? `${meter.analyser.fftSize} (칸 ${meter.binHz.toFixed(2)} Hz)` : st.fftSize)}
-          ${row('창 함수', 'Blackman (브라우저 고정)')}
+          ${row('창 함수', `${FFT_WINDOWS[st.window]?.name || 'Blackman'} (${(meter?.window || st.window) === 'blackman' ? '브라우저 분석기' : '앱에서 계산'})`)}
           ${row('저장할 때 남길 소리', st.audioSec ? `${st.audioSec}초` : '남기지 않음')}
         </dl>
         <h3 class="sheet-sub">오디오</h3>
@@ -1229,6 +1231,11 @@ async function renderAnalyzer() {
       clearReadings();
     }
     if (st.fftSize !== prev.fftSize) applyFft();
+    if (st.window !== prev.window && meter) {
+      meter.setWindow(st.window);
+      resetDisplays();
+      holdFrom = performance.now() + 400;
+    }
     if (st.timedSec !== prev.timedSec && !meter?.timed) showTimed(0);
     if (st.theme !== prev.theme) {
       applyTheme(st.theme);
@@ -1547,6 +1554,7 @@ async function renderFile() {
     const a = analyzeSound(decoded.samples, decoded.rate, calibrated ? prof.offset : 0, {
       weighting: st.weighting,
       timeWeighting: st.timeWeighting,
+      window: st.window,
       correction: calibrated ? calCorrection(prof.cal) : null,
     });
     const range = rangeFor(a.max);
@@ -1700,6 +1708,7 @@ async function renderFile() {
           range,
         },
         fftSize: 4096,
+        window: a.window,
         sampleRate: decoded.rate,
         offset: a.offset,
         weighting: a.weighting,
@@ -1911,7 +1920,7 @@ async function renderRecord(id) {
             ${fromFile ? `<dt>파일</dt><dd>${esc(rec.fileName)}</dd>` : `<dt>저장 순간</dt><dd>${fmtDb(rec.laf)} ${unit}</dd>`}
             ${'speedAvg' in rec || 'speed' in rec ? `<dt>속도</dt><dd>${speedText(rec)}</dd>` : ''}
             ${rec.device ? `<dt>휴대폰</dt><dd>${esc(rec.device)}${rec.importedAt ? ` <small>(${fmtShortDate(rec.importedAt)} 백업에서 넣음)</small>` : ''}</dd>` : ''}
-            <dt>분석 설정</dt><dd>${rec.weighting || 'A'}특성 · ${TW_NAME[rec.timeWeighting || 'F']} · FFT ${rec.fftSize} · ${unit.startsWith('dBFS') ? '파일 디지털 레벨(dBFS) 기준' : `${esc(micName(rec.mic))} ${rec.calibrated ? '보정됨' : '보정 안 됨 (참고값)'}${rec.micCal ? ' · 보정 파일' : ''}`}</dd>
+            <dt>분석 설정</dt><dd>${rec.weighting || 'A'}특성 · ${TW_NAME[rec.timeWeighting || 'F']} · FFT ${rec.fftSize} · ${FFT_WINDOWS[rec.window || 'blackman']?.name || 'Blackman'} 창 · ${unit.startsWith('dBFS') ? '파일 디지털 레벨(dBFS) 기준' : `${esc(micName(rec.mic))} ${rec.calibrated ? '보정됨' : '보정 안 됨 (참고값)'}${rec.micCal ? ' · 보정 파일' : ''}`}</dd>
           </dl>
         </section>
       </div>
@@ -1999,6 +2008,7 @@ async function renderRecord(id) {
         const a = analyzeSound(samples, rate, rec.offset ?? s.offset, {
           weighting: rec.weighting || 'A',
           timeWeighting: rec.timeWeighting || 'F',
+          window: rec.window || 'blackman',
           correction: rec.micCal ? calCorrection(micProfile(s, rec.mic).cal) : null,
         });
         gram?.setStatic(a.frames, a.freqs, a.duration, { labels: fromFile ? 'absolute' : 'relative', unit });

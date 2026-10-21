@@ -25,6 +25,10 @@ import {
   stft,
   levelHistory,
   toDb,
+  FFT_WINDOWS,
+  frameSpectrum,
+  WindowedSpectrum,
+  windowPower,
 } from '../js/dsp.js';
 import { analyzeSound, frameAt } from '../js/analysis.js';
 import { encodeWav, decodeWav } from '../js/audio.js';
@@ -735,4 +739,37 @@ test('calibration stability: a steady tone is good, a wandering source is poor; 
   assert.equal(calStability(mild, 'calibrator').grade, 'fair', 'but not for a calibrator tone');
   assert.ok(Math.abs(calStability(wander).range - 6) < 0.1);
   assert.equal(calStability([94, 94, 94]), null, 'too few levels');
+});
+
+test('FFT windows: with each window the bins still add up to the true level, and the live path matches', () => {
+  const fs = 48000;
+  const N = 4096;
+  assert.ok(Math.abs(windowPower('hann') - 0.375) < 1e-12 && Math.abs(windowPower('hamming') - 0.3974) < 1e-12);
+  let seed = 7;
+  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 2 - 1;
+  const noise = Float32Array.from({ length: N }, () => 0.2 * rand());
+  const noiseMs = noise.reduce((a, x) => a + x * x, 0) / N;
+  for (const window of Object.keys(FFT_WINDOWS)) {
+    const table = binLevelTable(N / 2, fs / N, 'Z', null, window);
+    for (const [f, amp] of [[1000, 0.25], [125, 0.5]]) {
+      const total = totalLevel(binLevels(frameSpectrum(sine(f, amp, fs, N), 0, N, undefined, window), table, 100));
+      const expected = toDb((amp * amp) / 2, 100);
+      assert.ok(Math.abs(total - expected) < 0.3, `${window} ${f} Hz: ${total.toFixed(2)} vs ${expected.toFixed(2)}`);
+    }
+    const nTotal = totalLevel(binLevels(frameSpectrum(noise, 0, N, undefined, window), table, 0));
+    assert.ok(Math.abs(nTotal - toDb(noiseMs)) < 0.5, `${window} noise: ${nTotal.toFixed(2)} vs ${toDb(noiseMs).toFixed(2)}`);
+    // the live path (time-domain samples windowed here) gives the same frame; smoothing averages |X|
+    const live = new WindowedSpectrum(N, window, 0);
+    const a = live.run(sine(1000, 0.25, fs, N), new Float32Array(N / 2));
+    const b = frameSpectrum(sine(1000, 0.25, fs, N), 0, N, undefined, window);
+    for (let k = 1; k < N / 2; k += 97) assert.ok(Math.abs(a[k] - b[k]) < 1e-3 || (a[k] < -200 && b[k] < -200), `${window} bin ${k}`);
+    const smooth = new WindowedSpectrum(N, window, 0.5);
+    smooth.run(sine(1000, 0.25, fs, N), new Float32Array(N / 2));
+    const half = smooth.run(new Float32Array(N), new Float32Array(N / 2));
+    const k1k = Math.round(1000 / (fs / N));
+    assert.ok(Math.abs(half[k1k] - (b[k1k] - 20 * Math.log10(4))) < 0.01, 'two smoothing steps: a quarter of |X| left');
+  }
+  // the windows differ: Hamming lets a loud tone leak far away, Blackman least
+  const at = (w, hz) => frameSpectrum(sine(1000, 0.5, fs, N), 0, N, undefined, w)[Math.round(hz / (fs / N))];
+  assert.ok(at('hamming', 3000) > at('blackman', 3000) + 40, `leakage at 3 kHz: hamming ${at('hamming', 3000).toFixed(1)}, blackman ${at('blackman', 3000).toFixed(1)}`);
 });
