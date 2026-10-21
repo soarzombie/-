@@ -832,6 +832,11 @@ select {
 .an-mic.is-warn { color: var(--amber); }
 .an-sub.has-mic .an-mode-name { display: none; }
 .mic-field select { min-height: 44px; }
+.cal-live { font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.stab-good { color: #3ddc84; font-weight: 700; }
+.stab-fair { color: var(--amber); font-weight: 700; }
+.stab-poor { color: var(--rec); font-weight: 700; }
+.cal-modes .seg-field > span, .cal-ref-pick .seg-field > span { font-size: 14px; }
 .cal-file { display: grid; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
 .cal-file h3 { font-size: 15px; font-weight: 700; }
 .cal-file h3 small { font-weight: 500; color: var(--ink-3); }
@@ -864,3 +869,7 @@ select {
 :root[data-rotate="on"] body[data-view="home"] .menu-chart .menu-group:nth-child(2) { border-left: 1px solid var(--line); }
 :root[data-rotate="on"] body[data-view="home"] .menu-wide { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
 :root[data-rotate="on"] body[data-view="home"] .menu button { min-height: 40px; }
+
+/* 오디오 세부정보 */
+.details .meta { margin: 0; }
+.details .warn { color: var(--amber); }

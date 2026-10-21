@@ -654,6 +654,29 @@ async function cursorDb(page, hz) {
   console.log(`recording: ${recLen.toFixed(2)} s, Leq ${recLeq}`);
   assert.ok(recLen > 3 && recLen < 4.8, 'recording length includes the paused part');
   assert.ok(Math.abs(recLeq - (expected1 + 3)) < 0.3, 'recording Leq');
+
+  // calibrator mode: the 1 kHz test tone stands in for a 94 dB calibrator; steady, so stability is good,
+  // the value is filled in, and after applying the analyzer reads 94 dB(A)
+  await page.locator('.tabbar a[data-tab=settings]').click();
+  await page.waitForSelector('.cal-modes'); // still unlocked from the calibration above
+  await page.locator('.cal-modes button[data-v=calibrator]').click();
+  assert.ok(await page.locator('.cal-ref-pick').isVisible(), 'calibrator level choice');
+  await page.getByRole('button', { name: /보정 측정/ }).click();
+  await page.waitForSelector('#cal-live:not([hidden])');
+  await page.waitForSelector('#cal-result:not([hidden])', { timeout: 15000 });
+  const stab = await page.locator('#cal-stab').textContent();
+  console.log(`calibrator: phone ${await page.locator('#cal-phone').textContent()}, ${stab}`);
+  assert.match(stab, /안정성 좋음/);
+  assert.ok(await page.locator('#cal-warn').isHidden(), 'no warning for a steady 1 kHz tone');
+  assert.equal(await page.locator('#f-cal-ref').inputValue(), '94');
+  await shot(page, 'calibrator', true);
+  await page.getByRole('button', { name: '적용' }).click();
+  const calOffset = parseFloat(await page.locator('#cal-offset').textContent());
+  assert.ok(Math.abs(calOffset - (103 + 94 - (expected1 + 3))) < 0.4, `calibrator offset ${calOffset}`);
+  await page.locator('.tabbar a[data-tab=home]').click();
+  await running(page);
+  await page.waitForTimeout(2000);
+  assert.ok(Math.abs((await num(page, '#a-now')) - 94) < 0.5, 'reads the calibrator level');
   await browser.close();
 
   // Run 2: 100 Hz at -9 dBFS RMS; A-weighting takes off 19.1 dB -> 71.9 dB(A)
@@ -786,6 +809,44 @@ async function cursorDb(page, hz) {
   await page.waitForSelector('#a-ref', { state: 'hidden' });
   assert.equal((await settingsOf(page)).refId, '');
 
+  // 오디오 세부정보: the microphone, the browser's audio values, sound processing off
+  await page.getByRole('button', { name: '그래프 설정' }).click();
+  await page.getByRole('menuitem', { name: '오디오 세부정보' }).click();
+  const details = page.locator('dialog.sheet .details');
+  await details.waitFor();
+  const dText = await details.textContent();
+  assert.match(dText, /샘플링 레이트\d+ Hz/);
+  assert.match(dText, /자동 음량 조절꺼짐/);
+  assert.match(dText, /A특성/);
+  await shot(page, 'details');
+  await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
+  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+
+  // 바로 저장: a timed measurement saves without the sheet, with the last vehicle number
+  await page.evaluate(async () => (await import('./js/settings.js')).saveSettings({ vehicle: '78다 9012' })); // as after an earlier save
+  await chartSettings(page, { autoSave: 'on' });
+  const before = await page.evaluate(() => new Promise((r) => {
+    const q = indexedDB.open('noise-meter');
+    q.onsuccess = () => {
+      const c = q.result.transaction('records').objectStore('records').count();
+      c.onsuccess = () => r(c.result);
+    };
+  }));
+  await page.getByRole('button', { name: '5초 측정', exact: true }).click();
+  await page.waitForFunction(() => /5초 측정을 저장했습니다 \(78다 9012\)/.test(document.querySelector('#toast')?.textContent || ''), null, { timeout: 12000 });
+  assert.equal(await page.locator('dialog.sheet').count(), 0, 'no save sheet');
+  await page.locator('#toast .toast-action').click();
+  await page.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
+  assert.match(await page.locator('.rec-head h1').textContent(), /78다 9012/);
+  assert.match(await page.locator('.rec-head p').first().textContent(), /5초 측정 00:05/);
+  await page.locator('.tabbar a[data-tab=history]').click();
+  await page.waitForSelector('.record-row');
+  assert.equal(await page.locator('.record-row').count(), before + 1);
+  await page.locator('.tabbar a[data-tab=home]').click();
+  await running(page);
+  await chartSettings(page, { autoSave: 'off' });
+  await page.evaluate(async () => (await import('./js/settings.js')).saveSettings({ vehicle: '' }));
+
   // attached file: 3 s of 1 kHz (77.0 dB(A)) then 3 s of 100 Hz (71.9 dB(A))
   // (passed as a buffer: Playwright here cannot attach files from non-ASCII paths, and the Korean name
   // is part of what is being checked)
@@ -828,7 +889,7 @@ async function cursorDb(page, hz) {
   assert.ok(Math.abs((await num(page, '.stats-grid div:first-child b')) - fileLeq) < 0.3, 'saved file Leq');
   // record against record: the 5 s measurement dashed over the file, and the two averages
   await page.getByRole('button', { name: '다른 기록과 비교' }).click();
-  await page.locator('dialog.sheet .record-row').filter({ hasText: '5초 측정' }).click();
+  await page.locator('dialog.sheet .record-row').filter({ hasText: '차량 미입력' }).filter({ hasText: '5초 측정' }).click();
   await page.waitForSelector('#rec-ref:not([hidden])');
   const cmp = await page.locator('#rec-ref-text').textContent();
   console.log(`record comparison: ${cmp}`);
@@ -851,20 +912,20 @@ async function cursorDb(page, hz) {
   await office.evaluate(() => (location.hash = '#/history'));
   await office.waitForSelector('.empty-hint');
   await office.setInputFiles('#f-backup', { name: 'backup.nmb', mimeType: 'application/octet-stream', buffer: fs.readFileSync(bakPath) });
-  await office.waitForFunction(() => /정비팀 1호의 기록 2건을 넣었습니다/.test(document.querySelector('#toast')?.textContent || ''));
+  await office.waitForFunction(() => /정비팀 1호의 기록 3건을 넣었습니다/.test(document.querySelector('#toast')?.textContent || ''));
   await office.waitForSelector('.record-row');
-  assert.equal(await office.locator('.record-row').count(), 2);
+  assert.equal(await office.locator('.record-row').count(), 3);
   assert.equal(await office.locator('.rr-dev').first().textContent(), '정비팀 1호');
   await shot(office, 'backup-imported');
-  await office.locator('.record-row').filter({ hasText: '5초 측정' }).click();
+  await office.locator('.record-row').filter({ hasText: '차량 미입력' }).filter({ hasText: '5초 측정' }).click();
   await office.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
   assert.match(await office.locator('.meta dt:has-text("휴대폰") + dd').textContent(), /정비팀 1호 \(\d{4}\.\d\d\.\d\d 백업에서 넣음\)/);
   assert.ok(await office.getByRole('button', { name: '소리 파일 보내기' }).isVisible(), 'the sound came along');
   await office.evaluate(() => (location.hash = '#/history'));
   await office.waitForSelector('.record-row');
   await office.setInputFiles('#f-backup', { name: 'backup.nmb', mimeType: 'application/octet-stream', buffer: fs.readFileSync(bakPath) });
-  await office.waitForFunction(() => /새 기록이 없습니다 \(2건 모두 이미 있음\)/.test(document.querySelector('#toast')?.textContent || ''));
-  assert.equal(await office.locator('.record-row').count(), 2);
+  await office.waitForFunction(() => /새 기록이 없습니다 \(3건 모두 이미 있음\)/.test(document.querySelector('#toast')?.textContent || ''));
+  assert.equal(await office.locator('.record-row').count(), 3);
   await office.context().close();
   await browser.close();
 

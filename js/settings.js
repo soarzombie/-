@@ -13,6 +13,7 @@ const DEFAULTS = {
   traceSec: 30, // seconds shown in the time-axis graph: 30 | 60 | 300
   timedSec: 10, // "N초 측정" button: 5 | 10 | 30 | 60
   gps: false, // 속도 (GPS): show and keep the vehicle speed with the measurement
+  autoSave: false, // a timed measurement saves at once (last vehicle number) instead of opening the save sheet
   theme: 'dark', // 화면 밝기: 'dark' | 'light' (sunlight)
   device: '', // this phone's name, kept with its records and shown on other phones after a backup
   weighting: 'A', // frequency weighting 'A' | 'C' | 'Z', for levels and spectrum alike

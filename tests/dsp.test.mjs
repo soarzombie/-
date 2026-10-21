@@ -31,7 +31,7 @@ import { encodeWav, decodeWav } from '../js/audio.js';
 import { columnRange } from '../js/timeline.js';
 import { freqAxis, freqTicks, freqToX, xToFreq, checkFreqRange, checkDbRange, pinchRange } from '../js/spectrum.js';
 import { PRESETS, PRESET_KEYS, choosePreset, customize, presetOf } from '../js/presets.js';
-import { micProfile, saveMicProfile, parseCalFile, calCorrection } from '../js/mics.js';
+import { micProfile, saveMicProfile, parseCalFile, calCorrection, calStability } from '../js/mics.js';
 import { Meter } from '../js/meter.js';
 import { haversine, trackSpeed } from '../js/gps.js';
 import { backupBlob, readBackup, importPlan } from '../js/backup.js';
@@ -723,4 +723,16 @@ test('backup file: records and their sound go in one file and come back; another
   const cut = await readBackup(file.slice(0, file.size - 2)); // the last sound is cut off
   assert.equal(cut.records[2].audio, undefined);
   assert.ok(cut.records[0].audio.size === 6);
+});
+
+test('calibration stability: a steady tone is good, a wandering source is poor; stricter for a calibrator', () => {
+  const steady = Array.from({ length: 90 }, (_, i) => 94 + 0.1 * Math.sin(i));
+  const wander = Array.from({ length: 90 }, (_, i) => 70 + 3 * Math.sin(i / 5));
+  const mild = Array.from({ length: 90 }, (_, i) => 70 + 0.8 * Math.sin(i / 3));
+  assert.equal(calStability(steady, 'calibrator').grade, 'good');
+  assert.equal(calStability(wander).grade, 'poor');
+  assert.equal(calStability(mild).grade, 'good', 'within ±1 dB is fine against a reference meter');
+  assert.equal(calStability(mild, 'calibrator').grade, 'fair', 'but not for a calibrator tone');
+  assert.ok(Math.abs(calStability(wander).range - 6) < 0.1);
+  assert.equal(calStability([94, 94, 94]), null, 'too few levels');
 });

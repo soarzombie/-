@@ -3,7 +3,7 @@
 
 import { APP_VERSION, getSettings, saveSettings, rememberVehicle } from './settings.js';
 import { PRESETS, CUSTOM, presetOf, choosePreset, customize } from './presets.js';
-import { micProfile, saveMicProfile, parseCalFile, calCorrection } from './mics.js';
+import { micProfile, saveMicProfile, parseCalFile, calCorrection, calStability } from './mics.js';
 import { trackSpeed, STALE_SEC } from './gps.js';
 import { backupBlob, readBackup, importPlan } from './backup.js';
 import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
@@ -920,7 +920,22 @@ async function renderAnalyzer() {
     holds ||= newHolds(meter.levels.length);
     draw(meter.levels);
     const audio = getSettings().audioSec > 0 ? meter.captureAudio(sec) : Promise.resolve(new Float32Array(0));
-    openSave({ ...snapshot(), timedSec: sec }, audio);
+    if (getSettings().autoSave) saveNow({ ...snapshot(), timedSec: sec }, audio);
+    else openSave({ ...snapshot(), timedSec: sec }, audio);
+  }
+
+  // 바로 저장 (timed measurement with auto-save on): no sheet; the last vehicle number and the sound,
+  // then a message that opens the record to change the memo or vehicle number.
+  async function saveNow(rec, audio) {
+    const st = getSettings();
+    rec.vehicle = st.vehicle || '';
+    const samples = await audio;
+    if (samples.length) {
+      rec.audio = encodeWav(samples, rec.sampleRate);
+      rec.audioSec = round1(samples.length / rec.sampleRate);
+    }
+    await store.putRecord(rec);
+    toast(`${rec.timedSec}초 측정을 저장했습니다${rec.vehicle ? ` (${rec.vehicle})` : ''} · 평균 ${fmtDb(rec.leq)}`, { label: '열기', run: () => (location.hash = `#/record/${encodeURIComponent(rec.id)}`) });
   }
 
   // Everything needed to look at this moment again later.
@@ -1022,6 +1037,7 @@ async function renderAnalyzer() {
         ${segRow('weighting', '주파수 가중치', WEIGHTINGS.map((w) => [w, `${w}특성`]), st.weighting, `<span id="f-weight-note">${WEIGHT_NOTE[st.weighting]}</span> 바꾸면 최소·평균·최대가 새로 시작합니다.`)}
         ${segRow('timeWeighting', '시간 가중 (큰 숫자)', [['F', 'Fast 0.125초'], ['S', 'Slow 1초']], st.timeWeighting, 'Slow는 숫자가 덜 흔들려 읽기 쉽습니다. 바꾸면 최소·평균·최대가 새로 시작합니다.')}
         ${segRow('timed', '정해진 시간 측정 (⏱ 버튼)', TIMED_SECS.map((n) => [n, n < 60 ? `${n}초` : '1분']), st.timedSec, '누르면 처음부터 이 시간만큼 재고 멈춘 뒤 저장 창을 엽니다.')}
+        ${segRow('autoSave', '정해진 시간 측정이 끝나면', [['off', '저장 창 열기'], ['on', '바로 저장']], st.autoSave ? 'on' : 'off', '바로 저장은 마지막 차량번호로 소리와 함께 저장하고, 알림의 "열기"로 메모를 고칠 수 있습니다. 여러 대를 이어서 잴 때 빠릅니다.')}
         ${segRow('gps', '속도 (GPS)', [['off', '끔'], ['on', '켬']], st.gps ? 'on' : 'off', '켜면 위치 권한을 묻고, 차 속도를 그래프 위와 시간축 그래프(노란 선), 저장 기록에 함께 남깁니다. 위치는 저장하지 않습니다.')}
         <h3 class="sheet-sub">그래프</h3>
         ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
@@ -1054,9 +1070,59 @@ async function renderAnalyzer() {
     };
     bindSegs(dlg, (key, v) => {
       const numeric = { trace: 'traceSec', fft: 'fftSize', timed: 'timedSec' };
-      change(key === 'gps' ? { gps: v === 'on' } : numeric[key] ? { [numeric[key]]: Number(v) } : { [key]: v });
+      change(key === 'gps' || key === 'autoSave' ? { [key]: v === 'on' } : numeric[key] ? { [numeric[key]]: Number(v) } : { [key]: v });
       if (key === 'weighting') dlg.querySelector('#f-weight-note').textContent = WEIGHT_NOTE[v];
     });
+  }
+
+  // "오디오 세부정보": what is being measured with, as the browser reports it, for finding out why a
+  // reading looks wrong (another microphone, sound processing left on, no calibration ...).
+  function detailsSheet() {
+    const st = getSettings();
+    const t = meter?.trackSettings || {};
+    const ctx = meter?.ctx;
+    const ms = (sec) => (Number.isFinite(sec) && sec > 0 ? `${(sec * 1000).toFixed(1)} ms` : '알 수 없음');
+    const proc = (v) => (v === true ? '<b class="warn">켜짐 ⚠</b>' : v === false ? '꺼짐' : '알 수 없음');
+    const prof = micProf || micProfile(st, st.lastMic);
+    const row = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
+    const on = !!meter;
+    openSheet(`
+      <div class="sheet-form details">
+        <h2>오디오 세부정보</h2>
+        ${on ? '' : '<p class="fine">측정을 시작하면 마이크와 오디오 값이 나옵니다.</p>'}
+        <h3 class="sheet-sub">마이크</h3>
+        <dl class="meta">
+          ${row('입력', esc(micName(meter?.inputLabel || st.lastMic)))}
+          ${row('보정값', `${prof.offset} dB · ${prof.calibratedAt ? `${fmtShortDate(prof.calibratedAt)} 보정` : '<b class="warn">보정 안 됨</b>'}`)}
+          ${row('보정 파일', prof.cal ? esc(calFileState(prof)) : '없음')}
+        </dl>
+        <h3 class="sheet-sub">측정 설정</h3>
+        <dl class="meta">
+          ${row('주파수 가중치', `${st.weighting}특성 (${unitOf(st.weighting)})`)}
+          ${row('시간 가중', `${TW_NAME[st.timeWeighting]} (${st.timeWeighting === 'S' ? '1초' : '0.125초'})`)}
+          ${row('FFT 크기', on ? `${meter.analyser.fftSize} (칸 ${meter.binHz.toFixed(2)} Hz)` : st.fftSize)}
+          ${row('창 함수', 'Blackman (브라우저 고정)')}
+          ${row('저장할 때 남길 소리', st.audioSec ? `${st.audioSec}초` : '남기지 않음')}
+        </dl>
+        <h3 class="sheet-sub">오디오</h3>
+        <dl class="meta">
+          ${row('샘플링 레이트', on ? `${ctx.sampleRate} Hz` : '-')}
+          ${row('채널', on && t.channelCount ? `${t.channelCount}` : on ? '1 (모노로 분석)' : '-')}
+          ${row('입력 지연', on ? ms(t.latency) : '-')}
+          ${row('처리 지연', on ? ms(ctx.baseLatency) : '-')}
+          ${row('에코 제거', on ? proc(t.echoCancellation) : '-')}
+          ${row('잡음 제거', on ? proc(t.noiseSuppression) : '-')}
+          ${row('자동 음량 조절', on ? proc(t.autoGainControl) : '-')}
+        </dl>
+        ${on && [t.echoCancellation, t.noiseSuppression, t.autoGainControl].includes(true) ? '<p class="alert">브라우저가 소리 처리를 끄지 않았습니다. 값이 실제와 다를 수 있으니 다른 브라우저(크롬·사파리 최신)로 열어 보세요.</p>' : ''}
+        <h3 class="sheet-sub">앱</h3>
+        <dl class="meta">
+          ${row('버전', `v${APP_VERSION}`)}
+          ${row('화면', `${html.dataset.layout === 'landscape' ? '가로' : '세로'}${html.dataset.rotate === 'on' ? ' (돌려 보기)' : html.dataset.lock === 'on' ? ' (가로 고정)' : ''} · ${st.theme === 'light' ? '밝게' : '어둡게'}`)}
+        </dl>
+        <p class="fine">스마트폰 측정값은 참고값입니다.</p>
+        <button type="button" class="btn btn-wide" data-close>닫기</button>
+      </div>`);
   }
 
   // Settings changed (by hand, from a menu, or by a measurement situation): the live view follows.
@@ -1227,6 +1293,7 @@ async function renderAnalyzer() {
           <button type="button" role="menuitem" data-act="hold-reset">${ICON.reset}홀드 재설정</button>
           <button type="button" role="menuitem" data-act="ranges">${ICON.axes}축 범위</button>
           <button type="button" role="menuitem" data-act="more">${ICON.sliders}<span class="mi-text">측정 · 그래프 설정<small>마이크 · 가중치 · 정해진 시간 · 속도 · FFT · 화면 밝기</small></span></button>
+          <button type="button" role="menuitem" data-act="details">${ICON.info}오디오 세부정보</button>
         </div>`;
     };
     menu = openMenu(anchor, html(), () => (menu = null), 'menu-chart');
@@ -1245,6 +1312,9 @@ async function renderAnalyzer() {
       } else if (b.dataset.act === 'ranges') {
         menu.close();
         rangeSheet();
+      } else if (b.dataset.act === 'details') {
+        menu.close();
+        detailsSheet();
       }
       if (menu) menu.menu.innerHTML = html(); // ticks and colour swatches follow the choice
       if (meter?.paused && holds) draw(meter.levels);
@@ -1973,17 +2043,26 @@ async function renderSettings() {
             <select id="f-cal-mic"><option value="">휴대폰 기본 마이크</option></select></label>
           <p><strong id="cal-mic">${esc(micName(calTarget))}</strong> · 보정값 <strong id="cal-offset">${calProf.offset} dB</strong> · <span id="cal-date">${calDate(calProf)}</span></p>
           <p class="fine">휴대폰·마이크마다 감도가 달라 하나씩 보정해야 값이 맞습니다. 평소에는 휴대폰 마이크로 재고, 외부 측정 마이크(iMM-6C 등)는 꽂은 뒤 위에서 골라 따로 보정합니다.</p>
-          <ol class="guide">
+          <div class="cal-modes">${segRow('calMode', '기준', [['meter', '기준 소음계'], ['calibrator', '음향 교정기']], 'meter')}</div>
+          <ol class="guide" data-mode="meter">
             <li>정밀 소음계(기준기)와 휴대폰을 나란히 두세요.</li>
             <li>공회전 소리처럼 일정한 소리가 나게 하세요.</li>
             <li>아래 버튼을 누르고, 같은 5초 동안 소음계의 평균값(Leq, A특성)을 읽으세요.</li>
             <li>소음계 값을 입력하고 적용을 누르세요.</li>
           </ol>
+          <ol class="guide" data-mode="calibrator" hidden>
+            <li>음향 교정기(1 kHz, 94 dB 또는 114 dB)를 마이크에 끼우고 켜세요. 외부 측정 마이크에 맞는 어댑터를 쓰세요.</li>
+            <li>교정기 레벨을 고르고 아래 버튼을 누르세요.</li>
+            <li>측정이 끝나면 적용을 누르세요. 1 kHz에서는 A특성이 0 dB라 교정기 값 그대로 맞춥니다.</li>
+          </ol>
+          <div class="cal-ref-pick" data-mode="calibrator" hidden>${segRow('calRef', '교정기 레벨', [['94', '94 dB'], ['114', '114 dB']], '94')}</div>
           <button type="button" class="btn btn-wide" data-act="cal-measure">보정 측정 (5초)</button>
+          <p class="cal-live" id="cal-live" hidden></p>
           <div class="cal-result" id="cal-result" hidden>
-            <p>휴대폰 측정값 <strong id="cal-phone">-</strong> dB(A)</p>
+            <p>휴대폰 측정값 <strong id="cal-phone">-</strong> dB(A) · <span id="cal-stab"></span></p>
+            <p class="alert" id="cal-warn" hidden></p>
             <div class="inline-form">
-              <label class="field field-num"><span>소음계 값</span><input id="f-cal-ref" type="number" inputmode="decimal" step="0.1"></label>
+              <label class="field field-num"><span id="cal-ref-label">소음계 값</span><input id="f-cal-ref" type="number" inputmode="decimal" step="0.1"></label>
               <button type="button" class="btn btn-primary" data-act="cal-apply">적용</button>
             </div>
           </div>
@@ -2055,10 +2134,28 @@ async function renderSettings() {
     showCal();
   };
 
+  // 기준 소음계 (read its Leq over the same 5 s) or 음향 교정기 (a known 1 kHz tone, 94 or 114 dB)
+  let calMode = 'meter';
+  let calRef = 94;
+  const STAB_TEXT = { good: '안정성 좋음', fair: '안정성 보통', poor: '안정성 낮음 ⚠' };
+  const stabText = (st) => (st ? `${STAB_TEXT[st.grade]} (±${st.sd.toFixed(1)} dB)` : '안정성 확인 중');
+  bindSegs(view.querySelector('.cal-modes'), (key, v) => {
+    calMode = v;
+    view.querySelectorAll('[data-mode]').forEach((el) => (el.hidden = el.dataset.mode !== v));
+    $('cal-ref-label').textContent = v === 'calibrator' ? '교정기 값' : '소음계 값';
+    $('cal-result').hidden = true;
+  });
+  bindSegs(view.querySelector('.cal-ref-pick'), (key, v) => {
+    calRef = Number(v);
+    if (calMode === 'calibrator' && !$('cal-result').hidden) $('f-cal-ref').value = calRef;
+  });
+
   view.querySelector('[data-act=cal-measure]').onclick = async (e) => {
     const btn = e.currentTarget;
     btn.disabled = true;
     calMic.disabled = true;
+    $('cal-result').hidden = true;
+    const levels = []; // time-weighted levels after the warm-up, for the stability
     calMeter = new Meter(calProf.offset);
     try {
       await calMeter.start(4096, 0, calDevice);
@@ -2071,6 +2168,12 @@ async function renderSettings() {
         calMic.value = calDevice = '';
         toast('고른 마이크가 없어 휴대폰 기본 마이크를 보정합니다');
       }
+      calMeter.onLevel = (db) => {
+        if (calMeter.warming) return;
+        levels.push(db);
+        $('cal-live').hidden = false;
+        $('cal-live').textContent = `지금 ${fmtDb(db)} dB(A) · ${stabText(calStability(levels, calMode))}`;
+      };
       if (!calMeter.running) await calMeter.wake();
       const until = Date.now() + 12000;
       while (calMeter.elapsed < 5) {
@@ -2079,9 +2182,25 @@ async function renderSettings() {
         await sleep(100);
       }
       calPhone = calMeter.leq;
+      const stab = calStability(levels, calMode);
+      // a calibrator plays 1 kHz: check that this is what the microphone hears
+      const spec = calMeter.spectrum();
+      let top = 1;
+      for (let k = 2; k < spec.length; k++) if (spec[k] > spec[top]) top = k;
+      const toneHz = calMeter.freqs[top];
+      const warn = [
+        stab?.grade === 'poor' && '소리가 일정하지 않아 보정이 틀릴 수 있습니다. 조용한 곳에서 다시 재 보세요.',
+        calMode === 'calibrator' && Math.abs(Math.log2(toneHz / 1000)) > 0.15 && `가장 큰 소리가 ${fmtHz(toneHz)}입니다. 교정기(1 kHz)가 마이크에 제대로 끼워졌는지 확인하세요.`,
+      ].filter(Boolean);
       $('cal-phone').textContent = fmtDb(calPhone);
+      $('cal-stab').textContent = stabText(stab);
+      $('cal-stab').className = `stab-${stab?.grade || 'fair'}`;
+      $('cal-warn').textContent = warn.join(' ');
+      $('cal-warn').hidden = !warn.length;
+      $('f-cal-ref').value = calMode === 'calibrator' ? calRef : '';
       $('cal-result').hidden = false;
-      $('f-cal-ref').focus();
+      $('cal-live').hidden = true;
+      if (calMode !== 'calibrator') $('f-cal-ref').focus();
     } catch (err) {
       if (err?.code !== 'cancelled') toast(err.message);
     } finally {
@@ -2094,7 +2213,7 @@ async function renderSettings() {
   };
   view.querySelector('[data-act=cal-apply]').onclick = () => {
     const ref = parseFloat($('f-cal-ref').value);
-    if (!Number.isFinite(ref) || ref < 20 || ref > 140 || !Number.isFinite(calPhone)) return toast('소음계 값을 확인해 주세요');
+    if (!Number.isFinite(ref) || ref < 20 || ref > 140 || !Number.isFinite(calPhone)) return toast(calMode === 'calibrator' ? '교정기 값을 확인해 주세요' : '소음계 값을 확인해 주세요');
     const offset = round1(calProf.offset + (ref - calPhone));
     saveSettings(saveMicProfile(getSettings(), calTarget, { offset, calibratedAt: Date.now() }));
     calProf = micProfile(getSettings(), calTarget);

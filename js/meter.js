@@ -98,7 +98,8 @@ export class Meter {
     }
     const track = this.stream.getAudioTracks()[0];
     this.inputLabel = track?.label || '';
-    this.inputId = track?.getSettings?.().deviceId || '';
+    this.trackSettings = track?.getSettings?.() || {}; // what the browser actually gave (rate, processing ...)
+    this.inputId = this.trackSettings.deviceId || '';
     track?.addEventListener('ended', () => !this.stopped && this.onInputLost?.());
     try {
       if (!this.ctx.audioWorklet) throw micError('unsupported');
