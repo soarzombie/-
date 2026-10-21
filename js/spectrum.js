@@ -23,6 +23,8 @@ export const SPECTRUM_COLORS = {
   minHold: '#ffa53d',
   maxTrack: '#ff9aa5',
   minTrack: '#ffd08a',
+  avg: '#7fe0c4',
+  ref: '#c9a6ff',
   cursor: '#5cc8ff',
   label: '#ffffff',
   labelBg: 'rgba(12, 14, 18, 0.72)',
@@ -40,6 +42,8 @@ export function curveLook(style, c = SPECTRUM_COLORS) {
     min: [c.minHold, 'line'],
     maxTrack: [c.maxTrack, 'dash'],
     minTrack: [c.minTrack, 'dash'],
+    avg: [c.avg, 'line'],
+    ref: [c.ref, 'dash'],
   };
 }
 
@@ -187,7 +191,7 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
   };
   const trace = (out, stroke, width, dash = null) => {
     g.beginPath();
-    for (let i = 0; i < cols.n; i++) g[i ? 'lineTo' : 'moveTo'](x0 + i + 0.5, y(out[i]));
+    for (let i = 0; i < out.length; i++) g[i ? 'lineTo' : 'moveTo'](x0 + i + 0.5, y(out[i]));
     g.strokeStyle = stroke;
     g.lineWidth = width * k;
     g.setLineDash(dash ? dash.map((d) => d * k) : []);
@@ -223,9 +227,20 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
     else if (style === 'bar') bars(out, c.cur);
     else area(out, c.cur, c.curLine);
   }
+  if (data.avg) trace(reduce(data.avg, 'avg'), c.avg, 1.5);
   if (data.min) trace(reduce(data.min, 'min'), c.minHold, 1.4);
   if (data.maxTrack) trace(reduce(data.maxTrack, 'maxTrack'), c.maxTrack, 1.2, [5, 3]);
   if (data.minTrack) trace(reduce(data.minTrack, 'minTrack'), c.minTrack, 1.2, [5, 3]);
+  // a reference (another measurement, on its own frequency points) as a dashed line over the rest
+  let refOut = null;
+  if (data.ref) {
+    const rf = data.ref.freqs;
+    const refKey = `${key}|${rf.length}|${rf[0]}|${rf[rf.length - 1]}`;
+    if (cache.refKey !== refKey) Object.assign(cache, { refKey, refCols: columnsFor(rf, box, axis) });
+    const rc = cache.refCols;
+    refOut = reduceRanges(data.ref.values, rf, rc.idx, rc.centres, (rc.out ||= new Float32Array(rc.n)));
+    trace(refOut, c.ref, 1.7, [6, 4]);
+  }
   g.restore();
 
   // peak labels
@@ -258,6 +273,7 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
     hz: cur.hz,
     cur: data.cur ? cols.cur[colOf(cur.hz)] : NaN,
     max: data.max ? cols.max[colOf(cur.hz)] : NaN,
+    ref: refOut ? refOut[colOf(cur.hz)] : NaN,
   }));
   (opts.cursors || []).forEach((cur, i) => {
     const cx = Math.round(freqToX(cur.hz, box, axis)) + 0.5;

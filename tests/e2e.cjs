@@ -662,8 +662,29 @@ async function cursorDb(page, hz) {
   }));
   console.log(`timed 5 s: saved sound ${timedAudio.toFixed(2)} s`);
   assert.ok(Math.abs(timedAudio - 5) < 0.15, 'the saved sound is the measured 5 s');
-  await page.locator('.tabbar a[data-tab=home]').click();
+  assert.match(await page.locator('.chart-card .legend').textContent(), /측정 평균/, 'a measurement keeps its average spectrum');
+
+  // before / after: the saved measurement as a dashed reference over the live spectrum
+  await page.getByRole('button', { name: '실시간과 비교' }).click();
   await running(page);
+  await page.waitForSelector('#a-ref:not([hidden])');
+  assert.match(await page.locator('#a-ref-name').textContent(), /^기준 \d+\.\d\d \d\d:\d\d$/);
+  await page.getByRole('button', { name: '일시정지' }).click(); // the chip compares the average since reset
+  await page.getByRole('button', { name: '다시 측정' }).click();
+  await page.waitForTimeout(2500);
+  const refDiff = parseFloat((await page.locator('#a-ref-diff').textContent()).replace('−', '-'));
+  console.log(`live against the saved 5 s: ${await page.locator('#a-ref').textContent()}`);
+  assert.ok(Math.abs(refDiff) < 0.5, 'the same tone: no difference');
+  await tapFrequency(page, 100);
+  await page.waitForSelector('#a-cursor .cr-ref');
+  const crRef = await page.locator('#a-cursor .cr-ref').textContent(); // "기준 68.4 (+0.1)"
+  const [refAt, refD] = crRef.replace('−', '-').match(/-?[\d.]+/g).map(Number);
+  assert.ok(refAt > 60 && Math.abs(refD) < 1, `cursor reads the reference too: ${crRef}`);
+  await shot(page, 'compare-live');
+  await page.locator('#a-cursor .cr-close').click();
+  await page.locator('[data-act=ref-off]').click();
+  await page.waitForSelector('#a-ref', { state: 'hidden' });
+  assert.equal((await settingsOf(page)).refId, '');
 
   // attached file: 3 s of 1 kHz (77.0 dB(A)) then 3 s of 100 Hz (71.9 dB(A))
   // (passed as a buffer: Playwright here cannot attach files from non-ASCII paths, and the Korean name
@@ -705,6 +726,16 @@ async function cursorDb(page, hz) {
   await page.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
   assert.match(await page.locator('.rec-head h1').textContent(), /두 구간 시험음/);
   assert.ok(Math.abs((await num(page, '.stats-grid div:first-child b')) - fileLeq) < 0.3, 'saved file Leq');
+  // record against record: the 5 s measurement dashed over the file, and the two averages
+  await page.getByRole('button', { name: '다른 기록과 비교' }).click();
+  await page.locator('dialog.sheet .record-row').filter({ hasText: '5초 측정' }).click();
+  await page.waitForSelector('#rec-ref:not([hidden])');
+  const cmp = await page.locator('#rec-ref-text').textContent();
+  console.log(`record comparison: ${cmp}`);
+  const cmpD = parseFloat(cmp.match(/([+−])([\d.]+) dB/).slice(1).join('').replace('−', '-'));
+  assert.ok(Math.abs(cmpD - (fileLeq - expected2)) < 0.5, 'difference of the averages');
+  assert.match(await page.locator('.chart-card .legend').textContent(), /비교: /);
+  await shot(page, 'compare-records', true);
   await browser.close();
 
   // Run 3: cabin-like noise, screenshots in both orientations

@@ -7,7 +7,7 @@ import { micProfile, saveMicProfile, parseCalFile, calCorrection } from './mics.
 import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
 import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds } from './dsp.js';
 import * as store from './store.js';
-import { esc, fmtDb, fmtHz, fmtClock, fmtDate, fmtDay, fmtShortDate, fmtTime, fileStamp } from './format.js';
+import { esc, fmtDb, fmtHz, fmtClock, fmtDate, fmtDay, fmtShortDate, fmtTime, fmtWhen, fileStamp } from './format.js';
 import { SpectrumView, curveLook, checkFreqRange, checkDbRange } from './spectrum.js';
 import { SpectrogramView } from './spectrogram.js';
 import { encodeWav, decodeAudioFile } from './audio.js';
@@ -182,8 +182,27 @@ async function micPermission() {
 }
 
 // One-line cursor read-out: "A 1,250 Hz 62.3  B 125 Hz 47.6  B−A −14.7 dB" (levels in dB(A)).
+// A saved record as a comparison reference: its average spectrum (a measurement's average since reset,
+// a file's overall average; older measurements only have the moment of saving).
+function refCurve(rec) {
+  const sp = rec?.spectrum;
+  if (!sp?.freqs) return null;
+  return {
+    id: rec.id,
+    name: rec.vehicle || (rec.source === 'file' ? rec.fileName : '') || fmtWhen(rec.ts),
+    when: fmtWhen(rec.ts),
+    freqs: Float32Array.from(sp.freqs),
+    values: Float32Array.from(sp.avg || sp.cur),
+    leq: rec.leq,
+    weighting: rec.weighting || 'A',
+    unit: rec.unit || 'dB(A)',
+  };
+}
+
+const signed = (d) => `${d >= 0 ? '+' : '−'}${fmtDb(Math.abs(d))}`;
+
 function cursorText(values) {
-  const parts = values.map((v, i) => `<span><b>${'AB'[i]}</b> ${fmtHz(v.hz)} <em>${fmtDb(v.cur)}</em></span>`);
+  const parts = values.map((v, i) => `<span><b>${'AB'[i]}</b> ${fmtHz(v.hz)} <em>${fmtDb(v.cur)}</em>${Number.isFinite(v.ref) && Number.isFinite(v.cur) ? ` <i class="cr-ref">기준 ${fmtDb(v.ref)} (${signed(v.cur - v.ref)})</i>` : ''}</span>`);
   if (values.length === 2) {
     const d = values[1].cur - values[0].cur;
     parts.push(`<span class="cr-diff">B−A ${d >= 0 ? '+' : ''}${fmtDb(d)} dB</span>`);
@@ -355,6 +374,7 @@ async function renderAnalyzer() {
         <div class="trace-plot" id="a-trace"></div>
         <div class="chart-tools">
           <p class="rec-badge" id="a-rec-badge" hidden><i></i>녹음 <b id="a-rec-time">00:00</b></p>
+          <p class="ref-chip" id="a-ref" hidden><i aria-hidden="true"></i><span id="a-ref-name"></span><b id="a-ref-diff"></b><button type="button" class="ref-close" data-act="ref-off" aria-label="기준 비교 끄기">×</button></p>
           <p class="an-peak" id="a-peak">피크 –</p>
           <button type="button" class="tool-btn" data-act="chart-settings" aria-label="그래프 설정" aria-haspopup="menu" aria-expanded="false">${ICON.sliders}</button>
         </div>
@@ -411,6 +431,9 @@ async function renderAnalyzer() {
   let lastPeakAt = 0;
   let menu = null; // the open chart menu
   let micProf = null; // calibration of the microphone in use (mics.js)
+  let ref = null; // a saved record shown as a dashed reference (refCurve)
+  let powSum = null; // per-bin power summed since reset, for the saved average spectrum
+  let powN = 0;
   let knownInputs = null; // microphones seen, to notice one being plugged in
   let lastRowAt = 0;
   let range = [-20, 100];
@@ -447,6 +470,7 @@ async function renderAnalyzer() {
           min: st.minHold ? h.min : null,
           maxTrack: st.maxTrack ? h.maxTrack : null,
           minTrack: st.minTrack ? h.minTrack : null,
+          ref,
           peaks,
         },
         { scale: st.scale, fmin: st.freqMin, fmax: st.freqMax, style: st.style, range: st.specDb || range, unit: unit() },
@@ -473,6 +497,8 @@ async function renderAnalyzer() {
   function resetDisplays() {
     resetHolds();
     avgPow = null;
+    powSum = null;
+    powN = 0;
     peaks = [];
     $('a-peak').textContent = '피크 –';
   }
@@ -515,16 +541,24 @@ async function renderAnalyzer() {
     const cur = meter.spectrum();
     if (!avgPow || avgPow.length !== cur.length) avgPow = new Float64Array(cur.length);
     // holds start after the warm-up, like the levels, so start-up silence is not the minimum
-    if (!meter.warming && now >= holdFrom) {
+    const settled = !meter.warming && now >= holdFrom;
+    if (settled) {
       if (!holds || holds.max.length !== cur.length) holds = newHolds(cur.length);
       updateHolds(holds, cur, Math.min(0.25, (now - lastFrameAt) / 1000));
+      if (!powSum || powSum.length !== cur.length) {
+        powSum = new Float64Array(cur.length);
+        powN = 0;
+      }
+      powN++;
     }
     lastFrameAt = now;
     let top = -Infinity;
     for (let k = 1; k < cur.length; k++) {
       const v = holds ? holds.max[k] : cur[k];
       if (v > top) top = v;
-      avgPow[k] += (10 ** (cur[k] / 10) - avgPow[k]) * 0.1;
+      const p = 10 ** (cur[k] / 10);
+      avgPow[k] += (p - avgPow[k]) * 0.1;
+      if (settled) powSum[k] += p;
     }
     if (top > range[1] - 4 && range[1] < 140) range = [range[0], range[1] + 20];
     if (now - lastPeakAt > 300) {
@@ -549,6 +583,7 @@ async function renderAnalyzer() {
     $('a-min').textContent = fmtDb(meter.lmin);
     $('a-time').textContent = fmtClock(meter.elapsed);
     led.set(db, meter.lmax);
+    if (ref) showRef();
     // the trace follows the measured time: nothing while warming up after a start or reset
     if (meter.stats.n > traced) {
       traced = meter.stats.n;
@@ -762,6 +797,7 @@ async function renderAnalyzer() {
         freqs: Array.from(grid.centres, (f) => Math.round(f * 10) / 10),
         cur: keep(reduceRanges(meter.levels, meter.freqs, idx, grid.centres)),
         max: keep(reduceRanges(holds.max, meter.freqs, idx, grid.centres)),
+        ...(powN ? { avg: keep(reduceRanges(Float32Array.from(powSum, (p) => 10 * Math.log10(p / powN)), meter.freqs, idx, grid.centres)) } : {}),
         ...(st.minHold ? { min: keep(reduceRanges(holds.min, meter.freqs, idx, grid.centres)) } : {}),
         range: [...(st.specDb || range)],
       },
@@ -774,10 +810,30 @@ async function renderAnalyzer() {
       calibrated: !!micProf?.calibratedAt,
       mic: meter.inputLabel,
       micCal: micProf?.calName || '',
+      ...(ref ? { refId: ref.id } : {}),
       vehicle: '',
       memo: '',
       app: APP_VERSION,
     };
+  }
+
+  // The reference chip: its name and how the average since reset compares (same weighting only).
+  function showRef() {
+    $('a-ref').hidden = !ref;
+    chartBox.classList.toggle('has-ref', !!ref);
+    if (!ref) return;
+    $('a-ref-name').textContent = `기준 ${ref.name}`;
+    const same = ref.weighting === getSettings().weighting;
+    const d = meter && meter.elapsed > 0 && Number.isFinite(ref.leq) ? meter.leq - ref.leq : NaN;
+    $('a-ref-diff').textContent = !same ? `${ref.weighting}특성 기록` : Number.isFinite(d) ? `${signed(d)} dB` : '';
+    $('a-ref').classList.toggle('is-warn', !same);
+  }
+
+  function refOff() {
+    ref = null;
+    saveSettings({ refId: '' });
+    showRef();
+    if (meter?.paused && holds) draw(meter.levels);
   }
 
   function openSave(rec, audio) {
@@ -867,6 +923,7 @@ async function renderAnalyzer() {
     }
     if (st.fftSize !== prev.fftSize) applyFft();
     if (st.timedSec !== prev.timedSec && !meter?.timed) showTimed(0);
+    if (ref) showRef();
     gram.configure({ scale: st.scale, fmin: st.freqMin, fmax: st.freqMax, colorRange: st.gramDb });
     if (st.traceSec !== prev.traceSec || st.traceDb !== prev.traceDb) {
       trace.configure({ windowSec: st.traceSec || 30, yRange: st.traceDb });
@@ -1074,10 +1131,16 @@ async function renderAnalyzer() {
     openSave(snapshot(), audio);
   };
   view.querySelector('[data-act=help]').onclick = helpSheet;
+  view.querySelector('[data-act=ref-off]').onclick = refOff;
   view.querySelector('[data-act=chart-settings]').onclick = chartMenu;
   $('a-preset').onclick = presetMenu;
   view.querySelectorAll('.mode').forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
 
+  if (s.refId) {
+    ref = refCurve(await store.getRecord(s.refId).catch(() => null));
+    if (!ref) saveSettings({ refId: '' });
+    showRef();
+  }
   if ((await micPermission()) === 'granted') startMic();
 }
 
@@ -1391,11 +1454,13 @@ async function renderHistory() {
 }
 
 function recordRow(r) {
-  return `<li><a class="record-row" href="#/record/${encodeURIComponent(r.id)}">
-    <span class="rr-time">${fmtTime(r.ts)}</span>
+  return `<li><a class="record-row" href="#/record/${encodeURIComponent(r.id)}">${recordRowInner(r, fmtTime(r.ts))}</a></li>`;
+}
+
+function recordRowInner(r, when = fmtWhen(r.ts)) {
+  return `<span class="rr-time">${when}</span>
     <span class="rr-main"><strong>${esc(r.vehicle || (r.source === 'file' ? r.fileName : '차량 미입력'))}</strong><span>${esc(r.memo || `${r.source === 'file' ? '파일' : r.timedSec ? `${r.timedSec}초 측정` : '측정'} ${fmtClock(r.elapsed)}${r.peaks?.[0] ? ` · 피크 ${fmtHz(r.peaks[0].hz)}` : ''}`)}</span></span>
-    <span class="rr-value"><small>평균</small>${fmtDb(r.leq)}<small>최대</small>${fmtDb(r.lmax)}</span>
-  </a></li>`;
+    <span class="rr-value"><small>평균</small>${fmtDb(r.leq)}<small>최대</small>${fmtDb(r.lmax)}</span>`;
 }
 
 /* ---------- saved analysis ---------- */
@@ -1423,8 +1488,14 @@ async function renderRecord(id) {
           <p class="legend">${legendHtml(s.style, [
             ['cur', fromFile ? '전체 평균' : '저장 순간'],
             ['max', fromFile ? '전체 최대' : '측정 중 최대'],
+            ...(rec.spectrum.avg ? [['avg', '측정 평균']] : []),
             ...(rec.spectrum.min ? [['min', fromFile ? '전체 최소' : '측정 중 최소']] : []),
-          ])} <span class="fine">· 그래프를 누르면 커서</span></p>
+          ])}<span id="rec-ref-legend"></span> <span class="fine">· 그래프를 누르면 커서</span></p>
+          <div class="ref-line" id="rec-ref" hidden><p id="rec-ref-text"></p><button type="button" class="ref-close" data-act="ref-clear" aria-label="비교 끄기">×</button></div>
+          <div class="inline-actions compare-actions">
+            <button type="button" class="btn" data-act="ref-pick">다른 기록과 비교</button>
+            <button type="button" class="btn" data-act="ref-live">실시간과 비교</button>
+          </div>
         </section>
         <section class="stats-grid">
           <div><span>평균</span><b>${fmtDb(rec.leq)}</b><small>${unit}</small></div>
@@ -1462,10 +1533,50 @@ async function renderRecord(id) {
   chart.onCursor = bindCursorReadout(view.querySelector('#rec-cursor'));
   view.querySelector('#rec-cursor .cr-close').onclick = () => chart.clearCursors();
   const sp = rec.spectrum;
-  chart.update(
-    { freqs: Float32Array.from(sp.freqs), cur: Float32Array.from(sp.cur), max: Float32Array.from(sp.max), min: sp.min ? Float32Array.from(sp.min) : null, peaks: rec.peaks },
-    { scale: 'log', style: s.style, range: sp.range, unit },
-  );
+  const recData = {
+    freqs: Float32Array.from(sp.freqs),
+    cur: Float32Array.from(sp.cur),
+    max: Float32Array.from(sp.max),
+    avg: sp.avg ? Float32Array.from(sp.avg) : null,
+    min: sp.min ? Float32Array.from(sp.min) : null,
+    peaks: rec.peaks,
+  };
+  const recOpts = { scale: 'log', style: s.style, range: sp.range, unit };
+  chart.update(recData, recOpts);
+
+  // Comparison with another record: its average spectrum dashed over this one, and the two averages.
+  const compareWith = (other) => {
+    const r = refCurve(other);
+    chart.update({ ...recData, ref: r }, recOpts);
+    view.querySelector('#rec-ref').hidden = !r;
+    view.querySelector('#rec-ref-legend').innerHTML = r ? legendHtml(s.style, [['ref', `비교: ${esc(r.name)}`]]) : '';
+    if (!r) return;
+    const same = r.weighting === (rec.weighting || 'A');
+    const d = rec.leq - r.leq;
+    view.querySelector('#rec-ref-text').innerHTML = `비교 기록 <b>${esc(r.name)}</b>${r.name !== r.when ? ` <small>${r.when}</small>` : ''}<br>평균 ${fmtDb(r.leq)} → 이 기록 ${fmtDb(rec.leq)} ${unit}${same && Number.isFinite(d) ? ` <b class="${d > 0 ? 'up' : 'down'}">${signed(d)} dB</b>` : ` <span class="warn">(${r.weighting}특성 기록이라 직접 비교하기 어렵습니다)</span>`}`;
+  };
+  if (rec.refId) store.getRecord(rec.refId).then((other) => other && compareWith(other)).catch(() => {});
+  view.querySelector('[data-act=ref-clear]').onclick = () => compareWith(null);
+  view.querySelector('[data-act=ref-live]').onclick = () => {
+    saveSettings({ refId: rec.id });
+    location.hash = '#/';
+  };
+  view.querySelector('[data-act=ref-pick]').onclick = async () => {
+    const others = (await store.allRecords()).filter((r) => r.id !== rec.id && r.spectrum).slice(0, 30);
+    if (!others.length) return toast('비교할 다른 기록이 없습니다');
+    const { dlg, close } = openSheet(`
+      <div class="sheet-form">
+        <h2>비교할 기록</h2>
+        <ul class="record-list pick-list">${others.map((r) => `<li><button type="button" class="record-row" data-id="${esc(r.id)}">${recordRowInner(r)}</button></li>`).join('')}</ul>
+        <button type="button" class="btn btn-wide" data-close>닫기</button>
+      </div>`);
+    dlg.querySelectorAll('[data-id]').forEach((b) => {
+      b.onclick = () => {
+        compareWith(others.find((r) => r.id === b.dataset.id));
+        close();
+      };
+    });
+  };
   let gram = null;
   let timeline = null;
   let audioUrl = null;

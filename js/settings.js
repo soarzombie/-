@@ -17,6 +17,7 @@ const DEFAULTS = {
   style: 'fill', // 'fill' | 'line' | 'bar'
   fftSize: 4096,
   scale: 'log',
+  refId: '', // a saved record shown as a dashed reference on the live spectrum ('' = none)
   preset: 'custom', // measurement situation (presets.js): 'idle' | 'drive' | 'indoor' | 'custom'
   custom: null, // the user's own mix, kept while a situation is chosen
   // axis ranges ("축 범위"): frequency for the spectrum and spectrogram; dB ranges null = automatic

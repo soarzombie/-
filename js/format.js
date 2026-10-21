@@ -49,3 +49,9 @@ export function fileStamp(ts) {
   const d = new Date(ts);
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
 }
+
+// "10.21 14:03": a short date and time, for picking one record among others
+export function fmtWhen(ts) {
+  const d = new Date(ts);
+  return `${d.getMonth() + 1}.${pad(d.getDate())} ${fmtTime(ts)}`;
+}
