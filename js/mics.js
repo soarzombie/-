@@ -24,17 +24,22 @@ export function saveMicProfile(st, label, patch) {
 }
 
 // Reads a microphone calibration file: lines "frequency  dB [phase]" (miniDSP UMIK, Dayton iMM-6C, REW and
-// most others). Header and comment lines are skipped; a miniDSP "Sens Factor" and a serial number are kept.
-// Returns { points: [[hz, db], ...] by frequency, sensFactor, serial } or throws a Korean message.
+// most others). Header and comment lines are skipped; a miniDSP "Sens Factor", a Dayton "*1000Hz -40.3"
+// sensitivity line (dB re 1 V/Pa at 1 kHz) and a serial number are kept. A file that lists the absolute
+// sensitivity on every line (all around -40 dB) is turned into a response relative to 1 kHz.
+// Returns { points: [[hz, db], ...] by frequency, sensFactor, sens1k, serial } or throws a Korean message.
 export function parseCalFile(text) {
-  const points = [];
+  let points = [];
   let sensFactor = null;
+  let sens1k = null;
   let serial = null;
   for (const raw of String(text).split(/\r?\n/)) {
     const line = raw.trim().replace(/^"|"$/g, '');
     if (!line) continue;
     const sens = line.match(/sens(?:itivity)?\s*factor\s*=?\s*(-?[\d.]+)/i);
     if (sens) sensFactor = parseFloat(sens[1]);
+    const at1k = line.match(/^\*\s*1000\s*hz\s*[:=]?\s*(-?[\d.]+)/i);
+    if (at1k) sens1k = parseFloat(at1k[1]);
     const ser = line.match(/ser(?:no|ial)(?:\s*(?:no\.?|number|#))?\s*[:=]?\s*([\w-]*\d[\w-]*)/i);
     if (ser) serial = ser[1];
     if (/^[*#;"]/.test(raw.trim()) || !/^[+-]?\d/.test(line)) continue;
@@ -45,8 +50,13 @@ export function parseCalFile(text) {
   points.sort((a, b) => a[0] - b[0]);
   if (points.length < 5) throw new Error('보정 파일에서 "주파수 dB" 줄을 찾지 못했습니다.');
   if (points[0][0] > 200 || points.at(-1)[0] < 5000) throw new Error('보정 파일의 주파수 범위가 너무 좁습니다.');
+  const ref = -calCorrection(points)(1000);
+  if (Math.abs(ref) > 20) {
+    points = points.map(([f, db]) => [f, Math.round((db - ref) * 1000) / 1000]);
+    sens1k ??= Math.round(ref * 10) / 10;
+  }
   if (points.some(([, db]) => Math.abs(db) > 40)) throw new Error('보정 파일의 dB 값이 이상합니다 (±40 dB 넘음).');
-  return { points, sensFactor, serial };
+  return { points, sensFactor, sens1k, serial };
 }
 
 // The dB to add at frequency f so the microphone reads flat: minus its response, interpolated on a log

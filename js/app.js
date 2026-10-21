@@ -136,18 +136,25 @@ function changeSettings(patch) {
 
 // Names phones give their own microphone; an external one keeps its own calibration.
 const BUILT_IN_MIC = /iphone|ipad|built-?in|internal|default|내장|기본|휴대폰|phone|microphone array|bottom|front|back/i;
+// ...and names of plugged-in microphones (USB-C / Lightning / headset), never taken for the phone's own.
+const EXTERNAL_MIC = /usb|imm-?\d|umik|dayton|minidsp|headset|external|외부|lightning|type-?c/i;
 
 // The microphone now open: remember it, and (the first time) which one is the phone's own.
 function noteMic(meter) {
   const st = getSettings();
   const label = meter.inputLabel;
   const patch = { lastMic: label };
-  if (!st.baseMic && label && (BUILT_IN_MIC.test(label) || !st.calibratedAt)) patch.baseMic = label;
+  if (!st.baseMic && label && !EXTERNAL_MIC.test(label) && (BUILT_IN_MIC.test(label) || !st.calibratedAt)) patch.baseMic = label;
   saveSettings(patch);
   return micProfile(getSettings(), label);
 }
 
 const micName = (label) => label || '휴대폰 마이크';
+const calDate = (p) => (p.calibratedAt ? `${fmtShortDate(p.calibratedAt)} 보정` : '보정 안 됨');
+const calFileState = (p) =>
+  p.cal
+    ? [p.calName, `${p.cal.length}점`, `${fmtHz(p.cal[0][0])} – ${fmtHz(p.cal.at(-1)[0])}`, p.calSerial && `S/N ${p.calSerial}`, Number.isFinite(p.calSens) && `감도 ${p.calSens} dB (1 kHz)`].filter(Boolean).join(' · ')
+    : '보정 파일 없음';
 
 async function audioInputs() {
   try {
@@ -299,7 +306,7 @@ function helpSheet() {
     <div class="sheet-form help">
       <h2>화면 보는 법</h2>
       <dl class="meta">
-        <dt>측정 상황</dt><dd>왼쪽 위 버튼. <b>공회전</b>·<b>주행</b>·<b>실내</b>를 고르면 가중치·FFT·그래프 모양·추적·홀드·시간축 길이가 그 상황에 맞게 한 번에 바뀝니다. 그 뒤에 직접 바꾸면 <b>사용자 지정</b>이 되고, 사용자 지정을 다시 고르면 직접 맞춰 둔 설정으로 돌아옵니다.</dd>
+        <dt>측정 상황</dt><dd>왼쪽 위 버튼. <b>공회전</b>·<b>주행</b>·<b>실내</b>·<b>저주파</b>를 고르면 가중치·FFT·그래프 모양·추적·홀드·시간축 길이가 그 상황에 맞게 한 번에 바뀝니다. 그 뒤에 직접 바꾸면 <b>사용자 지정</b>이 되고, 사용자 지정을 다시 고르면 직접 맞춰 둔 설정으로 돌아옵니다.</dd>
         <dt>큰 숫자</dt><dd>지금 소음 크기입니다. 숫자 옆 Fast(0.125초)는 빠른 변화를 따라가고, Slow(1초)는 덜 흔들려 읽기 쉽습니다. 설정에서 바꿉니다. 색 막대는 초록 → 노랑 → 빨강, 빨강은 경고 기준 ${s.alertLevel} dB 이상입니다. 밝은 칸 하나는 최대값입니다.</dd>
         <dt>최소·평균·최대</dt><dd>측정을 시작하거나 ↻ 초기화를 누른 뒤의 값입니다. 평균은 에너지 평균(Leq)입니다.</dd>
         <dt>A · C · Z</dt><dd>주파수 가중치. <b>A</b> 보통 소음(사람 귀에 가깝게) · <b>C</b> 엔진·부밍음처럼 저음이 큰 소리 · <b>Z</b> 거르지 않은 소리. 그래프 오른쪽 위 설정 버튼에서 바꿉니다.</dd>
@@ -310,6 +317,7 @@ function helpSheet() {
         <dt>보기</dt><dd>${MODES.map((m) => m.label).join(' · ')}. 맨 위 버튼으로 바꿉니다.</dd>
         <dt>● 녹음</dt><dd>측정 버튼과 따로 움직입니다. 누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 그래프 위 빨간 시계가 녹음 길이), 측정을 일시정지해도 녹음은 계속됩니다. 정지해도 측정은 그대로 이어지고, 녹음은 파일 탭에 들어가 "분석 보기"로 바로 열 수 있습니다.</dd>
         <dt>▶ ⏸ 측정</dt><dd>측정 시작과 일시정지(화면과 값 고정). 녹음에는 영향을 주지 않습니다.</dd>
+        <dt>마이크</dt><dd>평소에는 휴대폰 마이크로 잽니다. 외부 측정 마이크(iMM-6C 등)는 꽂은 뒤 그래프 설정의 "마이크"에서 고르면 되고, 쓰는 동안 이름이 화면 위에 보입니다. 외부 마이크는 설정 → 마이크 보정에서 따로 보정하고, 함께 받은 보정 파일을 넣으면 저음·고음 오차도 바로잡습니다.</dd>
         <dt>⬇ 저장</dt><dd>지금 그래프와 값, 방금 들린 소리를 차량번호·메모와 함께 기록에 남깁니다.</dd>
       </dl>
       <p class="fine">스마트폰 측정값은 참고값이며 정밀 소음계를 대신하지 않습니다.</p>
@@ -760,7 +768,7 @@ async function renderAnalyzer() {
     const micNote = () => {
       const label = meter?.inputLabel || getSettings().lastMic;
       const p = micProfile(getSettings(), label);
-      dlg.querySelector('#f-mic-note').textContent = `지금: ${micName(label)} · ${p.calibratedAt ? `${fmtShortDate(p.calibratedAt)} 보정 (${p.offset} dB)` : '보정 안 됨'}${p.cal ? ` · 보정 파일 ${p.calName}` : ''}. 외부 마이크는 설정(관리자)에서 따로 보정합니다.`;
+      dlg.querySelector('#f-mic-note').textContent = `지금: ${micName(label)} · ${p.calibratedAt ? `${fmtShortDate(p.calibratedAt)} 보정 (${p.offset} dB)` : '보정 안 됨'}${p.cal ? ` · 보정 파일 ${p.calName}` : ''}. 외부 측정 마이크(iMM-6C 등)는 꽂으면 목록에 나오고, 보정은 설정 → 마이크 보정에서 따로 합니다.`;
     };
     micNote();
     audioInputs().then((list) => {
@@ -1527,7 +1535,8 @@ async function renderSettings() {
 
   const s = getSettings();
   const count = (await store.allRecords()).length;
-  let calTarget = s.micLabel || s.lastMic || s.baseMic || ''; // calibrate this microphone
+  let calTarget = s.micLabel || s.lastMic || s.baseMic || ''; // calibrate this microphone (by name)
+  let calDevice = s.micId; // ...opened by this device id ('' = the phone's default)
   let calProf = micProfile(s, calTarget);
   view.innerHTML = `
     <div class="page">
@@ -1555,9 +1564,10 @@ async function renderSettings() {
 
         <section class="card">
           <h2>마이크 보정</h2>
-          <p>대상 마이크 <strong id="cal-mic">${esc(micName(calTarget))}</strong></p>
-          <p>현재 보정값 <strong id="cal-offset">${calProf.offset} dB</strong> · <span id="cal-date">${calProf.calibratedAt ? `${fmtShortDate(calProf.calibratedAt)} 보정` : '보정 안 됨'}</span></p>
-          <p class="fine">휴대폰·마이크마다 감도가 달라 하나씩 보정해야 값이 맞습니다. 외부 마이크를 쓰면 분석 화면 ⚙ 설정에서 그 마이크를 고른 뒤 여기서 보정하세요.</p>
+          <label class="field"><span>보정할 마이크</span>
+            <select id="f-cal-mic"><option value="">휴대폰 기본 마이크</option></select></label>
+          <p><strong id="cal-mic">${esc(micName(calTarget))}</strong> · 보정값 <strong id="cal-offset">${calProf.offset} dB</strong> · <span id="cal-date">${calDate(calProf)}</span></p>
+          <p class="fine">휴대폰·마이크마다 감도가 달라 하나씩 보정해야 값이 맞습니다. 평소에는 휴대폰 마이크로 재고, 외부 측정 마이크(iMM-6C 등)는 꽂은 뒤 위에서 골라 따로 보정합니다.</p>
           <ol class="guide">
             <li>정밀 소음계(기준기)와 휴대폰을 나란히 두세요.</li>
             <li>공회전 소리처럼 일정한 소리가 나게 하세요.</li>
@@ -1579,7 +1589,7 @@ async function renderSettings() {
           <div class="cal-file">
             <h3>마이크 보정 파일 <small>(외부 측정 마이크, 선택)</small></h3>
             <p class="fine">UMIK·iMM-6C 등 측정 마이크와 함께 받은 주파수 특성 파일(.txt)을 넣으면 스펙트럼의 저음·고음 오차를 바로잡습니다. 큰 숫자(전체 dB)는 위 보정값으로 맞춥니다.</p>
-            <p id="cal-file-state">${calProf.cal ? `${esc(calProf.calName)} · ${calProf.cal.length}점 · ${fmtHz(calProf.cal[0][0])} – ${fmtHz(calProf.cal.at(-1)[0])}` : '보정 파일 없음'}</p>
+            <p id="cal-file-state">${esc(calFileState(calProf))}</p>
             <div class="inline-actions">
               <label class="btn" for="f-cal-file">보정 파일 열기</label>
               <input type="file" id="f-cal-file" accept=".txt,.cal,.frd,.csv,text/plain" hidden>
@@ -1611,17 +1621,51 @@ async function renderSettings() {
   let calPhone = null;
   cleanup = () => calMeter?.stop();
 
+  function showCal() {
+    $('cal-mic').textContent = micName(calTarget);
+    $('cal-offset').textContent = `${calProf.offset} dB`;
+    $('cal-date').textContent = calDate(calProf);
+    $('f-offset').value = calProf.offset;
+    $('cal-file-state').textContent = calFileState(calProf);
+    view.querySelector('[data-act=cal-file-clear]').hidden = !calProf.cal;
+  }
+  const calMic = $('f-cal-mic');
+  audioInputs().then((list) => {
+    for (const d of list) {
+      const o = document.createElement('option');
+      o.value = d.deviceId;
+      o.textContent = d.label || '이름 없는 마이크';
+      calMic.append(o);
+    }
+    if (!list.some((d) => d.deviceId === calDevice)) calDevice = '';
+    calMic.value = calDevice;
+  });
+  calMic.onchange = () => {
+    calDevice = calMic.value;
+    const st = getSettings();
+    calTarget = calDevice ? calMic.selectedOptions[0].textContent : st.baseMic || '';
+    calProf = micProfile(st, calTarget);
+    calPhone = null;
+    $('cal-result').hidden = true;
+    showCal();
+  };
+
   view.querySelector('[data-act=cal-measure]').onclick = async (e) => {
     const btn = e.currentTarget;
     btn.disabled = true;
+    calMic.disabled = true;
     calMeter = new Meter(calProf.offset);
     try {
-      await calMeter.start(4096, 0, getSettings().micId);
+      await calMeter.start(4096, 0, calDevice);
       // the microphone that actually opened is the one being calibrated
       calTarget = calMeter.inputLabel;
       calProf = noteMic(calMeter);
       calMeter.setCalibration(calProf.offset, null);
-      $('cal-mic').textContent = micName(calTarget);
+      showCal();
+      if (calMeter.fellBack) {
+        calMic.value = calDevice = '';
+        toast('고른 마이크가 없어 휴대폰 기본 마이크를 보정합니다');
+      }
       if (!calMeter.running) await calMeter.wake();
       const until = Date.now() + 12000;
       while (calMeter.elapsed < 5) {
@@ -1639,6 +1683,7 @@ async function renderSettings() {
       calMeter?.stop();
       calMeter = null;
       btn.disabled = false;
+      calMic.disabled = false;
       btn.textContent = '보정 측정 다시 하기 (5초)';
     }
   };
@@ -1648,9 +1693,7 @@ async function renderSettings() {
     const offset = round1(calProf.offset + (ref - calPhone));
     saveSettings(saveMicProfile(getSettings(), calTarget, { offset, calibratedAt: Date.now() }));
     calProf = micProfile(getSettings(), calTarget);
-    $('cal-offset').textContent = `${offset} dB`;
-    $('cal-date').textContent = `${fmtShortDate(Date.now())} 보정`;
-    $('f-offset').value = offset;
+    showCal();
     $('cal-result').hidden = true;
     toast(`보정했습니다 (보정값 ${offset} dB)`);
   };
@@ -1659,21 +1702,20 @@ async function renderSettings() {
     e.target.value = '';
     if (!file) return;
     try {
-      const { points, serial } = parseCalFile(await file.text());
-      saveSettings(saveMicProfile(getSettings(), calTarget, { cal: points, calName: file.name, calSerial: serial || '' }));
+      const { points, serial, sens1k } = parseCalFile(await file.text());
+      saveSettings(saveMicProfile(getSettings(), calTarget, { cal: points, calName: file.name, calSerial: serial || '', calSens: sens1k }));
       calProf = micProfile(getSettings(), calTarget);
-      $('cal-file-state').textContent = `${file.name} · ${points.length}점 · ${fmtHz(points[0][0])} – ${fmtHz(points.at(-1)[0])}`;
-      view.querySelector('[data-act=cal-file-clear]').hidden = false;
+      showCal();
       toast(`${micName(calTarget)}에 보정 파일을 넣었습니다`);
     } catch (err) {
       toast(err.message || '보정 파일을 읽지 못했습니다');
     }
   };
   view.querySelector('[data-act=cal-file-clear]').onclick = (e) => {
-    saveSettings(saveMicProfile(getSettings(), calTarget, { cal: null, calName: '', calSerial: '' }));
+    saveSettings(saveMicProfile(getSettings(), calTarget, { cal: null, calName: '', calSerial: '', calSens: null }));
     calProf = micProfile(getSettings(), calTarget);
-    $('cal-file-state').textContent = '보정 파일 없음';
-    e.currentTarget.hidden = true;
+    showCal();
+    e.currentTarget.blur();
   };
   const clear = view.querySelector('[data-act=clear]');
   clear.onclick = async () => {

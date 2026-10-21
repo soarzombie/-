@@ -571,6 +571,17 @@ test('microphone calibration files: miniDSP, Dayton/REW style and bad files', ()
   const r = parseCalFile(rew);
   assert.equal(r.points[0][0], 18, 'sorted by frequency');
   assert.equal(r.serial, '123-4567');
+  assert.equal(r.sens1k, null);
+  // Dayton iMM-6C: "*1000Hz -40.3" (sensitivity, dB re 1 V/Pa) then tab-separated rows relative to 1 kHz
+  const dayton = ['*1000Hz\t-40.3', '10.0\t-2.31\t25.1', '20.0\t-0.95\t11.0', '100.0\t-0.05\t1.2', '1000.0\t0.00\t0.0', '10000.0\t1.42\t-8.0', '20000.0\t3.10\t-20.4'].join('\r\n');
+  const d = parseCalFile(dayton);
+  assert.equal(d.points.length, 6, 'the sensitivity line is not a point');
+  assert.equal(d.sens1k, -40.3);
+  assert.deepEqual(d.points[0], [10, -2.31]);
+  // the same microphone written as absolute sensitivity on every line: made relative to 1 kHz
+  const absolute = parseCalFile(d.points.map(([f, db]) => `${f} ${(db - 40.3).toFixed(2)}`).join('\n'));
+  assert.equal(absolute.sens1k, -40.3);
+  absolute.points.forEach(([f, db], i) => assert.ok(f === d.points[i][0] && Math.abs(db - d.points[i][1]) < 1e-9, `relative at ${f} Hz`));
   assert.throws(() => parseCalFile('hello\nworld'), /찾지 못했습니다/);
   assert.throws(() => parseCalFile(['1000 0', '1100 0', '1200 0', '1300 0', '1400 0'].join('\n')), /좁습니다/);
   assert.throws(() => parseCalFile(['10 -90', '100 0', '1000 0', '5000 0', '20000 0'].join('\n')), /이상합니다/);

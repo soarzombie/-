@@ -229,6 +229,28 @@ async function chartSettings(page, picks, shotName) {
   await page.waitForSelector('dialog.sheet', { state: 'detached' });
 }
 
+// Graph settings sheet -> microphone list: pick by name ('' = the phone's default).
+async function pickMic(page, label) {
+  await page.getByRole('button', { name: '그래프 설정' }).click();
+  await page.getByRole('menuitem', { name: /가중치/ }).click();
+  const sel = page.locator('dialog.sheet #f-mic');
+  await page.waitForFunction(() => document.querySelectorAll('#f-mic option').length > 1);
+  if (label) await sel.selectOption({ label });
+  else await sel.selectOption('');
+  await (label ? page.waitForSelector(`#a-mic:not([hidden]):has-text("${label}")`) : page.waitForSelector('#a-mic', { state: 'hidden' }));
+  await running(page);
+  await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
+  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+}
+
+async function cursorDb(page, hz) {
+  await tapFrequency(page, hz);
+  await page.waitForSelector('#a-cursor:not([hidden])');
+  const text = await page.locator('#a-cursor .cr-lines span').first().textContent();
+  await page.locator('#a-cursor .cr-close').click();
+  return Number(text.replace(/,/g, '').match(/[\d.]+/g)[1]);
+}
+
 (async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'noise-e2e-'));
   if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
@@ -559,6 +581,52 @@ async function chartSettings(page, picks, shotName) {
     assert.ok(Math.abs(v - toneDb(0.5, weight)) < 0.6, `${w}-weighted level`);
     assert.ok(Math.abs(leq - toneDb(0.5, weight)) < 0.6, `${w}-weighted average starts again`);
   }
+
+  // external microphone (an iMM-6C stand-in): picked in the graph settings, it starts from the phone's
+  // calibration marked "보정 안 됨"; its own offset (+10 dB) and a flat +3 dB calibration file then apply to
+  // it alone: the big number follows the offset, the spectrum also the file; back to the phone mic, all as before
+  await page.waitForTimeout(1500);
+  const phoneCursor = await cursorDb(page, 100);
+  await pickMic(page, 'Fake Audio Input 1');
+  assert.match(await page.locator('#a-mic').textContent(), /보정 안 됨/);
+  await page.waitForTimeout(1800);
+  const extNow = await num(page, '#a-now');
+  console.log(`external mic, not calibrated: now ${extNow}`);
+  assert.ok(Math.abs(extNow - expected2) < 0.6, 'an uncalibrated external mic starts from the phone offset');
+  await page.locator('.tabbar a[data-tab=settings]').click();
+  await page.locator('#f-pin').fill('0000');
+  await page.getByRole('button', { name: '확인' }).click();
+  await page.waitForFunction(() => document.querySelector('#f-cal-mic')?.selectedOptions[0]?.textContent === 'Fake Audio Input 1');
+  assert.equal(await page.locator('#cal-mic').textContent(), 'Fake Audio Input 1');
+  await page.locator('summary', { hasText: '보정값 직접 입력' }).click();
+  await page.locator('#f-offset').fill('110');
+  await page.getByRole('button', { name: '설정 저장' }).click();
+  await page.waitForSelector('#toast:not([hidden])');
+  const dayton = ['*1000Hz\t-40.0', ...[10, 20, 50, 100, 200, 1000, 5000, 10000, 20000].map((f) => `${f}\t3.00\t0.0`)].join('\r\n');
+  await page.setInputFiles('#f-cal-file', { name: 'iMM-6C_0000001.txt', mimeType: 'text/plain', buffer: Buffer.from(dayton) });
+  await page.waitForFunction(() => /감도 -40 dB/.test(document.querySelector('#cal-file-state').textContent));
+  assert.match(await page.locator('#cal-offset').textContent(), /^110 dB$/);
+  await page.selectOption('#f-cal-mic', '');
+  assert.match(await page.locator('#cal-offset').textContent(), /^100 dB$/, 'the phone mic keeps its own offset');
+  assert.equal(await page.locator('#cal-file-state').textContent(), '보정 파일 없음');
+  const mics = (await settingsOf(page)).mics;
+  assert.equal(mics['Fake Audio Input 1'].offset, 110);
+  assert.equal(mics['Fake Audio Input 1'].calSens, -40);
+  await page.locator('.tabbar a[data-tab=home]').click();
+  await running(page);
+  await page.waitForSelector('#a-mic:not([hidden])');
+  assert.doesNotMatch(await page.locator('#a-mic').textContent(), /보정 안 됨/, 'now calibrated');
+  await page.waitForTimeout(1800);
+  const extNowCal = await num(page, '#a-now');
+  const extCursor = await cursorDb(page, 100);
+  console.log(`external mic, +10 dB and flat +3 dB file: now ${extNowCal}; cursor ${phoneCursor} -> ${extCursor}`);
+  assert.ok(Math.abs(extNowCal - (expected2 + 10)) < 0.6, 'the big number uses the offset only');
+  assert.ok(Math.abs(extCursor - (phoneCursor + 10 - 3)) < 0.4, 'the spectrum also takes the calibration file');
+  await shot(page, 'external-mic');
+  await pickMic(page, '');
+  await page.waitForTimeout(1800);
+  assert.ok(Math.abs((await num(page, '#a-now')) - expected2) < 0.6, 'back on the phone mic');
+  assert.equal((await settingsOf(page)).micId, '');
 
   // attached file: 3 s of 1 kHz (77.0 dB(A)) then 3 s of 100 Hz (71.9 dB(A))
   // (passed as a buffer: Playwright here cannot attach files from non-ASCII paths, and the Korean name
