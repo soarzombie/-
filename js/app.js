@@ -419,7 +419,7 @@ function helpSheet() {
         <dt>🎥 영상</dt><dd>녹음 버튼 옆 <b>영상</b>을 누르면 화면의 값과 그래프를 소리와 함께 영상 파일로 녹화합니다(최대 ${MAX_VIDEO_SEC / 60}분). 한 번 더 누르면 멈추고 "보내기"로 카톡·메일에 보냅니다.</dd>
         <dt>오디오 세부정보</dt><dd>차트 메뉴 맨 아래. 쓰는 마이크, 보정값, 샘플링 레이트, 지연, 브라우저가 소리 처리(에코·잡음 제거, 자동 음량)를 껐는지 보여 줍니다. 값이 이상할 때 먼저 보세요.</dd>
         <dt>⏱ 정해진 시간 측정</dt><dd>누르면 처음부터 ${s.timedSec}초(그래프 설정에서 5초 · 10초 · 30초 · 1분)만큼 재고 저절로 멈춘 뒤 저장 창을 엽니다. 버튼 둘레가 차오르고, 다시 누르거나 일시정지하면 취소됩니다.</dd>
-        <dt>속도 (GPS)</dt><dd>그래프 설정에서 켜면 차 속도가 그래프 위(노란 숫자)와 시간축 그래프(노란 선)에 나오고, 저장 기록에 평균·최고 속도가 남습니다. 위치 자체는 저장하지 않습니다.</dd>
+        <dt>속도 (GPS)</dt><dd>그래프 설정에서 켜면 차 속도가 시간축 그래프에 노란 선으로 나오고, 저장 기록에 평균·최고 속도가 남습니다. 위치 자체는 저장하지 않습니다.</dd>
         <dt>전후 비교</dt><dd>기록 화면의 "실시간과 비교"를 누르면 그 기록의 평균 스펙트럼이 보라 점선(기준)으로 실시간 그래프에 겹쳐지고, 평균 차이가 함께 나옵니다. "다른 기록과 비교"는 기록끼리 겹쳐 봅니다.</dd>
         <dt>⬇ 저장</dt><dd>지금 그래프와 값, 방금 들린 소리를 차량번호·메모와 함께 기록에 남깁니다.</dd>
       </dl>
@@ -464,9 +464,9 @@ async function renderAnalyzer() {
           <p class="speed-badge" id="a-speed" hidden>– km/h</p>
           <p class="ref-chip" id="a-ref" hidden><i aria-hidden="true"></i><span id="a-ref-name"></span><b id="a-ref-diff"></b><button type="button" class="ref-close" data-act="ref-off" aria-label="기준 비교 끄기">×</button></p>
           <p class="an-peak" id="a-peak">피크 –</p>
+          ${cursorBox('a-cursor')}
           <button type="button" class="tool-btn" data-act="chart-settings" aria-label="그래프 설정" aria-haspopup="menu" aria-expanded="false">${ICON.sliders}</button>
         </div>
-        ${cursorBox('a-cursor')}
         <div class="chart-overlay" id="a-overlay">
           <button type="button" class="mic-button" data-act="mic">${ICON.mic}<strong>눌러서 측정 시작</strong></button>
           <p class="overlay-note" id="a-note">처음 한 번은 마이크 사용을 "허용"해 주세요.</p>
@@ -1128,7 +1128,7 @@ async function renderAnalyzer() {
         ${segRow('timeWeighting', '시간 가중 (큰 숫자)', [['F', 'Fast 0.125초'], ['S', 'Slow 1초']], st.timeWeighting, 'Slow는 숫자가 덜 흔들려 읽기 쉽습니다. 바꾸면 최소·평균·최대가 새로 시작합니다.')}
         ${segRow('timed', '정해진 시간 측정 (⏱ 버튼)', TIMED_SECS.map((n) => [n, n < 60 ? `${n}초` : '1분']), st.timedSec, '누르면 처음부터 이 시간만큼 재고 멈춘 뒤 저장 창을 엽니다.')}
         ${segRow('autoSave', '정해진 시간 측정이 끝나면', [['off', '저장 창 열기'], ['on', '바로 저장']], st.autoSave ? 'on' : 'off', '바로 저장은 마지막 차량번호로 소리와 함께 저장하고, 알림의 "열기"로 메모를 고칠 수 있습니다. 여러 대를 이어서 잴 때 빠릅니다.')}
-        ${segRow('gps', '속도 (GPS)', [['off', '끔'], ['on', '켬']], st.gps ? 'on' : 'off', '켜면 위치 권한을 묻고, 차 속도를 그래프 위와 시간축 그래프(노란 선), 저장 기록에 함께 남깁니다. 위치는 저장하지 않습니다.')}
+        ${segRow('gps', '속도 (GPS)', [['off', '끔'], ['on', '켬']], st.gps ? 'on' : 'off', '켜면 위치 권한을 묻고, 차 속도를 시간축 그래프(노란 선)와 저장 기록에 함께 남깁니다. 위치는 저장하지 않습니다.')}
         <h3 class="sheet-sub">그래프</h3>
         ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
         ${segRow('fft', 'FFT 크기', FFT_SIZES.map((n) => [n, n]), st.fftSize, '클수록 주파수를 잘게 나누지만 반응이 느려집니다. 1/3 옥타브 보기는 늘 32768로 계산합니다.')}

@@ -318,6 +318,10 @@ async function cursorDb(page, hz) {
   assert.ok(aDb > 60, 'cursor reads the tone level');
   assert.ok(aMax >= aDb - 0.5 && aMax - aDb < 3, 'and the maximum there');
   assert.match(await page.locator('#a-cursor .cr-cur').textContent(), /^지금 /);
+  // the read-out sits in the graph's top row, beside the settings button, not over the curves
+  const roBox = await page.locator('#a-cursor').boundingBox();
+  const toolBox = await page.getByRole('button', { name: '그래프 설정' }).boundingBox();
+  assert.ok(Math.abs(roBox.y + roBox.height / 2 - (toolBox.y + toolBox.height / 2)) < 6 && roBox.x + roBox.width <= toolBox.x, 'read-out beside the settings button');
   assert.match(await page.locator('#a-cursor .cr-max').textContent(), /^최대 /);
   await tapFrequency(page, 5000);
   await page.waitForFunction(() => /^5,0\d\d Hz|^4,9\d\d Hz/.test(document.querySelector('#a-cursor .cr-hz')?.textContent || ''));
