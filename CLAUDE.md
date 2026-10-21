@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (and other AI assistants) when workin
 
 ## Project Overview
 
-A company-internal real-time noise analyzer web app (PWA) for field use. It opens on a live FFT spectrum (x: frequency, y: A-weighted dB(A) per bin) with current / average / max / min levels, peak-frequency labels and a needle gauge, in portrait and landscape layouts modelled on common analyzer apps. Snapshots can be saved with a vehicle number and memo, shared as an image + text, and exported as CSV. There is no report feature (the user asked to drop it). UI text is Korean.
+A company-internal real-time noise analyzer web app (PWA) for field use, referencing common analyzer apps but with its own features. It opens on a live FFT spectrum (x: 20 Hz – 20 kHz, y: A-weighted dB(A) per bin) with current / average / max / min levels, peak-frequency labels and a needle gauge, in portrait and landscape layouts. Own features: spectrogram (time axis) view, A/B frequency cursors, fill/line styles, and "save" that keeps the last N seconds of sound (rolling buffer) with the snapshot for playback and WAV sharing. Snapshots also carry vehicle number and memo, share as image + text, and export as CSV. There is no report feature (the user asked to drop it). UI text is Korean.
 
 - **Language / runtime:** Vanilla JavaScript ES modules in the browser; Node 22 for tests
 - **Framework(s):** None. Web Audio (AudioWorklet + AnalyserNode), Canvas, IndexedDB, Service Worker
@@ -15,11 +15,13 @@ A company-internal real-time noise analyzer web app (PWA) for field use. It open
 ```
 index.html, css/app.css     App shell (bottom tab bar) and styles (dark only; portrait and landscape analyzer layouts)
 js/app.js                   Screens + hash router (#/ analyzer, #/history, #/record/<id>, #/settings)
-js/meter.js                 Mic meter: getUserMedia -> AudioWorklet (LAF, LAeq/LAFmax/LAFmin since reset) + AnalyserNode (spectrum per bin)
-js/level-processor.js       AudioWorklet: A-weighting biquads, energy sums, Fast (125 ms) max/min
-js/spectrum.js              drawSpectrum() + SpectrumView: filled current/max-hold areas, log/linear axis, peak labels
+js/meter.js                 Mic meter: getUserMedia -> AudioWorklet (LAF, LAeq/LAFmax/LAFmin since reset, sound ring buffer) + AnalyserNode (spectrum per bin)
+js/level-processor.js       AudioWorklet: A-weighting biquads, energy sums, Fast (125 ms) max/min, raw-sound ring buffer (dump/pause/clear messages)
+js/spectrum.js              drawSpectrum() + SpectrumView: fill/line styles, max hold, log/linear axis fixed to 20 kHz, peak labels, A/B cursors; plotBox/freqToX shared layout
+js/spectrogram.js           SpectrogramView: live waterfall (newest row on top) and static render from saved sound with playhead
+js/audio.js                 encodeWav/decodeWav (16-bit mono PCM)
 js/gauge.js                 SVG needle gauge 20–130 dB with alert zone and min/max marks
-js/dsp.js                   Pure DSP (A-weighting design, binLevelTable/binLevels, findPeaks, rangeIndex/reduceRanges, logGrid)
+js/dsp.js                   Pure DSP (A-weighting design, binLevelTable/binLevels, findPeaks, rangeIndex/reduceRanges, logGrid, fft/stft)
 js/settings.js              localStorage settings (display options, calibration offset, alert level, PIN)
 js/store.js                 IndexedDB records (saved snapshots)
 js/share.js                 Share card (canvas PNG), summary text, CSV, share/download helper
@@ -45,7 +47,8 @@ No build step. After changing any cached file, bump `VERSION` in `sw.js` (and ad
 - **Measurement chain:** levels come from the worklet (every sample), never from analyser frames. dB SPL = dBFS + per-device `offset` (calibration). The first 0.5 s after start/reset is discarded.
 - **Spectrum values:** per-bin dB(A) = analyser dB + 10·log10(2/Blackman power) + A(f) + offset, so bins sum to the overall level. Peak labels come from a ~1 s averaged spectrum (steady), not the raw frame.
 - **Layouts:** portrait = head, chart (fills spare height), option chips, gauge with the controls row overlapping its hub, numbers; landscape (>= 600px wide) = chart full screen with numbers/status overlaid and one bottom control row; the tab bar hides on the analyzer in landscape.
-- **Saved snapshots** store a 240-point log-spaced resample of the current and max-hold spectra (missing points as -999) plus stats and peaks.
+- **Frequency axis** is always 20 Hz – 20 kHz (log) / 0 – 20 kHz (linear); the spectrogram uses the same plotBox so columns line up with the spectrum.
+- **Saved snapshots** store a 241-point log-spaced resample (20 Hz and 20 kHz included) of the current and max-hold spectra (missing points as -999), stats, peaks and, if enabled, `audio` (WAV Blob) + `audioSec`. The record screen recomputes the spectrogram from the WAV with `stft()` (same analyser convention, so levels match the live view).
 - **Copy:** Korean, plain words. **Escaping:** user text goes through `esc()`; CSV cells are guarded against formula injection.
 - **Testing:** DSP changes need unit tests in `tests/dsp.test.mjs`; flow changes should keep `tests/e2e.cjs` passing.
 

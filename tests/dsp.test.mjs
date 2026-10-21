@@ -13,8 +13,10 @@ import {
   reduceRanges,
   logGrid,
   findPeaks,
+  stft,
   toDb,
 } from '../js/dsp.js';
+import { encodeWav, decodeWav } from '../js/audio.js';
 
 // IEC 61672-1 A-weighting (dB) at the exact base-10 octave frequencies 1000 * 10^(0.3n).
 const IEC_A = [
@@ -186,4 +188,64 @@ test('worklet reports Leq and Fast max that match the input tone', () => {
   assert.ok(Math.abs(fastMax - expected) < 0.2, `LAFmax ${fastMax}`);
   assert.ok(Math.abs(fastMin - expected) < 0.2, `LAFmin ${fastMin}`);
   assert.ok(Math.abs(settled[0].peak - amp) < 0.01);
+});
+
+test('stft frames match the analyser convention used live', () => {
+  const fs = 48000;
+  const N = 2048;
+  const x = sine(1500, 0.3, fs, N * 3).map((v, i) => v + 0.05 * Math.sin((2 * Math.PI * 300 * i) / fs));
+  const { frames, binHz, hopSec } = stft(x, fs, N, N / 2);
+  assert.equal(frames.length, 5);
+  assert.equal(binHz, fs / N);
+  assert.ok(Math.abs(hopSec - N / 2 / fs) < 1e-12);
+  const ref = analyserSpectrum(x.slice(N, 2 * N));
+  for (const k of [5, 13, 64, 300]) assert.ok(Math.abs(frames[2][k] - ref[k]) < 1e-6, `bin ${k}`);
+});
+
+test('WAV encode/decode keeps the samples to 16-bit precision', async () => {
+  const x = Float32Array.from({ length: 4800 }, (_, i) => 0.8 * Math.sin(i / 7));
+  const blob = encodeWav(x, 48000);
+  assert.equal(blob.size, 44 + 4800 * 2);
+  assert.equal(blob.type, 'audio/wav');
+  const { samples, rate } = await decodeWav(blob);
+  assert.equal(rate, 48000);
+  assert.equal(samples.length, 4800);
+  for (let i = 0; i < x.length; i += 97) assert.ok(Math.abs(samples[i] - x[i]) < 1 / 16000);
+});
+
+test('worklet keeps the last ringSec seconds of sound, oldest first, and holds it while paused', () => {
+  const fs = 1000;
+  const messages = [];
+  let Processor;
+  const context = {
+    sampleRate: fs,
+    AudioWorkletProcessor: class {
+      constructor() {
+        this.port = { postMessage: (m) => messages.push(m) };
+      }
+    },
+    registerProcessor: (_name, cls) => (Processor = cls),
+  };
+  vm.runInNewContext(readFileSync(new URL('../js/level-processor.js', import.meta.url), 'utf8'), context);
+  const proc = new Processor({ processorOptions: { sos: designAWeighting(48000), ringSec: 0.3 } }); // 300 samples
+  let t = 0;
+  const feed = (n) => {
+    for (let b = 0; b < n / 100; b++) proc.process([[Float32Array.from({ length: 100 }, () => (t++) / 10000)]]);
+  };
+  const dump = () => {
+    proc.port.onmessage({ data: { type: 'dump', id: 'x' } });
+    return messages.filter((m) => m.type === 'audio').at(-1).samples;
+  };
+  feed(200);
+  assert.equal(dump().length, 200);
+  feed(500);
+  const last = dump();
+  assert.equal(last.length, 300);
+  assert.ok(Math.abs(last[0] - 400 / 10000) < 1e-6 && Math.abs(last[299] - 699 / 10000) < 1e-6);
+  proc.port.onmessage({ data: { type: 'pause', paused: true } });
+  feed(200);
+  assert.ok(Math.abs(dump()[299] - 699 / 10000) < 1e-6, 'paused: buffer unchanged');
+  proc.port.onmessage({ data: { type: 'clear' } });
+  assert.equal(dump().length, 0);
+  assert.ok(messages.some((m) => m.type === 'level'));
 });

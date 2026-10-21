@@ -126,6 +126,18 @@ async function shot(page, name, fullPage = false) {
   if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}.png`), fullPage });
 }
 
+// Screen point of a frequency on the spectrum, using the chart's own layout rules.
+async function tapFrequency(page, hz) {
+  const host = page.locator('#a-chart');
+  const r = await host.boundingBox();
+  const w = Math.floor(r.width);
+  const k = w < 360 ? 0.92 : 1;
+  const x0 = 30 * k;
+  const x1 = w - 6 * k;
+  const x = x0 + (Math.log(hz / 20) / Math.log(1000)) * (x1 - x0);
+  await page.mouse.click(r.x + x, r.y + r.height / 2);
+}
+
 const num = async (page, sel) => parseFloat((await page.locator(sel).textContent()).replace(/[^\d.-]/g, ''));
 const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
 
@@ -163,6 +175,33 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
   await page.getByRole('button', { name: '초기화' }).click();
   assert.equal(await page.locator('#a-time').textContent(), '00:00');
 
+  // cursors: A at 1 kHz reads the tone, B adds the difference, x clears
+  await tapFrequency(page, 1000);
+  await page.waitForSelector('#a-cursor:not([hidden])');
+  const aText = await page.locator('#a-cursor .cr-lines span').first().textContent();
+  const [aHz, aDb] = aText.replace(/,/g, '').match(/[\d.]+/g).map(Number); // "A 1,000 Hz 74.4"
+
+  console.log(`cursor A: ${aText}`);
+  assert.ok(Math.abs(aHz - 1000) / 1000 < 0.03, 'cursor frequency');
+  assert.ok(aDb > 60, 'cursor reads the tone level');
+  await tapFrequency(page, 5000);
+  await page.waitForSelector('#a-cursor .cr-diff');
+  await shot(page, 'cursor');
+  await page.locator('#a-cursor .cr-close').click();
+  await page.waitForSelector('#a-cursor', { state: 'hidden' });
+
+  // view: spectrum -> time axis -> both -> spectrum; style: fill <-> line
+  await page.getByRole('button', { name: /보기/ }).click();
+  assert.equal(await page.locator('.an-chart').getAttribute('data-view'), 'gram');
+  await page.waitForTimeout(1500);
+  await page.getByRole('button', { name: /보기/ }).click();
+  assert.equal(await page.locator('.an-chart').getAttribute('data-view'), 'both');
+  await page.getByRole('button', { name: /보기/ }).click();
+  assert.equal(await page.locator('.an-chart').getAttribute('data-view'), 'spectrum');
+  await page.getByRole('button', { name: /모양/ }).click();
+  assert.match(await page.locator('[data-opt=style] b').textContent(), /선/);
+  await page.getByRole('button', { name: /모양/ }).click();
+
   // display options
   await page.getByRole('button', { name: /FFT/ }).click();
   assert.match(await page.locator('[data-opt=fft] b').textContent(), /8192/);
@@ -180,6 +219,8 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
   const sheet = page.locator('dialog.sheet');
   await sheet.locator('#f-vehicle').fill('12가 3456');
   await sheet.locator('#f-memo').fill('공회전 1000Hz 시험음');
+  await page.waitForFunction(() => /초도 함께 저장/.test(document.querySelector('#f-audio-label')?.textContent || ''));
+  assert.ok(await sheet.locator('#f-audio').isChecked());
   await sheet.getByRole('button', { name: '저장' }).click();
   await page.waitForSelector('#toast:not([hidden])');
   await page.locator('.tabbar a[data-tab=history]').click();
@@ -203,6 +244,26 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
   const cardPath = path.join(SHOTS || tmp, 'share-card.png');
   await card.saveAs(cardPath);
   assert.ok(fs.statSync(cardPath).size > 20000, 'share card PNG');
+
+  // the saved sound: playable, analysed into a spectrogram, shareable as WAV
+  await page.waitForSelector('#rec-audio');
+  await page.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
+  const duration = await page.evaluate(
+    () => new Promise((resolve) => {
+      const a = document.querySelector('#rec-audio');
+      if (a.readyState >= 1) resolve(a.duration);
+      else a.addEventListener('loadedmetadata', () => resolve(a.duration));
+    }),
+  );
+  console.log(`saved sound: ${duration.toFixed(1)} s`);
+  assert.ok(duration > 2 && duration <= 10.05, 'sound length');
+  const [wav] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '소리 파일 보내기' }).click()]);
+  const wavBytes = fs.readFileSync(await wav.path());
+  assert.equal(wavBytes.toString('latin1', 0, 4), 'RIFF');
+  assert.ok(wavBytes.length > 48000, 'WAV has sound in it');
+  await page.evaluate(() => document.querySelector('#rec-audio').play());
+  await page.waitForTimeout(1200);
+  await shot(page, 'record-tone-playing', true);
 
   // calibration: tell the app a reference meter read 3 dB more -> readings go up by 3 dB
   await page.locator('.tabbar a[data-tab=settings]').click();
@@ -256,6 +317,19 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
     await running(page);
     await page.waitForTimeout(4000);
     await shot(page, `main-${name}-live`);
+    await page.getByRole('button', { name: /보기/ }).click(); // time axis
+    await page.waitForTimeout(3500);
+    await shot(page, `main-${name}-gram`);
+    await page.getByRole('button', { name: /보기/ }).click(); // both
+    await page.getByRole('button', { name: /모양/ }).click(); // line
+    await page.waitForTimeout(2500);
+    await tapFrequency(page, 1250);
+    await tapFrequency(page, 125);
+    await page.waitForTimeout(300);
+    await shot(page, `main-${name}-both`);
+    await page.locator('#a-cursor .cr-close').click();
+    await page.getByRole('button', { name: /모양/ }).click(); // back to fill
+    await page.getByRole('button', { name: /보기/ }).click(); // back to spectrum
     await page.getByRole('button', { name: '저장', exact: true }).first().click();
     await page.waitForSelector('dialog.sheet');
     await shot(page, `save-${name}`);
@@ -271,8 +345,11 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
     await shot(page, `history-${name}`);
     await page.locator('.record-row').first().click();
     await page.waitForSelector('.stats-grid');
+    await page.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
     await page.waitForTimeout(300);
     await shot(page, `record-${name}`);
+    await page.locator('.audio-card').scrollIntoViewIfNeeded();
+    await shot(page, `record-${name}-sound`);
     await page.context().close();
   }
   await browser.close();

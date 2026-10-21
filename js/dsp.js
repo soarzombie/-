@@ -167,3 +167,58 @@ function refine(levels, k) {
   const denom = a - 2 * b + c;
   return k + (denom !== 0 && Number.isFinite(denom) ? Math.max(-0.5, Math.min(0.5, (0.5 * (a - c)) / denom)) : 0);
 }
+
+// In-place iterative radix-2 FFT (length must be a power of two).
+export function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const half = len >> 1;
+    for (let i = 0; i < n; i += len) {
+      for (let k = 0; k < half; k++) {
+        const wr = Math.cos(ang * k);
+        const wi = Math.sin(ang * k);
+        const a = i + k;
+        const b = a + half;
+        const vr = re[b] * wr - im[b] * wi;
+        const vi = re[b] * wi + im[b] * wr;
+        re[b] = re[a] - vr;
+        im[b] = im[a] - vi;
+        re[a] += vr;
+        im[a] += vi;
+      }
+    }
+  }
+}
+
+// Short-time spectra of recorded samples in the AnalyserNode's convention (Blackman window,
+// 1/N scaling, dB of |X|), so binLevels() turns them into the same dB(A) the live view shows.
+export function stft(samples, rate, fftSize = 2048, hop = fftSize / 2) {
+  const win = Float64Array.from(
+    { length: fftSize },
+    (_, n) => 0.42 - 0.5 * Math.cos((2 * Math.PI * n) / fftSize) + 0.08 * Math.cos((4 * Math.PI * n) / fftSize),
+  );
+  const re = new Float64Array(fftSize);
+  const im = new Float64Array(fftSize);
+  const frames = [];
+  for (let start = 0; start + fftSize <= samples.length; start += hop) {
+    for (let n = 0; n < fftSize; n++) {
+      re[n] = samples[start + n] * win[n];
+      im[n] = 0;
+    }
+    fft(re, im);
+    const out = new Float32Array(fftSize / 2);
+    for (let k = 0; k < out.length; k++) out[k] = 20 * Math.log10(Math.hypot(re[k], im[k]) / fftSize);
+    frames.push(out);
+  }
+  return { frames, binHz: rate / fftSize, hopSec: hop / rate };
+}

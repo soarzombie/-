@@ -1,6 +1,7 @@
 // Microphone sound level meter for continuous analysis.
 // Levels (LAF now, LAeq / LAFmax / LAFmin since the last reset) come from the AudioWorklet,
-// which sees every sample; the spectrum comes from an AnalyserNode, per bin in dB(A).
+// which sees every sample and keeps the last few seconds of sound; the spectrum comes from an
+// AnalyserNode, per bin in dB(A).
 
 import { designAWeighting, binLevelTable, binLevels, toDb } from './dsp.js';
 
@@ -34,13 +35,24 @@ export class Meter {
     this.onLevel = null; // (dB(A) Fast) => void, about every 50 ms
     this.samples = 0;
     this.laf = -Infinity;
-    this.paused = false;
+    this._paused = false;
     this.stopped = false;
+    this.pending = new Map(); // audio dumps waiting for the worklet
     this.resetStats();
   }
 
+  // Paused: readings, spectrum and the sound buffer all hold still.
+  get paused() {
+    return this._paused;
+  }
+
+  set paused(v) {
+    this._paused = v;
+    this.node?.port.postMessage({ type: 'pause', paused: v });
+  }
+
   // Best called from a tap handler; otherwise check `running` and call wake() on the next tap.
-  async start(fftSize = 4096) {
+  async start(fftSize = 4096, ringSec = 0) {
     if (!window.isSecureContext) throw micError('insecure');
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx || !navigator.mediaDevices?.getUserMedia) throw micError('unsupported');
@@ -78,7 +90,7 @@ export class Meter {
         numberOfInputs: 1,
         numberOfOutputs: 1,
         outputChannelCount: [1],
-        processorOptions: { sos: designAWeighting(fs), blockSize: Math.round(fs * 0.05) },
+        processorOptions: { sos: designAWeighting(fs), blockSize: Math.round(fs * 0.05), ringSec },
       });
       this.analyser = this.ctx.createAnalyser();
       this.analyser.smoothingTimeConstant = 0.5;
@@ -91,7 +103,13 @@ export class Meter {
       this.node.connect(mute);
       this.analyser.connect(mute);
       mute.connect(this.ctx.destination);
-      this.node.port.onmessage = (e) => this.handleBlock(e.data);
+      this.node.port.onmessage = (e) => {
+        if (e.data.type === 'level') this.handleBlock(e.data);
+        else if (e.data.type === 'audio') {
+          this.pending.get(e.data.id)?.(e.data.samples);
+          this.pending.delete(e.data.id);
+        }
+      };
       this.resetStats();
     } catch (err) {
       this.stop();
@@ -131,6 +149,18 @@ export class Meter {
   resetStats() {
     this.stats = { n: 0, sumA: 0, max: 0, min: Infinity, clipped: false };
     this.warmUntil = this.samples + WARMUP_SEC * this.sampleRate;
+    this.node?.port.postMessage({ type: 'clear' });
+  }
+
+  // The last few seconds of raw sound (Float32Array, oldest first); empty if recording is off.
+  captureAudio() {
+    if (!this.node) return Promise.resolve(new Float32Array(0));
+    const id = Math.random().toString(36).slice(2);
+    return new Promise((resolve) => {
+      this.pending.set(id, resolve);
+      this.node.port.postMessage({ type: 'dump', id });
+      setTimeout(() => this.pending.has(id) && (this.pending.delete(id), resolve(new Float32Array(0))), 2000);
+    });
   }
 
   get elapsed() {
@@ -152,8 +182,8 @@ export class Meter {
   handleBlock(b) {
     this.samples += b.n;
     this.laf = toDb(b.fast, this.offset);
-    if (!this.paused) this.onLevel?.(this.laf);
-    if (this.paused || this.samples < this.warmUntil) return;
+    if (!this._paused) this.onLevel?.(this.laf);
+    if (this._paused || this.samples < this.warmUntil) return;
     const s = this.stats;
     s.n += b.n;
     s.sumA += b.sumA;

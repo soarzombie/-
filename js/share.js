@@ -59,23 +59,24 @@ export function renderCard(rec, settings) {
   g.save();
   g.translate(56, 524);
   const sp = rec.spectrum;
-  drawSpectrum(g, W - 112, 680, { freqs: Float32Array.from(sp.freqs), cur: Float32Array.from(sp.cur), max: Float32Array.from(sp.max), peaks: rec.peaks }, { scale: 'log', range: sp.range, fontScale: 2.2 });
+  const line = settings.style === 'line';
+  drawSpectrum(g, W - 112, 680, { freqs: Float32Array.from(sp.freqs), cur: Float32Array.from(sp.cur), max: Float32Array.from(sp.max), peaks: rec.peaks }, { scale: 'log', style: settings.style, range: sp.range, fontScale: 2.2 });
   g.restore();
 
-  text(`빨강: 저장 순간 · 회색: 측정 중 최대 · ${rec.calibrated ? '마이크 보정됨' : '마이크 보정 안 됨'} · 스마트폰 측정 참고값`, 64, H - 70, 26, CARD.sub, 400);
+  text(`${line ? '노랑' : '빨강'}: 저장 순간 · ${line ? '분홍' : '회색'}: 측정 중 최대 · ${rec.calibrated ? '마이크 보정됨' : '마이크 보정 안 됨'} · 스마트폰 측정 참고값`, 64, H - 70, 26, CARD.sub, 400);
   return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
 }
 
 const CSV_HEAD = [
   '일시', '차량번호', '메모', '평균 Leq dB(A)', '최대 Lmax dB(A)', '최소 Lmin dB(A)', '저장 순간 dB(A)', '측정 시간(초)',
-  '피크1 Hz', '피크1 dB(A)', '피크2 Hz', '피크2 dB(A)', 'FFT', '마이크 보정', '과부하',
+  '피크1 Hz', '피크1 dB(A)', '피크2 Hz', '피크2 dB(A)', 'FFT', '마이크 보정', '과부하', '소리(초)',
 ];
 
 export function recordsCsv(records) {
   const rows = records.map((r) => [
     fmtDate(r.ts), r.vehicle, r.memo, r.leq, r.lmax, r.lmin, r.laf, Math.round(r.elapsed),
     r.peaks?.[0] && Math.round(r.peaks[0].hz), r.peaks?.[0]?.db, r.peaks?.[1] && Math.round(r.peaks[1].hz), r.peaks?.[1]?.db,
-    r.fftSize, r.calibrated ? 'O' : 'X', r.clipped ? 'O' : '',
+    r.fftSize, r.calibrated ? 'O' : 'X', r.clipped ? 'O' : '', r.audioSec || '',
   ]);
   const csv = [CSV_HEAD, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n');
   // BOM so Excel opens the Korean text as UTF-8.

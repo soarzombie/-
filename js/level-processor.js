@@ -1,6 +1,7 @@
 // AudioWorklet: A-weights the microphone signal sample by sample and reports
 // energy sums plus the Fast (125 ms) time-weighted level, so Leq, LAFmax and LAFmin
 // are computed from every sample rather than from sampled analyser frames.
+// It also keeps the last `ringSec` seconds of raw sound, so "save" can include what was just heard.
 // Filter coefficients come from dsp.js via processorOptions.
 
 class LevelProcessor extends AudioWorkletProcessor {
@@ -12,7 +13,30 @@ class LevelProcessor extends AudioWorkletProcessor {
     this.blockSize = opts.blockSize || Math.round(sampleRate * 0.05);
     this.kFast = 1 - Math.exp(-1 / (0.125 * sampleRate));
     this.fast = 0;
+    this.ring = opts.ringSec > 0 ? new Float32Array(Math.round(sampleRate * opts.ringSec)) : null;
+    this.ringPos = 0;
+    this.ringFilled = 0;
+    this.paused = false;
+    this.port.onmessage = (e) => {
+      if (e.data.type === 'pause') this.paused = e.data.paused;
+      else if (e.data.type === 'dump') this.dump(e.data.id);
+      else if (e.data.type === 'clear') this.ringFilled = 0;
+    };
     this.reset();
+  }
+
+  // Posts the buffered sound, oldest sample first.
+  dump(id) {
+    const n = this.ringFilled;
+    const out = new Float32Array(n);
+    if (n) {
+      const len = this.ring.length;
+      const start = (this.ringPos - n + len) % len;
+      const first = Math.min(n, len - start);
+      out.set(this.ring.subarray(start, start + first), 0);
+      out.set(this.ring.subarray(0, n - first), first);
+    }
+    this.port.postMessage({ type: 'audio', id, samples: out }, [out.buffer]);
   }
 
   reset() {
@@ -29,8 +53,14 @@ class LevelProcessor extends AudioWorkletProcessor {
     if (!ch) return true;
     const sos = this.sos;
     const st = this.state;
+    const ring = this.paused ? null : this.ring;
     for (let i = 0; i < ch.length; i++) {
       const x = ch[i];
+      if (ring) {
+        ring[this.ringPos] = x;
+        if (++this.ringPos === ring.length) this.ringPos = 0;
+        if (this.ringFilled < ring.length) this.ringFilled++;
+      }
       let y = x;
       for (let s = 0; s < sos.length; s++) {
         const c = sos[s];
@@ -50,6 +80,7 @@ class LevelProcessor extends AudioWorkletProcessor {
       if (ax > this.peak) this.peak = ax;
       if (++this.n >= this.blockSize) {
         this.port.postMessage({
+          type: 'level',
           n: this.n,
           sumA: this.sumA,
           sumZ: this.sumZ,

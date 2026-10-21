@@ -1,6 +1,6 @@
 // Per-device settings (kept in localStorage).
 
-export const APP_VERSION = '0.3.1';
+export const APP_VERSION = '0.4.0';
 
 const KEY = 'noise-meter:settings:v1';
 
@@ -9,9 +9,12 @@ const DEFAULTS = {
   vehicle: '',
   recentVehicles: [],
   // analyzer display
+  view: 'spectrum', // 'spectrum' | 'gram' (spectrogram) | 'both'
+  style: 'fill', // 'fill' | 'line'
   fftSize: 4096,
   scale: 'log',
   hold: true,
+  audioSec: 10, // seconds of sound kept for "save"; 0 = off
   alertLevel: 85, // gauge turns orange from here, dB(A)
   // dBFS -> dB SPL. Phones differ by 10 dB or more, so each device should be calibrated.
   offset: 100,

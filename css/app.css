@@ -470,3 +470,68 @@ details .field { margin-top: 6px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
 }
+
+/* ---------- spectrogram, cursors, sound ---------- */
+
+.gram-plot { position: absolute; inset: 8px 8px 4px 4px; }
+.an-chart[data-view="spectrum"] .gram-plot,
+.an-chart[data-view="gram"] .chart-plot { display: none; }
+.an-chart[data-view="both"] .chart-plot { bottom: 47%; }
+.an-chart[data-view="both"] .gram-plot { top: 55%; }
+.an-chart[data-view="gram"] .an-peak { display: none; }
+.an-chart .chart-plot, .chart-box-rec .chart-plot { touch-action: none; cursor: crosshair; }
+.chart-box-rec .chart-plot { touch-action: pan-y; }
+
+/* single-line strip over the bottom (quietest) part of the plot */
+.cursor-readout {
+  position: absolute;
+  left: 38px;
+  right: 12px;
+  bottom: 30px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 2px 2px 10px;
+  border-radius: 8px;
+  background: rgb(8 12 18 / 88%);
+  border: 1px solid rgb(92 200 255 / 45%);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.an-chart[data-view="both"] .cursor-readout { bottom: calc(47% + 28px); }
+.an-chart[data-view="gram"] .cursor-readout { display: none; }
+.cr-lines { display: flex; flex-wrap: wrap; gap: 0 12px; min-width: 0; }
+.cr-lines span { white-space: nowrap; }
+.cr-lines b { color: #5cc8ff; margin-right: 1px; }
+.cr-lines em { font-style: normal; font-weight: 700; }
+.cr-diff { color: var(--ink-2); }
+.cr-close { pointer-events: auto; flex-shrink: 0; width: 26px; height: 26px; border: 0; border-radius: 6px; background: var(--panel-2); color: var(--ink); font-size: 17px; line-height: 1; cursor: pointer; }
+.chart-card { position: relative; }
+.chart-card .cursor-readout { left: 44px; right: 18px; bottom: 70px; }
+
+.legend[data-style="line"] .lg-cur { background: #e3f36a; height: 3px; }
+.legend[data-style="line"] .lg-max { background: #ff6fae; height: 3px; }
+.legend .fine { font-size: 12px; }
+
+.audio-card audio { width: 100%; height: 44px; }
+.gram-box-rec { position: relative; height: clamp(180px, 48vw, 260px); background: var(--bg); border-radius: 10px; }
+.gram-box-rec .gram-plot { inset: 4px; }
+.gram-wait { position: absolute; inset: 0; display: grid; place-items: center; color: var(--ink-3); font-size: 14px; }
+.card h2 small { font-size: 13px; color: var(--ink-3); font-weight: 600; margin-left: 4px; }
+
+.check { display: flex; align-items: center; gap: 10px; min-height: 44px; font-size: 15px; }
+.check input { width: 22px; height: 22px; accent-color: var(--accent); flex-shrink: 0; }
+select {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: 16px;
+}

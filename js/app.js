@@ -3,10 +3,12 @@
 
 import { APP_VERSION, getSettings, saveSettings, rememberVehicle } from './settings.js';
 import { Meter, FFT_SIZES } from './meter.js';
-import { findPeaks, logGrid, rangeIndex, reduceRanges } from './dsp.js';
+import { findPeaks, logGrid, rangeIndex, reduceRanges, stft, binLevelTable, binLevels } from './dsp.js';
 import * as store from './store.js';
 import { esc, fmtDb, fmtHz, fmtClock, fmtDate, fmtDay, fmtShortDate, fmtTime, fileStamp } from './format.js';
 import { SpectrumView } from './spectrum.js';
+import { SpectrogramView } from './spectrogram.js';
+import { encodeWav, decodeWav } from './audio.js';
 import { Gauge } from './gauge.js';
 import { summaryText, renderCard, recordsCsv, deliverFile } from './share.js';
 
@@ -92,6 +94,33 @@ async function micPermission() {
   }
 }
 
+const VIEW_LABEL = { spectrum: '스펙트럼', gram: '시간축', both: '함께' };
+const NEXT_VIEW = { spectrum: 'gram', gram: 'both', both: 'spectrum' };
+
+// One-line cursor read-out: "A 1,250 Hz 62.3  B 125 Hz 47.6  B−A −14.7 dB" (levels in dB(A)).
+function cursorText(values) {
+  const parts = values.map((v, i) => `<span><b>${'AB'[i]}</b> ${fmtHz(v.hz)} <em>${fmtDb(v.cur)}</em></span>`);
+  if (values.length === 2) {
+    const d = values[1].cur - values[0].cur;
+    parts.push(`<span class="cr-diff">B−A ${d >= 0 ? '+' : ''}${fmtDb(d)} dB</span>`);
+  }
+  return parts.join('');
+}
+
+function bindCursorReadout(el) {
+  let shown = '';
+  return (values) => {
+    const html = values.length ? cursorText(values) : '';
+    if (html === shown) return;
+    shown = html;
+    el.hidden = !html;
+    el.querySelector('.cr-lines').innerHTML = html;
+  };
+}
+
+const cursorBox = (id) =>
+  `<div class="cursor-readout" id="${id}" hidden><div class="cr-lines"></div><button type="button" class="cr-close" aria-label="커서 지우기">×</button></div>`;
+
 const round1 = (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : null);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const MISSING = -999; // stored for empty spectrum points (JSON has no -Infinity)
@@ -106,15 +135,19 @@ async function renderAnalyzer() {
         <h1>실시간 소음 분석</h1>
         <p class="an-status"><i class="rec-dot"></i><span id="a-state">대기</span><b id="a-time">00:00</b></p>
       </header>
-      <div class="an-chart">
+      <div class="an-chart" data-view="${s.view}">
         <div class="chart-plot" id="a-chart"></div>
+        <div class="gram-plot" id="a-gram"></div>
         <p class="an-peak" id="a-peak">피크 –</p>
+        ${cursorBox('a-cursor')}
         <div class="chart-overlay" id="a-overlay">
           <button type="button" class="mic-button" data-act="mic">${ICON.mic}<strong>눌러서 측정 시작</strong></button>
           <p class="overlay-note" id="a-note">처음 한 번은 마이크 사용을 "허용"해 주세요.</p>
         </div>
       </div>
       <div class="an-options" role="group" aria-label="그래프 설정">
+        <button type="button" class="opt" data-opt="view"><span>보기</span><b>${VIEW_LABEL[s.view]}</b></button>
+        <button type="button" class="opt" data-opt="style"><span>모양</span><b>${s.style === 'line' ? '선' : '면'}</b></button>
         <button type="button" class="opt" data-opt="hold" aria-pressed="${s.hold}"><span>최대값</span><b>${s.hold ? '표시' : '숨김'}</b></button>
         <button type="button" class="opt" data-opt="fft"><span>FFT</span><b>${s.fftSize}</b></button>
         <button type="button" class="opt" data-opt="scale"><span>주파수 축</span><b>${s.scale === 'log' ? '로그' : '선형'}</b></button>
@@ -140,7 +173,12 @@ async function renderAnalyzer() {
   const $ = (id) => view.querySelector(`#${id}`);
   const root = view.querySelector('.analyzer');
   const toggleBtn = view.querySelector('[data-act=toggle]');
-  const chart = new SpectrumView($('a-chart'));
+  const chartBox = view.querySelector('.an-chart');
+  const chart = new SpectrumView($('a-chart'), { cursor: true });
+  chart.onCursor = bindCursorReadout($('a-cursor'));
+  $('a-cursor').querySelector('.cr-close').onclick = () => chart.clearCursors();
+  const gram = new SpectrogramView($('a-gram'));
+  gram.configure({ scale: s.scale, xLabels: s.view === 'gram' });
   const gauge = new Gauge($('a-gauge'), s.alertLevel);
   let meter = null;
   let raf = 0;
@@ -149,11 +187,12 @@ async function renderAnalyzer() {
   let avgPow = null; // slowly averaged spectrum, for steady peak labels
   let peaks = [];
   let lastPeakAt = 0;
+  let lastRowAt = 0;
   let range = [-20, 100];
 
   const draw = (cur) => {
     const st = getSettings();
-    chart.update({ freqs: meter.freqs, cur, max: st.hold ? hold : null, peaks }, { scale: st.scale, range });
+    chart.update({ freqs: meter.freqs, cur, max: st.hold ? hold : null, peaks }, { scale: st.scale, style: st.style, range });
   };
 
   function showRunning(paused) {
@@ -172,6 +211,7 @@ async function renderAnalyzer() {
     ['a-leq', 'a-max', 'a-min'].forEach((id) => ($(id).textContent = '–'));
     $('a-time').textContent = '00:00';
     gauge.marks(NaN, NaN);
+    gram.clear();
   }
 
   function frame(now) {
@@ -205,6 +245,10 @@ async function renderAnalyzer() {
       const main = peaks[0] || findPeaks(avgDb, meter.binHz, { count: 1, minProminence: -Infinity })[0];
       $('a-peak').textContent = main ? `피크 ${fmtHz(main.hz)}` : '피크 –';
     }
+    if (now - lastRowAt >= 50) {
+      lastRowAt = now;
+      gram.push(cur, meter.freqs);
+    }
     draw(cur);
   }
 
@@ -226,7 +270,7 @@ async function renderAnalyzer() {
     }
     meter = new Meter(getSettings().offset);
     try {
-      await meter.start(getSettings().fftSize);
+      await meter.start(getSettings().fftSize, getSettings().audioSec);
     } catch (err) {
       meter = null;
       if (err.code !== 'cancelled') {
@@ -282,6 +326,7 @@ async function renderAnalyzer() {
         range: [...range],
       },
       fftSize: st.fftSize,
+      sampleRate: meter.sampleRate,
       offset: meter.offset,
       calibrated: !!st.calibratedAt,
       vehicle: '',
@@ -290,7 +335,7 @@ async function renderAnalyzer() {
     };
   }
 
-  function openSave(rec) {
+  function openSave(rec, audio) {
     const st = getSettings();
     const { dlg, close } = openSheet(`
       <form class="sheet-form">
@@ -306,6 +351,7 @@ async function renderAnalyzer() {
         ${st.recentVehicles.length ? `<div class="chips">${st.recentVehicles.map((v) => `<button type="button" class="chip-pick" data-v="${esc(v)}">${esc(v)}</button>`).join('')}</div>` : ''}
         <label class="field"><span>메모 <small>(선택)</small></span>
           <textarea id="f-memo" rows="3" placeholder="예: 시속 80km, 오른쪽 뒤에서 윙 소리"></textarea></label>
+        ${st.audioSec > 0 ? '<label class="check"><input type="checkbox" id="f-audio" checked> <span id="f-audio-label">방금 들린 소리도 함께 저장</span></label>' : ''}
         <div class="sheet-actions">
           <button type="button" class="btn btn-quiet" data-close>취소</button>
           <button class="btn btn-primary" type="submit">저장</button>
@@ -313,11 +359,20 @@ async function renderAnalyzer() {
       </form>`);
     const input = dlg.querySelector('#f-vehicle');
     dlg.querySelectorAll('.chip-pick').forEach((b) => (b.onclick = () => (input.value = b.dataset.v)));
+    audio.then((samples) => {
+      const label = dlg.querySelector('#f-audio-label');
+      if (label) label.textContent = samples.length ? `방금 들린 소리 ${(samples.length / meter.sampleRate).toFixed(0)}초도 함께 저장` : '저장할 소리가 없습니다';
+    });
     dlg.querySelector('form').onsubmit = async (e) => {
       e.preventDefault();
       rec.vehicle = input.value.trim();
       rec.memo = dlg.querySelector('#f-memo').value.trim();
       if (rec.vehicle) rememberVehicle(rec.vehicle);
+      const samples = dlg.querySelector('#f-audio')?.checked ? await audio : null;
+      if (samples?.length) {
+        rec.audio = encodeWav(samples, rec.sampleRate);
+        rec.audioSec = round1(samples.length / rec.sampleRate);
+      }
       await store.putRecord(rec);
       close();
       toast('기록에 저장했습니다');
@@ -333,6 +388,7 @@ async function renderAnalyzer() {
     document.removeEventListener('visibilitychange', onVisibility);
     stopMic();
     chart.destroy();
+    gram.destroy();
   };
 
   view.querySelector('[data-act=mic]').onclick = () => startMic();
@@ -349,12 +405,24 @@ async function renderAnalyzer() {
   };
   view.querySelector('[data-act=save]').onclick = () => {
     if (!meter || !hold || meter.elapsed < 1) return toast('측정을 시작한 뒤에 저장할 수 있습니다');
-    openSave(snapshot());
+    // grab the sound first: it is "what was just heard", before the sheet takes any time
+    const audio = getSettings().audioSec > 0 ? meter.captureAudio() : Promise.resolve(new Float32Array(0));
+    openSave(snapshot(), audio);
   };
   view.querySelectorAll('[data-opt]').forEach((b) =>
     b.addEventListener('click', () => {
       const st = getSettings();
-      if (b.dataset.opt === 'hold') {
+      if (b.dataset.opt === 'view') {
+        const next = NEXT_VIEW[st.view];
+        saveSettings({ view: next });
+        b.querySelector('b').textContent = VIEW_LABEL[next];
+        chartBox.dataset.view = next;
+        gram.configure({ xLabels: next === 'gram' });
+      } else if (b.dataset.opt === 'style') {
+        const style = st.style === 'line' ? 'fill' : 'line';
+        saveSettings({ style });
+        b.querySelector('b').textContent = style === 'line' ? '선' : '면';
+      } else if (b.dataset.opt === 'hold') {
         saveSettings({ hold: !st.hold });
         b.setAttribute('aria-pressed', String(!st.hold));
         b.querySelector('b').textContent = st.hold ? '숨김' : '표시';
@@ -372,6 +440,7 @@ async function renderAnalyzer() {
         const scale = st.scale === 'log' ? 'linear' : 'log';
         saveSettings({ scale });
         b.querySelector('b').textContent = scale === 'log' ? '로그' : '선형';
+        gram.configure({ scale });
       }
       if (meter?.paused && hold) draw(meter.levels);
     }),
@@ -441,7 +510,8 @@ async function renderRecord(id) {
         </header>
         <section class="card chart-card">
           <div class="chart-box-rec"><div class="chart-plot" id="rec-chart"></div></div>
-          <p class="legend"><i class="lg-cur"></i>저장 순간 <i class="lg-max"></i>측정 중 최대</p>
+          ${cursorBox('rec-cursor')}
+          <p class="legend" data-style="${s.style}"><i class="lg-cur"></i>저장 순간 <i class="lg-max"></i>측정 중 최대 <span class="fine">· 그래프를 누르면 커서</span></p>
         </section>
         <section class="stats-grid">
           <div><span>평균</span><b>${fmtDb(rec.leq)}</b><small>dB(A)</small></div>
@@ -449,6 +519,15 @@ async function renderRecord(id) {
           <div><span>최소</span><b>${fmtDb(rec.lmin)}</b><small>dB(A)</small></div>
         </section>
         ${rec.clipped ? '<p class="alert">소리가 휴대폰 마이크의 측정 한계를 넘은 순간이 있었습니다. 실제 최대값은 더 클 수 있습니다.</p>' : ''}
+        ${rec.audio
+          ? `<section class="card audio-card">
+              <h2>저장된 소리 <small>${rec.audioSec}초</small></h2>
+              <audio controls preload="metadata" id="rec-audio"></audio>
+              <div class="gram-box-rec"><div class="gram-plot" id="rec-gram"></div><p class="gram-wait" id="rec-gram-wait">소리 분석 중…</p></div>
+              <p class="fine">시간축 그래프: 맨 위가 저장한 순간, 아래로 갈수록 그 전 소리입니다. 재생하면 흰 선이 따라갑니다.</p>
+              <button type="button" class="btn btn-wide" data-act="share-audio">소리 파일 보내기</button>
+            </section>`
+          : ''}
         <section class="card">
           <dl class="meta">
             <dt>피크</dt><dd>${rec.peaks?.length ? rec.peaks.map((p) => `${fmtHz(p.hz)} <small>(${fmtDb(p.db)} dB(A))</small>`).join('<br>') : '뚜렷한 피크 없음'}</dd>
@@ -465,13 +544,53 @@ async function renderRecord(id) {
       <button class="btn btn-danger-quiet btn-wide" data-act="delete">이 기록 삭제</button>
     </div>`;
 
-  const chart = new SpectrumView(view.querySelector('#rec-chart'));
+  const chart = new SpectrumView(view.querySelector('#rec-chart'), { cursor: true });
+  chart.onCursor = bindCursorReadout(view.querySelector('#rec-cursor'));
+  view.querySelector('#rec-cursor .cr-close').onclick = () => chart.clearCursors();
   const sp = rec.spectrum;
   chart.update(
     { freqs: Float32Array.from(sp.freqs), cur: Float32Array.from(sp.cur), max: Float32Array.from(sp.max), peaks: rec.peaks },
-    { scale: 'log', range: sp.range },
+    { scale: 'log', style: s.style, range: sp.range },
   );
-  cleanup = () => chart.destroy();
+  let gram = null;
+  let audioUrl = null;
+  let raf = 0;
+  cleanup = () => {
+    chart.destroy();
+    gram?.destroy();
+    cancelAnimationFrame(raf);
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+  };
+
+  if (rec.audio) {
+    const player = view.querySelector('#rec-audio');
+    audioUrl = URL.createObjectURL(rec.audio);
+    player.src = audioUrl;
+    gram = new SpectrogramView(view.querySelector('#rec-gram'));
+    // the time-axis view is worked out from the saved sound itself
+    setTimeout(async () => {
+      const { samples, rate } = await decodeWav(rec.audio);
+      const { frames, binHz } = stft(samples, rate, 2048, 512);
+      const table = binLevelTable(1024, binHz);
+      const freqs = Float32Array.from({ length: 1024 }, (_, k) => k * binHz);
+      gram?.setStatic(frames.map((f) => binLevels(f, table, rec.offset)), freqs, samples.length / rate);
+      view.querySelector('#rec-gram-wait')?.remove();
+    }, 30);
+    const follow = () => {
+      gram?.setPlayhead(player.currentTime);
+      if (!player.paused) raf = requestAnimationFrame(follow);
+    };
+    player.addEventListener('play', follow);
+    player.addEventListener('seeked', follow);
+    player.addEventListener('ended', () => gram?.setPlayhead(null));
+    view.querySelector('[data-act=share-audio]').onclick = async () => {
+      const result = await deliverFile(rec.audio, `소음분석_${(rec.vehicle || '기록').replace(/\s/g, '')}_${fileStamp(rec.ts)}.wav`, {
+        title: '저장된 소리',
+        text: summaryText(rec, s),
+      });
+      if (result === 'downloaded') toast('소리 파일(WAV)을 저장했습니다');
+    };
+  }
 
   // Render the card now so the share sheet opens straight from the tap (iOS needs that).
   const card = renderCard(rec, s);
@@ -552,6 +671,15 @@ async function renderSettings() {
         <section class="card">
           <h2>회사 정보</h2>
           <label class="field"><span>회사 이름 <small>(공유 이미지에 표시)</small></span><input id="f-company" value="${esc(s.company)}"></label>
+        </section>
+
+        <section class="card">
+          <h2>저장할 때 남길 소리</h2>
+          <label class="field"><span>저장 버튼을 누르기 직전 몇 초를 함께 남길까요?</span>
+            <select id="f-audio-sec">
+              ${[0, 5, 10, 20, 30].map((n) => `<option value="${n}"${s.audioSec === n ? ' selected' : ''}>${n ? `${n}초` : '남기지 않음'}</option>`).join('')}
+            </select></label>
+          <p class="fine">10초에 약 1MB입니다. 바꾼 값은 분석 화면을 다시 열 때부터 적용됩니다.</p>
         </section>
 
         <section class="card">
@@ -673,6 +801,7 @@ async function renderSettings() {
     const before = getSettings();
     saveSettings({
       company: $('f-company').value.trim() || before.company,
+      audioSec: Number($('f-audio-sec').value),
       alertLevel: Math.round(alertLevel),
       offset: round1(offset),
       calibratedAt: round1(offset) !== before.offset ? Date.now() : before.calibratedAt,
