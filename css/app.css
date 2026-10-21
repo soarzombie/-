@@ -701,3 +701,23 @@ select {
   .menu-wide { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
   .menu button { min-height: 40px; }
 }
+
+/* ---------- axis ranges sheet ---------- */
+
+.range-sheet h3 { font-size: 15px; font-weight: 700; color: var(--ink-2); }
+.range-sheet h3 small { margin-left: 4px; font-size: 13px; font-weight: 500; color: var(--ink-3); }
+.range-block { display: grid; gap: 8px; align-content: start; }
+.range-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.range-line .seg { grid-auto-columns: auto; }
+.range-line .seg button { min-height: 38px; padding: 0 12px; }
+.range-row { display: flex; align-items: center; gap: 8px; }
+.range-row input { width: 80px; min-height: 42px; padding: 6px 8px; text-align: center; font-variant-numeric: tabular-nums; }
+.range-freq .range-row input { width: 96px; }
+.range-row span { color: var(--ink-3); font-size: 15px; }
+.chip-pick small { margin-left: 2px; font-size: 12px; color: var(--ink-3); }
+@media (orientation: landscape) and (max-height: 520px) {
+  .range-sheet { grid-template-columns: 1fr 1fr; gap: 10px 18px; }
+  .range-sheet > h2, .range-sheet > .alert, .range-sheet > .sheet-actions, .range-sheet > .range-freq { grid-column: 1 / -1; }
+  .range-freq { grid-template-columns: auto 1fr; align-items: center; }
+  .range-freq h3 { grid-column: 1 / -1; }
+}

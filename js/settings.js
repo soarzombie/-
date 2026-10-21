@@ -1,6 +1,6 @@
 // Per-device settings (kept in localStorage).
 
-export const APP_VERSION = '0.9.0';
+export const APP_VERSION = '0.10.0';
 
 const KEY = 'noise-meter:settings:v1';
 
@@ -17,6 +17,13 @@ const DEFAULTS = {
   scale: 'log',
   preset: 'custom', // measurement situation (presets.js): 'idle' | 'drive' | 'indoor' | 'custom'
   custom: null, // the user's own mix, kept while a situation is chosen
+  // axis ranges ("축 범위"): frequency for the spectrum and spectrogram; dB ranges null = automatic
+  freqMin: 20,
+  freqMax: 20000,
+  specDb: null, // [lo, hi] frequency graph, vertical
+  traceDb: null, // time-axis graph, vertical
+  gramDb: null, // spectrogram colour scale
+  octDb: null, // 1/3 octave, vertical
   // curves over the spectrum
   peakHold: true, // maximum since reset
   minHold: false, // minimum since reset

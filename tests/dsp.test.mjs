@@ -28,6 +28,7 @@ import {
 import { analyzeSound, frameAt } from '../js/analysis.js';
 import { encodeWav, decodeWav } from '../js/audio.js';
 import { columnRange } from '../js/timeline.js';
+import { freqAxis, freqTicks, freqToX, xToFreq, checkFreqRange, checkDbRange } from '../js/spectrum.js';
 import { PRESETS, PRESET_KEYS, choosePreset, customize, presetOf } from '../js/presets.js';
 
 // IEC 61672-1 A-weighting (dB) at the exact base-10 octave frequencies 1000 * 10^(0.3n).
@@ -490,4 +491,32 @@ test('measurement situations: choosing one sets all its values, 사용자 지정
   assert.deepEqual(customize(idle, { view: 'octave' }), { view: 'octave' });
   assert.deepEqual(customize(mine, { style: 'fill' }), { style: 'fill' });
   assert.equal(presetOf('nope').id, 'custom');
+});
+
+test('frequency axis over a chosen range: mapping, round trip and ticks', () => {
+  const box = { x0: 30, x1: 330 };
+  assert.deepEqual(freqTicks(freqAxis('log')), [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000], 'whole range as before');
+  const low = freqAxis('log', 20, 500);
+  assert.equal(freqToX(20, box, low), 30);
+  assert.equal(freqToX(500, box, low), 330);
+  assert.ok(Math.abs(freqToX(100, box, low) - (30 + 300 * Math.log(5) / Math.log(25))) < 1e-9);
+  for (const f of [31.5, 125, 400]) assert.ok(Math.abs(xToFreq(freqToX(f, box, low), box, low) - f) < 1e-6);
+  assert.deepEqual(freqTicks(low), [20, 50, 100, 200, 500]);
+  // narrow log range and linear ranges get round steps inside the range
+  const narrow = freqTicks(freqAxis('log', 500, 2000), 300);
+  assert.ok(narrow.length >= 3 && narrow.every((f) => f >= 500 && f <= 2000) && narrow.includes(1000), `narrow ${narrow}`);
+  const lin = freqAxis('linear');
+  assert.equal(lin.a, 0, 'whole linear axis starts at 0 Hz');
+  assert.deepEqual(freqTicks(lin, 300), [0, 5000, 10000, 15000, 20000]);
+  const lin2 = freqAxis('linear', 1000, 3000);
+  assert.equal(freqToX(2000, box, lin2), 180);
+  assert.ok(freqTicks(lin2, 300).every((f) => f >= 1000 && f <= 3000));
+  // what the settings accept
+  assert.deepEqual(checkFreqRange(20, 500), [20, 500]);
+  assert.equal(typeof checkFreqRange(3000, 1000), 'string');
+  assert.equal(typeof checkFreqRange(5, 1000), 'string');
+  assert.equal(typeof checkFreqRange(100, 30000), 'string');
+  assert.deepEqual(checkDbRange(-20, 100), [-20, 100]);
+  assert.equal(typeof checkDbRange(50, 55), 'string');
+  assert.equal(typeof checkDbRange(NaN, 80), 'string');
 });

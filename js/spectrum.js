@@ -1,4 +1,5 @@
-// Real-time FFT spectrum: x = frequency 20 Hz – 20 kHz (log) or 0 – 20 kHz (linear), y = weighted dB per FFT bin.
+// Real-time FFT spectrum: x = frequency, 20 Hz – 20 kHz (log) or 0 – 20 kHz (linear) unless a narrower range
+// is set; y = weighted dB per FFT bin.
 // Style 'fill': red area = current, grey area = peak hold (maximum since reset); 'bar': the same as bars;
 // 'line': blue line = current, red line = peak hold. Over any style: orange = minimum hold, dashed light
 // red / light orange = max / min tracking.
@@ -7,7 +8,6 @@
 
 import { rangeIndex, reduceRanges } from './dsp.js';
 
-const LOG_TICKS = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 export const FMIN = 20;
 export const FMAX = 20000;
 
@@ -29,7 +29,7 @@ export const SPECTRUM_COLORS = {
   font: '-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif',
 };
 
-const hzLabel = (f) => (f >= 1000 ? `${f / 1000}k` : String(f));
+const hzLabel = (f) => (f >= 1000 ? `${parseFloat((f / 1000).toFixed(2))}k` : String(parseFloat(f.toFixed(1))));
 
 // What each curve looks like in a style, for legends: [colour, 'area' | 'line' | 'dash'].
 export function curveLook(style, c = SPECTRUM_COLORS) {
@@ -48,44 +48,87 @@ export function plotBox(w, h, k = 1, xLabels = true) {
   return { x0: 30 * k, x1: w - 6 * k, yTop: 8 * k, yBot: h - (xLabels ? 22 * k : 4 * k) };
 }
 
-export function freqToX(f, box, scale) {
-  const t = scale === 'log' ? Math.log(Math.max(f, FMIN) / FMIN) / Math.log(FMAX / FMIN) : f / FMAX;
+// Frequency axis: scale 'log' | 'linear' over [fmin, fmax] (the whole 20 Hz – 20 kHz by default; a
+// linear axis over the whole range starts at 0 Hz). A plain 'log' / 'linear' string means the whole range.
+export function freqAxis(scale = 'log', fmin = FMIN, fmax = FMAX) {
+  const a = scale === 'log' ? fmin : fmin <= FMIN ? 0 : fmin;
+  return { scale, fmin, fmax, a, b: fmax };
+}
+const toAxis = (axis) => (typeof axis === 'string' || !axis ? freqAxis(axis || 'log') : axis);
+
+// Accepted range from the axis settings: [fmin, fmax], or a Korean message saying what is wrong.
+export function checkFreqRange(lo, hi) {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return '숫자를 넣어 주세요.';
+  if (lo < 10 || hi > FMAX) return `주파수는 10 Hz – ${FMAX / 1000} kHz 사이로 넣어 주세요.`;
+  if (hi < lo * 1.25 || hi - lo < 50) return '끝 주파수는 시작보다 충분히 커야 합니다.';
+  return [lo, hi];
+}
+
+export function checkDbRange(lo, hi) {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return '숫자를 넣어 주세요.';
+  if (lo < -60 || hi > 160) return 'dB는 -60 – 160 사이로 넣어 주세요.';
+  if (hi - lo < 10) return '위 값은 아래 값보다 10 dB 이상 커야 합니다.';
+  return [lo, hi];
+}
+
+// Tick frequencies for a plot `px` wide: 1-2-5 per decade on a wide log axis, else round steps.
+export function freqTicks(axis, px = 330) {
+  const { scale, a, b } = toAxis(axis);
+  const out = [];
+  if (scale === 'log' && b / a >= 8) {
+    for (let d = 10 ** Math.floor(Math.log10(a)); d <= b; d *= 10) {
+      for (const m of [1, 2, 5]) if (m * d >= a * 0.999 && m * d <= b * 1.001) out.push(m * d);
+    }
+    return out;
+  }
+  const raw = (b - a) / Math.max(2, Math.min(10, Math.floor(px / 60)));
+  const p = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * p).find((v) => v >= raw * 0.999);
+  for (let f = Math.ceil(a / step - 1e-9) * step; f <= b * 1.000001; f += step) out.push(Math.round(f * 100) / 100 + 0); // + 0: no -0
+  return out;
+}
+
+export function freqToX(f, box, axis) {
+  const { scale, a, b } = toAxis(axis);
+  const t = scale === 'log' ? Math.log(Math.max(f, a) / a) / Math.log(b / a) : (f - a) / (b - a);
   return box.x0 + t * (box.x1 - box.x0);
 }
 
-export function xToFreq(x, box, scale) {
+export function xToFreq(x, box, axis) {
+  const { scale, a, b } = toAxis(axis);
   const t = Math.max(0, Math.min(1, (x - box.x0) / (box.x1 - box.x0)));
-  return scale === 'log' ? FMIN * (FMAX / FMIN) ** t : Math.max(1, t * FMAX);
+  return scale === 'log' ? a * (b / a) ** t : Math.max(1, a + t * (b - a));
 }
 
 // One column per pixel: its frequency range and where those frequencies sit in `freqs`.
-export function columnsFor(freqs, box, scale) {
+export function columnsFor(freqs, box, axis) {
+  const { scale, a, b } = toAxis(axis);
   const n = Math.max(2, Math.round(box.x1 - box.x0));
-  const fAt = scale === 'log' ? (i) => FMIN * (FMAX / FMIN) ** (i / n) : (i) => (FMAX * i) / n;
+  const fAt = scale === 'log' ? (i) => a * (b / a) ** (i / n) : (i) => a + ((b - a) * i) / n;
   const edges = Float32Array.from({ length: n + 1 }, (_, i) => fAt(i));
   const centres = Float32Array.from({ length: n }, (_, i) => fAt(i + 0.5));
   return { n, centres, idx: rangeIndex(freqs, edges), cur: new Float32Array(n), max: new Float32Array(n) };
 }
 
-export function drawXAxis(g, box, h, scale, k, c) {
-  const fs = 11 * k;
-  g.font = `500 ${fs}px ${c.font}`;
+// Labels under the plot; the first carries the unit. A label that would run into the one before is
+// left out, and the ends stay inside the plot.
+export function drawXAxis(g, box, h, axis, k, c) {
+  g.font = `500 ${11 * k}px ${c.font}`;
   g.fillStyle = c.axis;
-  const ticks =
-    scale === 'log'
-      ? LOG_TICKS
-      : Array.from({ length: FMAX / 2000 + 1 }, (_, i) => i * 2000).filter((f) => (box.x1 - box.x0) / 10 > 34 * k || f % 4000 === 0);
-  ticks.forEach((f, i) => {
-    const xx = freqToX(f, box, scale);
-    // the first label carries the unit; the last is right-aligned so it stays inside
-    const last = i === ticks.length - 1;
-    g.textAlign = i === 0 ? 'left' : last ? 'right' : 'center';
-    g.fillText(i === 0 ? `${hzLabel(f)} Hz` : hzLabel(f), i === 0 ? box.x0 : last ? box.x1 : xx, h - 6 * k);
+  g.textAlign = 'left';
+  let lastRight = -Infinity;
+  freqTicks(axis, box.x1 - box.x0).forEach((f, i) => {
+    const text = i === 0 ? `${hzLabel(f)} Hz` : hzLabel(f);
+    const w = g.measureText(text).width;
+    const left = Math.max(box.x0, Math.min(box.x1 - w, freqToX(f, box, axis) - w / 2));
+    if (left < lastRight + 4 * k) return;
+    g.fillText(text, left, h - 6 * k);
+    lastRight = left + w;
   });
 }
 
 // data: { freqs, cur, max?, peaks? }
-// opts: { scale, style, range: [lo, hi], unit, fontScale, colors, cache, xLabels, cursors: [{ hz, name }] }
+// opts: { scale, fmin, fmax, style, range: [lo, hi], unit, fontScale, colors, cache, xLabels, cursors: [{ hz, name }] }
 // Returns the plot box and the per-column values it drew (for cursor read-outs).
 export function drawSpectrum(g, w, h, data, opts = {}) {
   const c = opts.colors || SPECTRUM_COLORS;
@@ -93,7 +136,7 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
   const fs = 11 * k;
   const font = (size, weight = 500) => `${weight} ${size}px ${c.font}`;
   const [lo, hi] = opts.range || [-20, 100];
-  const scale = opts.scale || 'log';
+  const axis = freqAxis(opts.scale || 'log', opts.fmin ?? FMIN, opts.fmax ?? FMAX);
   const style = opts.style || 'fill';
   const xLabels = opts.xLabels !== false;
   const { freqs } = data;
@@ -117,20 +160,19 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
     g.fillText(String(v), 2 * k, yy + fs * 0.35);
   }
   g.fillText(opts.unit || 'dB(A)', 2 * k, Math.max(fs, y(hi - step / 2) + fs * 0.35));
-  const ticks = scale === 'log' ? LOG_TICKS : Array.from({ length: FMAX / 2000 + 1 }, (_, i) => i * 2000);
-  ticks.forEach((f) => {
-    const xx = Math.round(freqToX(f, box, scale)) + 0.5;
+  freqTicks(axis, x1 - x0).forEach((f) => {
+    const xx = Math.round(freqToX(f, box, axis)) + 0.5;
     g.beginPath();
     g.moveTo(xx, yTop);
     g.lineTo(xx, yBot);
     g.stroke();
   });
-  if (xLabels) drawXAxis(g, box, h, scale, k, c);
+  if (xLabels) drawXAxis(g, box, h, axis, k, c);
 
   // curves
   const cache = opts.cache || {};
-  const key = `${Math.round(x1 - x0)}|${scale}|${freqs.length}|${freqs[1]}|${freqs[freqs.length - 1]}`;
-  if (cache.key !== key) Object.assign(cache, { key, cols: columnsFor(freqs, box, scale) });
+  const key = `${Math.round(x1 - x0)}|${axis.scale}|${axis.a}|${axis.b}|${freqs.length}|${freqs[1]}|${freqs[freqs.length - 1]}`;
+  if (cache.key !== key) Object.assign(cache, { key, cols: columnsFor(freqs, box, axis) });
   const cols = cache.cols;
   const reduce = (levels, name) => reduceRanges(levels, freqs, cols.idx, cols.centres, (cols[name] ||= new Float32Array(cols.n)));
   const area = (out, fill, stroke) => {
@@ -188,8 +230,8 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
 
   // peak labels
   (data.peaks || []).forEach((p) => {
-    if (!(p.hz >= (scale === 'log' ? FMIN : 0) && p.hz <= FMAX)) return;
-    const px = freqToX(p.hz, box, scale);
+    if (!(p.hz >= axis.a && p.hz <= axis.b)) return;
+    const px = freqToX(p.hz, box, axis);
     const py = y(p.db);
     g.fillStyle = c.label;
     g.beginPath();
@@ -211,14 +253,14 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
 
   // cursors: a crosshair at the curve, with the frequency and level next to the point.
   // The column read here is also what the read-out strip shows.
-  const colOf = (hz) => Math.max(0, Math.min(cols.n - 1, Math.floor(freqToX(hz, box, scale) - x0)));
+  const colOf = (hz) => Math.max(0, Math.min(cols.n - 1, Math.floor(freqToX(hz, box, axis) - x0)));
   const readings = (opts.cursors || []).map((cur) => ({
     hz: cur.hz,
     cur: data.cur ? cols.cur[colOf(cur.hz)] : NaN,
     max: data.max ? cols.max[colOf(cur.hz)] : NaN,
   }));
   (opts.cursors || []).forEach((cur, i) => {
-    const cx = Math.round(freqToX(cur.hz, box, scale)) + 0.5;
+    const cx = Math.round(freqToX(cur.hz, box, axis)) + 0.5;
     const v = readings[i].cur;
     g.strokeStyle = c.cursor;
     g.lineWidth = 1.2 * k;
@@ -332,13 +374,13 @@ export class SpectrumView {
 
   enableCursor() {
     let dragging = -1;
-    const scale = () => this.opts.scale || 'log';
+    const axis = () => freqAxis(this.opts.scale || 'log', this.opts.fmin ?? FMIN, this.opts.fmax ?? FMAX);
     const xAt = (e) => e.clientX - this.host.getBoundingClientRect().left;
     this.host.addEventListener('pointerdown', (e) => {
       if (!this.box) return;
       const x = xAt(e);
-      const hz = xToFreq(x, this.box, scale());
-      const dist = (c) => Math.abs(freqToX(c.hz, this.box, scale()) - x);
+      const hz = xToFreq(x, this.box, axis());
+      const dist = (c) => Math.abs(freqToX(c.hz, this.box, axis()) - x);
       const near = this.cursors.findIndex((c) => dist(c) < 28);
       if (near >= 0) dragging = near;
       else if (this.cursors.length < 2) {
@@ -353,7 +395,7 @@ export class SpectrumView {
     });
     this.host.addEventListener('pointermove', (e) => {
       if (dragging < 0) return;
-      this.cursors[dragging].hz = xToFreq(xAt(e), this.box, scale());
+      this.cursors[dragging].hz = xToFreq(xAt(e), this.box, axis());
       this.draw();
     });
     const end = () => (dragging = -1);

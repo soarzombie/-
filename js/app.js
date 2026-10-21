@@ -7,7 +7,7 @@ import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
 import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds } from './dsp.js';
 import * as store from './store.js';
 import { esc, fmtDb, fmtHz, fmtClock, fmtDate, fmtDay, fmtShortDate, fmtTime, fileStamp } from './format.js';
-import { SpectrumView, curveLook } from './spectrum.js';
+import { SpectrumView, curveLook, checkFreqRange, checkDbRange } from './spectrum.js';
 import { SpectrogramView } from './spectrogram.js';
 import { encodeWav, decodeAudioFile } from './audio.js';
 import { analyzeSound, frameAt } from './analysis.js';
@@ -32,6 +32,7 @@ const ICON = {
   file: svg('<path d="M9 18V5l10-2v13"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/>'),
   info: svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><circle class="fill" cx="12" cy="7.8" r="1.2"/>'),
   chevron: svg('<path d="M7 10l5 5 5-5"/>'),
+  axes: svg('<path d="M4 4v16h16"/><path d="M8 8h3M8 12h6M8 16h9"/>'),
   sliders: svg('<path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17" r="2"/>'),
 };
 
@@ -230,6 +231,9 @@ const MODES = [
 ];
 const OCTAVE_FFT = 16384; // 2.9 Hz bins, so even the 25 Hz band has some
 const CHART_STYLES = [['fill', '면'], ['line', '선'], ['bar', '막대']];
+// quick frequency ranges for the "축 범위" sheet
+const FREQ_QUICK = [['전체', 20, 20000], ['저음', 20, 500], ['중음', 200, 5000], ['고음', 2000, 20000]];
+const fmtHzShort = (f) => (f >= 1000 ? `${f / 1000}k` : String(f));
 const STYLE_ORDER = CHART_STYLES.map(([v]) => v);
 const STYLE_NAME = Object.fromEntries(CHART_STYLES);
 // setting, menu text, curve (for the colour swatch)
@@ -276,6 +280,7 @@ function helpSheet() {
         <dt>A · C · Z</dt><dd>주파수 가중치. <b>A</b> 보통 소음(사람 귀에 가깝게) · <b>C</b> 엔진·부밍음처럼 저음이 큰 소리 · <b>Z</b> 거르지 않은 소리. 그래프 오른쪽 위 설정 버튼에서 바꿉니다.</dd>
         <dt>주파수 그래프</dt><dd>위쪽 큰 그래프. 가로는 주파수(20 Hz – 20 kHz), 세로는 dB입니다. 누르면 십자선 커서가 그 주파수의 값을 보여 주고, 한 번 더 누르면 커서 B로 두 곳을 비교합니다. 끌어서 옮기고 × 로 지웁니다.</dd>
         <dt>⚙ 차트 메뉴</dt><dd>그래프 오른쪽 위 버튼. 차트 스타일(면 · 선 · 막대), <b>최대값 추적</b>·<b>최소값 추적</b>(최근 큰·작은 값을 따라가다 초당 12 dB씩 돌아오는 점선), <b>피크 홀드</b>(초기화 뒤 가장 큰 값), <b>미니멈 홀드</b>(초기화 뒤 가장 작은 값, 주황), 홀드 재설정(이 선들만 새로 시작), 가중치·시간축·FFT·축 설정.</dd>
+        <dt>축 범위</dt><dd>차트 메뉴의 "축 범위"에서 주파수 범위(전체 · 저음 · 중음 · 고음 또는 직접 입력)와 각 그래프의 dB 범위(자동 / 직접)를 정합니다. "처음대로"로 되돌립니다.</dd>
         <dt>시간축 그래프</dt><dd>아래쪽 작은 그래프. 가로는 측정 시간, 세로는 dB(큰 숫자와 같은 값), 점선은 평균입니다. 보이는 시간(30초 · 1분 · 5분)은 그래프 설정에서 바꿉니다.</dd>
         <dt>보기</dt><dd>${MODES.map((m) => m.label).join(' · ')}. 맨 위 버튼으로 바꿉니다.</dd>
         <dt>● 녹음</dt><dd>측정 버튼과 따로 움직입니다. 누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 그래프 위 빨간 시계가 녹음 길이), 측정을 일시정지해도 녹음은 계속됩니다. 정지해도 측정은 그대로 이어지고, 녹음은 파일 탭에 들어가 "분석 보기"로 바로 열 수 있습니다.</dd>
@@ -348,11 +353,11 @@ async function renderAnalyzer() {
   chart.onCursor = bindCursorReadout($('a-cursor'));
   $('a-cursor').querySelector('.cr-close').onclick = () => chart.clearCursors();
   const gram = new SpectrogramView($('a-gram'));
-  gram.configure({ scale: s.scale });
+  gram.configure({ scale: s.scale, fmin: s.freqMin, fmax: s.freqMax, colorRange: s.gramDb });
   gram.unit = unitOf(s.weighting);
   const octave = new OctaveView($('a-octave'));
   const trace = new LiveTimelineView($('a-trace'), { windowSec: s.traceSec || 30 }); // 0 was "hidden" before
-  trace.configure({ unit: unitOf(s.weighting) });
+  trace.configure({ unit: unitOf(s.weighting), yRange: s.traceDb });
   let traced = 0; // measured samples already in the trace
   const led = new LevelBar($('a-led'), s.alertLevel);
   let meter = null;
@@ -390,7 +395,7 @@ async function renderAnalyzer() {
       if (top > octRange[1] - 4 && octRange[1] < 140) octRange = [octRange[0] + 20, octRange[1] + 20];
       octave.update(
         { bands, max: st.peakHold ? bandHolds.max : null, min: st.minHold ? bandHolds.min : null, total: meter.laf },
-        { range: octRange, unit: unit(), style: st.style },
+        { range: st.octDb || octRange, unit: unit(), style: st.style },
       );
     } else {
       const h = holds || {};
@@ -404,7 +409,7 @@ async function renderAnalyzer() {
           minTrack: st.minTrack ? h.minTrack : null,
           peaks,
         },
-        { scale: st.scale, style: st.style, range, unit: unit() },
+        { scale: st.scale, fmin: st.freqMin, fmax: st.freqMax, style: st.style, range: st.specDb || range, unit: unit() },
       );
     }
   };
@@ -623,7 +628,7 @@ async function renderAnalyzer() {
         cur: keep(reduceRanges(meter.levels, meter.freqs, idx, grid.centres)),
         max: keep(reduceRanges(holds.max, meter.freqs, idx, grid.centres)),
         ...(st.minHold ? { min: keep(reduceRanges(holds.min, meter.freqs, idx, grid.centres)) } : {}),
-        range: [...range],
+        range: [...(st.specDb || range)],
       },
       fftSize: meter.analyser.fftSize,
       sampleRate: meter.sampleRate,
@@ -688,9 +693,9 @@ async function renderAnalyzer() {
       clearReadings();
     }
     if (st.fftSize !== prev.fftSize) applyFft();
-    if (st.scale !== prev.scale) gram.configure({ scale: st.scale });
-    if (st.traceSec !== prev.traceSec) {
-      trace.configure({ windowSec: st.traceSec || 30 });
+    gram.configure({ scale: st.scale, fmin: st.freqMin, fmax: st.freqMax, colorRange: st.gramDb });
+    if (st.traceSec !== prev.traceSec || st.traceDb !== prev.traceDb) {
+      trace.configure({ windowSec: st.traceSec || 30, yRange: st.traceDb });
       trace.draw();
     }
     const p = presetOf(st.preset);
@@ -703,6 +708,83 @@ async function renderAnalyzer() {
     const prev = getSettings();
     changeSettings(patch);
     applyLive(prev);
+  }
+
+  // "축 범위": the frequency range (spectrum and spectrogram) and, per graph, an automatic or fixed dB range.
+  function rangeSheet() {
+    const st = getSettings();
+    const dbAxes = [
+      ['specDb', '주파수 그래프 · 세로', () => range],
+      ['traceDb', '시간축 그래프 · 세로', () => trace.shown || [40, 100]],
+      ['gramDb', '스펙트로그램 · 색 범위', () => (gram.top != null ? [Math.round(gram.top - 60), Math.round(gram.top)] : [20, 80])],
+      ['octDb', '1/3 옥타브 · 세로', () => octRange],
+    ];
+    const numIn = (attr, v, label) => `<input type="number" ${attr} value="${v}" aria-label="${label}">`;
+    const { dlg, close } = openSheet(`
+      <div class="sheet-form range-sheet">
+        <h2>축 범위</h2>
+        <section class="range-block range-freq">
+          <h3>가로: 주파수 <small>주파수 그래프 · 스펙트로그램</small></h3>
+          <div class="chips">${FREQ_QUICK.map(([t, lo, hi]) => `<button type="button" class="chip-pick" data-f="${lo},${hi}">${t} <small>${fmtHzShort(lo)}–${fmtHzShort(hi)}</small></button>`).join('')}</div>
+          <div class="range-row">${numIn('id="r-fmin" step="1"', st.freqMin, '시작 주파수 (Hz)')}<span>~</span>${numIn('id="r-fmax" step="1"', st.freqMax, '끝 주파수 (Hz)')}<span>Hz</span></div>
+        </section>
+        ${dbAxes.map(([key, title]) => `<section class="range-block" data-range="${key}">
+          <h3>${title} <small>dB</small></h3>
+          <div class="range-line">
+            <div class="seg" role="group" aria-label="${title}" data-key="${key}">
+              <button type="button" data-v="auto" aria-pressed="${!st[key]}">자동</button><button type="button" data-v="manual" aria-pressed="${!!st[key]}">직접</button>
+            </div>
+            <div class="range-row"${st[key] ? '' : ' hidden'}>${numIn('data-lo step="5"', st[key]?.[0] ?? '', `${title} 아래 (dB)`)}<span>~</span>${numIn('data-hi step="5"', st[key]?.[1] ?? '', `${title} 위 (dB)`)}</div>
+          </div>
+        </section>`).join('')}
+        <p class="alert" id="r-error" hidden></p>
+        <div class="sheet-actions">
+          <button type="button" class="btn btn-quiet" data-act="r-reset">처음대로</button>
+          <button type="button" class="btn btn-primary" data-close>닫기</button>
+        </div>
+      </div>`);
+    const err = dlg.querySelector('#r-error');
+    const fail = (msg) => {
+      err.textContent = msg;
+      err.hidden = false;
+    };
+    const setFreq = (lo, hi) => {
+      const ok = checkFreqRange(lo, hi);
+      if (typeof ok === 'string') return fail(ok);
+      err.hidden = true;
+      dlg.querySelector('#r-fmin').value = lo;
+      dlg.querySelector('#r-fmax').value = hi;
+      change({ freqMin: lo, freqMax: hi });
+    };
+    const readFreq = () => setFreq(parseFloat(dlg.querySelector('#r-fmin').value), parseFloat(dlg.querySelector('#r-fmax').value));
+    dlg.querySelector('#r-fmin').addEventListener('change', readFreq);
+    dlg.querySelector('#r-fmax').addEventListener('change', readFreq);
+    dlg.querySelectorAll('[data-f]').forEach((b) => (b.onclick = () => setFreq(...b.dataset.f.split(',').map(Number))));
+    const readDb = (block) => {
+      const lo = parseFloat(block.querySelector('[data-lo]').value);
+      const hi = parseFloat(block.querySelector('[data-hi]').value);
+      const ok = checkDbRange(lo, hi);
+      if (typeof ok === 'string') return fail(ok);
+      err.hidden = true;
+      change({ [block.dataset.range]: ok });
+    };
+    dlg.querySelectorAll('[data-range]').forEach((block) => block.querySelectorAll('input').forEach((i) => i.addEventListener('change', () => readDb(block))));
+    bindSegs(dlg, (key, v) => {
+      const block = dlg.querySelector(`[data-range=${key}]`);
+      block.querySelector('.range-row').hidden = v === 'auto';
+      err.hidden = true;
+      if (v === 'auto') return change({ [key]: null });
+      // a fixed range starts from what the graph shows now
+      const [lo, hi] = dbAxes.find(([k]) => k === key)[2]().map((x) => Math.round(x));
+      block.querySelector('[data-lo]').value = lo;
+      block.querySelector('[data-hi]').value = hi;
+      change({ [key]: [lo, hi] });
+    });
+    dlg.querySelector('[data-act=r-reset]').onclick = () => {
+      change({ freqMin: 20, freqMax: 20000, specDb: null, traceDb: null, gramDb: null, octDb: null });
+      close();
+      toast('축 범위를 처음대로 돌렸습니다');
+    };
   }
 
   // "측정 상황" (the reference app's "사용자 지정 ⌄"): one choice sets several settings at once.
@@ -747,7 +829,8 @@ async function renderAnalyzer() {
         </div>
         <div class="menu-group menu-wide">
           <button type="button" role="menuitem" data-act="hold-reset">${ICON.reset}홀드 재설정</button>
-          <button type="button" role="menuitem" data-act="more">${ICON.sliders}가중치 · 시간축 · FFT · 축</button>
+          <button type="button" role="menuitem" data-act="ranges">${ICON.axes}축 범위</button>
+          <button type="button" role="menuitem" data-act="more">${ICON.sliders}가중치 · FFT · 기타 설정</button>
         </div>`;
     };
     menu = openMenu(anchor, html(), () => (menu = null), 'menu-chart');
@@ -763,6 +846,9 @@ async function renderAnalyzer() {
       } else if (b.dataset.act === 'more') {
         menu.close();
         chartSettings();
+      } else if (b.dataset.act === 'ranges') {
+        menu.close();
+        rangeSheet();
       }
       if (menu) menu.menu.innerHTML = html(); // ticks and colour swatches follow the choice
       if (meter?.paused && holds) draw(meter.levels);
@@ -950,6 +1036,7 @@ async function renderFile() {
       show();
     };
     const gram = new SpectrogramView($('fa-gram'), { onSeek: seek });
+    gram.configure({ scale: st.scale, fmin: st.freqMin, fmax: st.freqMax, colorRange: st.gramDb });
     gram.setStatic(a.frames, a.freqs, a.duration, { labels: 'absolute', unit });
     const timeline = new TimelineView($('fa-time'), { onSeek: seek });
     timeline.set(a.history, a.historyStep, a.leq, unit);
@@ -959,7 +1046,7 @@ async function renderFile() {
       const t = player.currentTime;
       chart.update(
         { freqs: a.freqs, cur: atPosition ? frameAt(a, t) : a.avg, max: a.max, min: st2.minHold ? a.min : null, peaks: atPosition ? [] : a.peaks },
-        { scale: st2.scale, style: st2.style, range, unit },
+        { scale: st2.scale, fmin: st2.freqMin, fmax: st2.freqMax, style: st2.style, range: st2.specDb || range, unit },
       );
       $('fa-legend').innerHTML = legendHtml(st2.style, [
         ['cur', atPosition ? `재생 위치 ${fmtClock(t)}` : '전체 평균'],

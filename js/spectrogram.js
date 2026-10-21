@@ -3,10 +3,10 @@
 // analysis it is built once from the recorded sound, with a playhead while it plays back.
 
 import { reduceRanges } from './dsp.js';
-import { SPECTRUM_COLORS, plotBox, columnsFor, drawXAxis } from './spectrum.js';
+import { SPECTRUM_COLORS, plotBox, columnsFor, drawXAxis, freqAxis, FMIN, FMAX } from './spectrum.js';
 import { fmtClock } from './format.js';
 
-const SPAN = 60; // dB of colour range below the running top
+const SPAN = 60; // dB of colour range below the running top, when the range is automatic
 
 // Dark violet -> red -> yellow -> white, readable on the black panel.
 const STOPS = [
@@ -45,6 +45,9 @@ export class SpectrogramView {
     this.img = document.createElement('canvas'); // history, 1 px per column and per row
     this.ig = this.img.getContext('2d');
     this.scale = 'log';
+    this.fmin = FMIN;
+    this.fmax = FMAX;
+    this.colorRange = null; // [lo, hi] dB, or null = automatic (60 dB below the loudest)
     this.xLabels = true;
     this.top = null;
     this.staticData = null;
@@ -71,11 +74,19 @@ export class SpectrogramView {
     }
   }
 
-  configure({ scale = this.scale, xLabels = this.xLabels } = {}) {
-    if (scale === this.scale && xLabels === this.xLabels) return;
-    this.scale = scale;
-    this.xLabels = xLabels;
+  configure({ scale = this.scale, xLabels = this.xLabels, fmin = this.fmin, fmax = this.fmax, colorRange = this.colorRange } = {}) {
+    if (scale === this.scale && xLabels === this.xLabels && fmin === this.fmin && fmax === this.fmax && String(colorRange) === String(this.colorRange)) return;
+    Object.assign(this, { scale, xLabels, fmin, fmax, colorRange });
     this.resize();
+  }
+
+  get axis() {
+    return freqAxis(this.scale, this.fmin, this.fmax);
+  }
+
+  // dB at the bottom of the colour scale and the span above it
+  colours(top) {
+    return this.colorRange ? [this.colorRange[0], this.colorRange[1] - this.colorRange[0]] : [top - SPAN, SPAN];
   }
 
   get fontScale() {
@@ -106,14 +117,14 @@ export class SpectrogramView {
   }
 
   columns(freqs) {
-    const key = `${this.img.width}|${this.scale}|${freqs.length}|${freqs[1]}`;
-    if (!this.cols || this.cols.key !== key) this.cols = { key, ...columnsFor(freqs, { x0: 0, x1: this.img.width }, this.scale) };
+    const key = `${this.img.width}|${this.scale}|${this.fmin}|${this.fmax}|${freqs.length}|${freqs[1]}`;
+    if (!this.cols || this.cols.key !== key) this.cols = { key, ...columnsFor(freqs, { x0: 0, x1: this.img.width }, this.axis) };
     return this.cols;
   }
 
-  paintRow(row, values, lo) {
+  paintRow(row, values, lo, span) {
     for (let i = 0; i < values.length; i++) {
-      const t = values[i] > lo ? Math.min(1, (values[i] - lo) / SPAN) : 0;
+      const t = values[i] > lo ? Math.min(1, (values[i] - lo) / span) : 0;
       const j = Math.round(t * 255) * 3;
       row.data[i * 4] = LUT[j];
       row.data[i * 4 + 1] = LUT[j + 1];
@@ -132,7 +143,7 @@ export class SpectrogramView {
     // colour range follows the loudest bins, rising at once and falling slowly
     this.top = this.top == null ? frameMax : Math.max(frameMax, this.top - 0.05);
     const row = this.ig.createImageData(this.img.width, 1);
-    this.paintRow(row, values, this.top - SPAN);
+    this.paintRow(row, values, ...this.colours(this.top));
     this.ig.drawImage(this.img, 0, 0, this.img.width, this.img.height - 1, 0, 1, this.img.width, this.img.height - 1);
     this.ig.putImageData(row, 0, 0);
     this.draw();
@@ -170,7 +181,7 @@ export class SpectrogramView {
         const col = columnsPerFrame[f];
         for (let i = 0; i < W; i++) if (col[i] > values[i]) values[i] = col[i];
       }
-      this.paintRow(row, values, this.top - SPAN);
+      this.paintRow(row, values, ...this.colours(this.top));
       image.data.set(row.data, y * W * 4);
     }
     this.ig.putImageData(image, 0, 0);
@@ -203,7 +214,7 @@ export class SpectrogramView {
       const text = absolute ? fmtClock(s) : s === 0 ? (this.staticData ? '저장' : '지금') : `-${s}초`;
       g.fillText(text, 2 * k, Math.min(box.yBot, Math.max(box.yTop + 9 * k, yy + 4 * k)));
     }
-    if (this.xLabels) drawXAxis(g, box, this.h, this.scale, k, c);
+    if (this.xLabels) drawXAxis(g, box, this.h, this.axis, k, c);
 
     if (this.playhead != null && this.staticData) {
       const yy = box.yBot - (this.playhead / this.staticData.durationSec) * (box.yBot - box.yTop);
@@ -216,7 +227,8 @@ export class SpectrogramView {
     }
     if (this.top != null) {
       // colour range, bottom right (the top right corner holds the chart buttons)
-      const text = `${Math.round(this.top - SPAN)}–${Math.round(this.top)} ${this.unit}`;
+      const [lo, span] = this.colours(this.top);
+      const text = `${Math.round(lo)}–${Math.round(lo + span)} ${this.unit}`;
       g.textAlign = 'right';
       const tw = g.measureText(text).width;
       g.fillStyle = 'rgba(6,6,14,0.7)';

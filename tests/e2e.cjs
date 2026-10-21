@@ -171,14 +171,14 @@ async function shot(page, name, fullPage = false) {
 }
 
 // Screen point of a frequency on the spectrum, using the chart's own layout rules.
-async function tapFrequency(page, hz) {
+async function tapFrequency(page, hz, fmin = 20, fmax = 20000) {
   const host = page.locator('#a-chart');
   const r = await host.boundingBox();
   const w = Math.floor(r.width);
   const k = w < 360 ? 0.92 : 1;
   const x0 = 30 * k;
   const x1 = w - 6 * k;
-  const x = x0 + (Math.log(hz / 20) / Math.log(1000)) * (x1 - x0);
+  const x = x0 + (Math.log(hz / fmin) / Math.log(fmax / fmin)) * (x1 - x0);
   await page.mouse.click(r.x + x, r.y + r.height * 0.75); // low enough to miss the floating level panel in landscape
 }
 
@@ -364,6 +364,58 @@ async function chartSettings(page, picks, shotName) {
   // back to the settings the rest of this run expects
   await chartMenu(page, { style: own.style });
   await chartSettings(page, { fft: String(own.fftSize), trace: String(own.traceSec) });
+
+  // axis ranges: frequency by quick pick and typed in, a range that is refused, fixed dB ranges,
+  // a cursor that reads right on the narrowed axis, then back to the start
+  const openRanges = async () => {
+    await page.getByRole('button', { name: '그래프 설정' }).click();
+    await page.getByRole('menuitem', { name: '축 범위' }).click();
+    await page.waitForSelector('dialog.sheet .range-sheet');
+    return page.locator('dialog.sheet');
+  };
+  const typeIn = async (loc, v) => {
+    await loc.fill(String(v));
+    await loc.dispatchEvent('change');
+  };
+  let rs = await openRanges();
+  await rs.locator('[data-f="20,500"]').click();
+  st = await settingsOf(page);
+  assert.deepEqual([st.freqMin, st.freqMax, st.preset], [20, 500, 'custom']);
+  await typeIn(rs.locator('#r-fmax'), 2000);
+  await typeIn(rs.locator('#r-fmin'), 500);
+  await typeIn(rs.locator('#r-fmin'), 3000);
+  assert.ok(await rs.locator('#r-error').isVisible(), 'start above the end is refused');
+  st = await settingsOf(page);
+  assert.deepEqual([st.freqMin, st.freqMax], [500, 2000]);
+  await typeIn(rs.locator('#r-fmin'), 500);
+  assert.ok(!(await rs.locator('#r-error').isVisible()));
+  for (const key of ['specDb', 'traceDb', 'gramDb', 'octDb']) {
+    await rs.locator(`.seg[data-key=${key}] [data-v=manual]`).click();
+    assert.ok(Array.isArray((await settingsOf(page))[key]), `${key} fixed from what is shown`);
+  }
+  const spec = rs.locator('[data-range=specDb]');
+  await typeIn(spec.locator('[data-lo]'), -40);
+  await typeIn(spec.locator('[data-hi]'), 120);
+  await typeIn(rs.locator('[data-range=traceDb] [data-hi]'), 0); // below the low end: refused
+  assert.ok(await rs.locator('#r-error').isVisible());
+  st = await settingsOf(page);
+  assert.deepEqual(st.specDb, [-40, 120]);
+  await shot(page, 'range-sheet');
+  await rs.getByRole('button', { name: '닫기' }).click();
+  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+  await page.locator('#a-cursor .cr-close').click().catch(() => {});
+  await tapFrequency(page, 1000, 500, 2000);
+  await page.waitForSelector('#a-cursor:not([hidden])');
+  const [rHz, rDb] = (await page.locator('#a-cursor .cr-lines span').first().textContent()).replace(/,/g, '').match(/[\d.]+/g).map(Number);
+  console.log(`cursor on 500 Hz – 2 kHz: ${rHz} Hz ${rDb}`);
+  assert.ok(Math.abs(rHz - 1000) < 15 && rDb > 60, 'cursor on the narrowed axis');
+  await shot(page, 'range-live');
+  await page.locator('#a-cursor .cr-close').click();
+  rs = await openRanges();
+  await rs.getByRole('button', { name: '처음대로' }).click();
+  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+  st = await settingsOf(page);
+  assert.deepEqual([st.freqMin, st.freqMax, st.specDb, st.traceDb, st.gramDb, st.octDb], [20, 20000, null, null, null, null]);
 
   // help sheet
   await page.getByRole('button', { name: '도움말' }).click();
@@ -590,6 +642,11 @@ async function chartSettings(page, picks, shotName) {
     await page.getByRole('menu').waitFor();
     await shot(page, `preset-menu-${name}`);
     await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: '그래프 설정' }).click();
+    await page.getByRole('menuitem', { name: '축 범위' }).click();
+    await page.waitForSelector('dialog.sheet .range-sheet');
+    await shot(page, `range-sheet-${name}`);
+    await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
     await chartMenu(page, { style: 'fill', off: ['maxTrack', 'minTrack', 'minHold'] });
     await setMode(page, 'octave');
     await page.waitForTimeout(2500);

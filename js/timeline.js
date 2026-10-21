@@ -169,6 +169,7 @@ export class LiveTimelineView {
     this.len = 0; // values held
     this.first = 0; // sample number of values[0]
     this.stats = { leq: NaN, unit: 'dB(A)' };
+    this.yRange = null; // [lo, hi] dB, or null = fit the values shown
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'spectrum-canvas';
     this.canvas.setAttribute('role', 'img');
@@ -207,9 +208,10 @@ export class LiveTimelineView {
     this.draw();
   }
 
-  configure({ windowSec = this.windowSec, leq = this.stats.leq, unit = this.stats.unit } = {}) {
+  configure({ windowSec = this.windowSec, leq = this.stats.leq, unit = this.stats.unit, yRange = this.yRange } = {}) {
     this.windowSec = windowSec;
     this.stats = { leq, unit };
+    this.yRange = yRange;
   }
 
   draw() {
@@ -236,8 +238,10 @@ export class LiveTimelineView {
       }
     }
     let lo = Number.isFinite(vmin) ? Math.floor((vmin - 3) / 10) * 10 : 30;
-    const hi = Number.isFinite(vmax) ? Math.ceil((vmax + 3) / 10) * 10 : 90;
+    let hi = Number.isFinite(vmax) ? Math.ceil((vmax + 3) / 10) * 10 : 90;
     if (hi - lo < 30) lo = hi - 30;
+    if (this.yRange) [lo, hi] = this.yRange;
+    this.shown = [lo, hi];
     const y = (v) => box.yBot - (((Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : lo) - lo) / (hi - lo)) * (box.yBot - box.yTop);
     const x = (t) => box.x0 + ((t - tStart) / this.windowSec) * (box.x1 - box.x0);
 
