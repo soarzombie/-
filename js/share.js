@@ -1,6 +1,6 @@
 // Getting saved analyses off the phone: text for messengers, a PNG card, CSV for Excel.
 
-import { fmtDb, fmtHz, fmtDate, fmtClock } from './format.js';
+import { fmtDb, fmtHz, fmtDate, fmtClock, speedText } from './format.js';
 import { drawSpectrum } from './spectrum.js';
 
 export function summaryText(rec, settings) {
@@ -11,6 +11,7 @@ export function summaryText(rec, settings) {
     rec.vehicle ? `차량: ${rec.vehicle}` : '',
     `평균 ${fmtDb(rec.leq)} / 최대 ${fmtDb(rec.lmax)} / 최소 ${fmtDb(rec.lmin)} ${rec.unit || 'dB(A)'}`,
     `${rec.source === 'file' ? '길이' : '측정 시간'} ${fmtClock(rec.elapsed)}${rec.timedSec ? ` (${rec.timedSec}초 측정)` : ''}`,
+    'speedAvg' in rec || 'speed' in rec ? `속도: ${speedText(rec)}` : '',
     rec.peaks?.length ? `피크: ${rec.peaks.map((p) => fmtHz(p.hz)).join(', ')}` : '',
     rec.memo ? `메모: ${rec.memo}` : '',
     '※ 스마트폰 측정 참고값',
@@ -53,7 +54,8 @@ export function renderCard(rec, settings) {
     text(label, x, 290, 32, CARD.sub, 600);
     text(fmtDb(v), x, 390, 104, i === 1 ? CARD.accent : CARD.ink, 800);
   });
-  text(`${rec.unit || 'dB(A)'} · ${fromFile ? '길이' : '측정 시간'} ${fmtClock(rec.elapsed)}${rec.peaks?.length ? ` · 피크 ${rec.peaks.map((p) => fmtHz(p.hz)).join(', ')}` : ''}`, 64, 450, 32, CARD.sub, 500);
+  const kmh = Number.isFinite(rec.speedAvg) ? rec.speedAvg : rec.speed;
+  text(`${rec.unit || 'dB(A)'} · ${fromFile ? '길이' : '측정 시간'} ${fmtClock(rec.elapsed)}${Number.isFinite(kmh) ? ` · ${Math.round(kmh)} km/h` : ''}${rec.peaks?.length ? ` · 피크 ${rec.peaks.map((p) => fmtHz(p.hz)).join(', ')}` : ''}`, 64, 450, 32, CARD.sub, 500);
 
   g.fillStyle = CARD.panel;
   g.beginPath();
@@ -75,14 +77,14 @@ export function renderCard(rec, settings) {
 
 const CSV_HEAD = [
   '일시', '출처', '차량번호', '메모', '평균 Leq', '최대 Lmax', '최소 Lmin', '저장 순간', '단위', '측정·파일 길이(초)',
-  '피크1 Hz', '피크1 dB', '피크2 Hz', '피크2 dB', 'FFT', '마이크 보정', '과부하', '소리(초)', '정해진 시간(초)',
+  '피크1 Hz', '피크1 dB', '피크2 Hz', '피크2 dB', 'FFT', '마이크 보정', '과부하', '소리(초)', '정해진 시간(초)', '속도 평균(km/h)', '속도 최고(km/h)',
 ];
 
 export function recordsCsv(records) {
   const rows = records.map((r) => [
     fmtDate(r.ts), r.source === 'file' ? r.fileName : '마이크', r.vehicle, r.memo, r.leq, r.lmax, r.lmin, r.laf, r.unit || 'dB(A)', Math.round(r.elapsed),
     r.peaks?.[0] && Math.round(r.peaks[0].hz), r.peaks?.[0]?.db, r.peaks?.[1] && Math.round(r.peaks[1].hz), r.peaks?.[1]?.db,
-    r.fftSize, r.calibrated ? 'O' : 'X', r.clipped ? 'O' : '', r.audioSec || '', r.timedSec || '',
+    r.fftSize, r.calibrated ? 'O' : 'X', r.clipped ? 'O' : '', r.audioSec || '', r.timedSec || '', r.speedAvg ?? '', r.speedMax ?? '',
   ]);
   const csv = [CSV_HEAD, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n');
   // BOM so Excel opens the Korean text as UTF-8.

@@ -4,10 +4,11 @@
 import { APP_VERSION, getSettings, saveSettings, rememberVehicle } from './settings.js';
 import { PRESETS, CUSTOM, presetOf, choosePreset, customize } from './presets.js';
 import { micProfile, saveMicProfile, parseCalFile, calCorrection } from './mics.js';
+import { trackSpeed, STALE_SEC } from './gps.js';
 import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
 import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds } from './dsp.js';
 import * as store from './store.js';
-import { esc, fmtDb, fmtHz, fmtClock, fmtDate, fmtDay, fmtShortDate, fmtTime, fmtWhen, fileStamp } from './format.js';
+import { esc, fmtDb, fmtHz, fmtClock, fmtDate, fmtDay, fmtShortDate, fmtTime, fmtWhen, fileStamp, speedText } from './format.js';
 import { SpectrumView, curveLook, checkFreqRange, checkDbRange } from './spectrum.js';
 import { SpectrogramView } from './spectrogram.js';
 import { encodeWav, decodeAudioFile } from './audio.js';
@@ -339,6 +340,9 @@ function helpSheet() {
         <dt>● 녹음</dt><dd>측정 버튼과 따로 움직입니다. 누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 그래프 위 빨간 시계가 녹음 길이), 측정을 일시정지해도 녹음은 계속됩니다. 정지해도 측정은 그대로 이어지고, 녹음은 파일 탭에 들어가 "분석 보기"로 바로 열 수 있습니다.</dd>
         <dt>▶ ⏸ 측정</dt><dd>측정 시작과 일시정지(화면과 값 고정). 녹음에는 영향을 주지 않습니다.</dd>
         <dt>마이크</dt><dd>평소에는 휴대폰 마이크로 잽니다. 외부 측정 마이크(iMM-6C 등)는 꽂은 뒤 그래프 설정의 "마이크"에서 고르면 되고, 쓰는 동안 이름이 화면 위에 보입니다. 외부 마이크는 설정 → 마이크 보정에서 따로 보정하고, 함께 받은 보정 파일을 넣으면 저음·고음 오차도 바로잡습니다.</dd>
+        <dt>⏱ 정해진 시간 측정</dt><dd>누르면 처음부터 ${s.timedSec}초(그래프 설정에서 5초 · 10초 · 30초 · 1분)만큼 재고 저절로 멈춘 뒤 저장 창을 엽니다. 버튼 둘레가 차오르고, 다시 누르거나 일시정지하면 취소됩니다.</dd>
+        <dt>속도 (GPS)</dt><dd>그래프 설정에서 켜면 차 속도가 그래프 위(노란 숫자)와 시간축 그래프(노란 선)에 나오고, 저장 기록에 평균·최고 속도가 남습니다. 위치 자체는 저장하지 않습니다.</dd>
+        <dt>전후 비교</dt><dd>기록 화면의 "실시간과 비교"를 누르면 그 기록의 평균 스펙트럼이 보라 점선(기준)으로 실시간 그래프에 겹쳐지고, 평균 차이가 함께 나옵니다. "다른 기록과 비교"는 기록끼리 겹쳐 봅니다.</dd>
         <dt>⬇ 저장</dt><dd>지금 그래프와 값, 방금 들린 소리를 차량번호·메모와 함께 기록에 남깁니다.</dd>
       </dl>
       <p class="fine">스마트폰 측정값은 참고값이며 정밀 소음계를 대신하지 않습니다.</p>
@@ -374,6 +378,7 @@ async function renderAnalyzer() {
         <div class="trace-plot" id="a-trace"></div>
         <div class="chart-tools">
           <p class="rec-badge" id="a-rec-badge" hidden><i></i>녹음 <b id="a-rec-time">00:00</b></p>
+          <p class="speed-badge" id="a-speed" hidden>– km/h</p>
           <p class="ref-chip" id="a-ref" hidden><i aria-hidden="true"></i><span id="a-ref-name"></span><b id="a-ref-diff"></b><button type="button" class="ref-close" data-act="ref-off" aria-label="기준 비교 끄기">×</button></p>
           <p class="an-peak" id="a-peak">피크 –</p>
           <button type="button" class="tool-btn" data-act="chart-settings" aria-label="그래프 설정" aria-haspopup="menu" aria-expanded="false">${ICON.sliders}</button>
@@ -415,7 +420,7 @@ async function renderAnalyzer() {
   gram.unit = unitOf(s.weighting);
   const octave = new OctaveView($('a-octave'));
   const trace = new LiveTimelineView($('a-trace'), { windowSec: s.traceSec || 30 }); // 0 was "hidden" before
-  trace.configure({ unit: unitOf(s.weighting), yRange: s.traceDb });
+  trace.configure({ unit: unitOf(s.weighting), yRange: s.traceDb, speed: s.gps });
   let traced = 0; // measured samples already in the trace
   const led = new LevelBar($('a-led'), s.alertLevel);
   let meter = null;
@@ -434,6 +439,11 @@ async function renderAnalyzer() {
   let ref = null; // a saved record shown as a dashed reference (refCurve)
   let powSum = null; // per-bin power summed since reset, for the saved average spectrum
   let powN = 0;
+  let geoWatch = null; // navigator.geolocation watch while measuring with 속도 on
+  let gpsState = null; // trackSpeed state
+  let speedNow = null; // km/h, with the time it was known
+  let speedAt = 0;
+  let spd = { sum: 0, n: 0, max: -Infinity }; // speed since reset, one value per level block
   let knownInputs = null; // microphones seen, to notice one being plugged in
   let lastRowAt = 0;
   let range = [-20, 100];
@@ -510,8 +520,51 @@ async function renderAnalyzer() {
     led.set(NaN, NaN);
     gram.clear();
     traced = 0;
+    spd = { sum: 0, n: 0, max: -Infinity };
     trace.configure({ leq: NaN, unit: unit() });
     trace.clear();
+  }
+
+  // 속도 (GPS): watched only while the microphone is on; only the speed is kept, never the position.
+  const speed = () => (speedNow != null && Date.now() - speedAt < STALE_SEC * 1000 ? speedNow : null);
+  function startGps() {
+    if (!getSettings().gps || geoWatch != null || !meter) return;
+    if (!navigator.geolocation) return toast('이 브라우저는 위치(속도)를 지원하지 않습니다');
+    geoWatch = navigator.geolocation.watchPosition(
+      (pos) => {
+        const c = pos.coords;
+        const r = trackSpeed(gpsState, { lat: c.latitude, lon: c.longitude, accuracy: c.accuracy, speed: c.speed, t: pos.timestamp || Date.now() });
+        gpsState = r.state;
+        if (r.kmh != null) {
+          speedNow = r.kmh;
+          speedAt = Date.now();
+        }
+        showSpeed();
+      },
+      (err) => {
+        if (err.code !== 1) return showSpeed(); // no fix yet: keep trying
+        toast('위치 사용이 허용되지 않아 속도를 표시할 수 없습니다');
+        stopGps();
+        saveSettings({ gps: false });
+        trace.configure({ speed: false });
+      },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 },
+    );
+    showSpeed();
+  }
+
+  function stopGps() {
+    if (geoWatch != null) navigator.geolocation.clearWatch(geoWatch);
+    geoWatch = null;
+    gpsState = null;
+    speedNow = null;
+    showSpeed();
+  }
+
+  function showSpeed() {
+    $('a-speed').hidden = geoWatch == null;
+    const v = speed();
+    $('a-speed').textContent = v == null ? '– km/h' : `${Math.round(v)} km/h`;
   }
 
   // The analyser runs at the chosen FFT size, or at 16384 for the octave bars.
@@ -584,10 +637,17 @@ async function renderAnalyzer() {
     $('a-time').textContent = fmtClock(meter.elapsed);
     led.set(db, meter.lmax);
     if (ref) showRef();
+    if (geoWatch != null) showSpeed();
     // the trace follows the measured time: nothing while warming up after a start or reset
     if (meter.stats.n > traced) {
       traced = meter.stats.n;
-      trace.push(db);
+      const v = geoWatch != null ? speed() : null;
+      if (v != null) {
+        spd.sum += v;
+        spd.n++;
+        spd.max = Math.max(spd.max, v);
+      }
+      trace.push(db, v ?? NaN);
       trace.configure({ leq: meter.leq, unit: unit() });
       if (mode() === 'spectrum') trace.draw();
     }
@@ -622,6 +682,7 @@ async function renderAnalyzer() {
       restartMic();
     };
     audioInputs().then((list) => (knownInputs = list));
+    startGps();
     meter.onLevel = onLevel;
     meter.onRecordFull = () => {
       if (!stopping) toast(`녹음은 최대 ${MAX_RECORD_SEC / 60}분입니다`);
@@ -709,6 +770,7 @@ async function renderAnalyzer() {
   function stopMic() {
     cancelAnimationFrame(raf);
     showTimed(0);
+    stopGps();
     if (meter?.recording) {
       // leaving mid-recording keeps what was recorded, ready in the file tab
       const rate = meter.sampleRate;
@@ -811,6 +873,7 @@ async function renderAnalyzer() {
       mic: meter.inputLabel,
       micCal: micProf?.calName || '',
       ...(ref ? { refId: ref.id } : {}),
+      ...(geoWatch != null ? { speed: round1(speed()), speedAvg: spd.n ? round1(spd.sum / spd.n) : null, speedMax: spd.n ? round1(spd.max) : null } : {}),
       vehicle: '',
       memo: '',
       app: APP_VERSION,
@@ -874,6 +937,7 @@ async function renderAnalyzer() {
         ${segRow('timeWeighting', '시간 가중 (큰 숫자)', [['F', 'Fast 0.125초'], ['S', 'Slow 1초']], st.timeWeighting, 'Slow는 숫자가 덜 흔들려 읽기 쉽습니다. 바꾸면 최소·평균·최대가 새로 시작합니다.')}
         ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
         ${segRow('timed', '정해진 시간 측정 (⏱ 버튼)', TIMED_SECS.map((n) => [n, n < 60 ? `${n}초` : '1분']), st.timedSec, '누르면 처음부터 이 시간만큼 재고 멈춘 뒤 저장 창을 엽니다.')}
+        ${segRow('gps', '속도 (GPS)', [['off', '끔'], ['on', '켬']], st.gps ? 'on' : 'off', '켜면 위치 권한을 묻고, 차 속도를 그래프 위와 시간축 그래프(노란 선), 저장 기록에 함께 남깁니다. 위치는 저장하지 않습니다.')}
         ${segRow('fft', 'FFT 크기', FFT_SIZES.map((n) => [n, n]), st.fftSize, '클수록 주파수를 잘게 나누지만 반응이 느려집니다. 1/3 옥타브 보기는 늘 32768로 계산합니다.')}
         ${segRow('scale', '주파수 축', [['log', '로그'], ['linear', '선형']], st.scale)}
         <button type="button" class="btn btn-wide" data-close>닫기</button>
@@ -902,7 +966,7 @@ async function renderAnalyzer() {
     };
     bindSegs(dlg, (key, v) => {
       const numeric = { trace: 'traceSec', fft: 'fftSize', timed: 'timedSec' };
-      change(numeric[key] ? { [numeric[key]]: Number(v) } : { [key]: v });
+      change(key === 'gps' ? { gps: v === 'on' } : numeric[key] ? { [numeric[key]]: Number(v) } : { [key]: v });
       if (key === 'weighting') dlg.querySelector('#f-weight-note').textContent = WEIGHT_NOTE[v];
     });
   }
@@ -923,6 +987,12 @@ async function renderAnalyzer() {
     }
     if (st.fftSize !== prev.fftSize) applyFft();
     if (st.timedSec !== prev.timedSec && !meter?.timed) showTimed(0);
+    if (st.gps !== prev.gps) {
+      if (st.gps) startGps();
+      else stopGps();
+      trace.configure({ speed: st.gps });
+      trace.draw();
+    }
     if (ref) showRef();
     gram.configure({ scale: st.scale, fmin: st.freqMin, fmax: st.freqMax, colorRange: st.gramDb });
     if (st.traceSec !== prev.traceSec || st.traceDb !== prev.traceDb) {
@@ -1518,6 +1588,7 @@ async function renderRecord(id) {
             <dt>피크</dt><dd>${rec.peaks?.length ? rec.peaks.map((p) => `${fmtHz(p.hz)} <small>(${fmtDb(p.db)} ${unit})</small>`).join('<br>') : '뚜렷한 피크 없음'}</dd>
             <dt>메모</dt><dd class="memo">${esc(rec.memo) || '-'}</dd>
             ${fromFile ? `<dt>파일</dt><dd>${esc(rec.fileName)}</dd>` : `<dt>저장 순간</dt><dd>${fmtDb(rec.laf)} ${unit}</dd>`}
+            ${'speedAvg' in rec || 'speed' in rec ? `<dt>속도</dt><dd>${speedText(rec)}</dd>` : ''}
             <dt>분석 설정</dt><dd>${rec.weighting || 'A'}특성 · ${TW_NAME[rec.timeWeighting || 'F']} · FFT ${rec.fftSize} · ${unit.startsWith('dBFS') ? '파일 디지털 레벨(dBFS) 기준' : `${esc(micName(rec.mic))} ${rec.calibrated ? '보정됨' : '보정 안 됨 (참고값)'}${rec.micCal ? ' · 보정 파일' : ''}`}</dd>
           </dl>
         </section>

@@ -157,6 +157,7 @@ export function columnRange(values, from, to, cols) {
 }
 
 const LIVE_COLOR = '#5aa2ff';
+const SPEED_COLOR = '#f2c94c';
 
 export class LiveTimelineView {
   // step: seconds between pushed values (the meter's 50 ms blocks); keeps up to maxSec of them.
@@ -166,6 +167,7 @@ export class LiveTimelineView {
     this.windowSec = windowSec;
     this.cap = Math.ceil(maxSec / step);
     this.values = new Float32Array(this.cap * 2);
+    this.speeds = new Float32Array(this.cap * 2); // km/h with each value (NaN = not known)
     this.len = 0; // values held
     this.first = 0; // sample number of values[0]
     this.stats = { leq: NaN, unit: 'dB(A)' };
@@ -192,13 +194,15 @@ export class LiveTimelineView {
     this.draw();
   }
 
-  push(db) {
+  push(db, kmh = NaN) {
     if (this.len === this.values.length) {
       // drop the older half; only the last maxSec are ever shown
       this.values.copyWithin(0, this.cap);
+      this.speeds.copyWithin(0, this.cap);
       this.len -= this.cap;
       this.first += this.cap;
     }
+    this.speeds[this.len] = kmh ?? NaN;
     this.values[this.len++] = Number.isFinite(db) ? db : -Infinity;
   }
 
@@ -208,10 +212,12 @@ export class LiveTimelineView {
     this.draw();
   }
 
-  configure({ windowSec = this.windowSec, leq = this.stats.leq, unit = this.stats.unit, yRange = this.yRange } = {}) {
+  // speed: also draw the speed (km/h, own scale on the right) when values carry one
+  configure({ windowSec = this.windowSec, leq = this.stats.leq, unit = this.stats.unit, yRange = this.yRange, speed = this.speed } = {}) {
     this.windowSec = windowSec;
     this.stats = { leq, unit };
     this.yRange = yRange;
+    this.speed = speed;
   }
 
   draw() {
@@ -271,7 +277,9 @@ export class LiveTimelineView {
     }
     g.textAlign = 'left';
     g.fillStyle = c.axis;
-    g.fillText(`시간축 ${this.stats.unit} · 최근 ${this.windowSec < 60 ? `${this.windowSec}초` : `${this.windowSec / 60}분`}`, box.x0 + 6 * k, box.yTop + 12 * k);
+    const title = `시간축 ${this.stats.unit} · 최근 ${this.windowSec < 60 ? `${this.windowSec}초` : `${this.windowSec / 60}분`}`;
+    g.fillText(title, box.x0 + 6 * k, box.yTop + 12 * k);
+    this.titleEnd = box.x0 + 6 * k + g.measureText(title).width;
 
     if (to - from >= 2) {
       const t0 = (this.first + from + 1) * step;
@@ -305,6 +313,8 @@ export class LiveTimelineView {
       g.fill();
     }
 
+    if (this.speed && to - from >= 2) this.drawSpeed(box, from, to, x, k);
+
     const { leq, unit } = this.stats;
     if (Number.isFinite(leq) && to - from >= 2) {
       g.setLineDash([6 * k, 4 * k]);
@@ -319,6 +329,42 @@ export class LiveTimelineView {
       g.textAlign = 'right';
       g.fillText(`평균 ${leq.toFixed(1)} ${unit}`, box.x1 - 4 * k, Math.max(box.yTop + 11 * k, y(leq) - 5 * k));
     }
+  }
+
+  // Speed on its own scale (0 to a round top), labelled inside the right edge.
+  drawSpeed(box, from, to, x, k) {
+    const { g, step } = this;
+    let top = -Infinity;
+    for (let i = from; i < to; i++) if (this.speeds[i] > top) top = this.speeds[i];
+    if (!Number.isFinite(top)) return; // no speed known in this window
+    const hi = Math.max(40, Math.ceil((top * 1.4) / 20) * 20); // room above the line for the title
+    const y = (v) => box.yBot - (Math.min(hi, Math.max(0, v)) / hi) * (box.yBot - box.yTop);
+    g.save();
+    g.beginPath();
+    g.rect(box.x0, box.yTop, box.x1 - box.x0, box.yBot - box.yTop);
+    g.clip();
+    g.strokeStyle = SPEED_COLOR;
+    g.lineWidth = 1.4 * k;
+    g.lineJoin = 'round';
+    g.beginPath();
+    // speed changes slowly: a point every couple of pixels is enough
+    const every = Math.max(1, Math.floor((to - from) / Math.max(1, (box.x1 - box.x0) / 2)));
+    let open = false;
+    for (let i = from; i < to; i += every) {
+      const v = this.speeds[i];
+      if (!Number.isFinite(v)) {
+        open = false;
+        continue;
+      }
+      g[open ? 'lineTo' : 'moveTo'](x((this.first + i + 1) * step), y(v));
+      open = true;
+    }
+    g.stroke();
+    g.restore();
+    // its scale goes after the graph title, in the line's colour
+    g.fillStyle = SPEED_COLOR;
+    g.textAlign = 'left';
+    g.fillText(` · 노란 선 속도 0–${hi} km/h`, this.titleEnd, box.yTop + 12 * k);
   }
 
   destroy() {

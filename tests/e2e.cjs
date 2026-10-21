@@ -143,7 +143,7 @@ async function launch(wav) {
   });
 }
 
-async function newPage(browser, base, errors, { viewport = { width: 390, height: 844 }, mic = true, seed = {} } = {}) {
+async function newPage(browser, base, errors, { viewport = { width: 390, height: 844 }, mic = true, seed = {}, geo = null } = {}) {
   const context = await browser.newContext({
     viewport,
     deviceScaleFactor: 2,
@@ -151,7 +151,8 @@ async function newPage(browser, base, errors, { viewport = { width: 390, height:
     hasTouch: true,
     locale: 'ko-KR',
     timezoneId: 'Asia/Seoul',
-    permissions: mic ? ['microphone'] : [],
+    permissions: [...(mic ? ['microphone'] : []), ...(geo ? ['geolocation'] : [])],
+    ...(geo ? { geolocation: geo } : {}),
     acceptDownloads: true,
   });
   await context.addInitScript((extra) => {
@@ -168,6 +169,15 @@ async function newPage(browser, base, errors, { viewport = { width: 390, height:
 
 async function shot(page, name, fullPage = false) {
   if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}.png`), fullPage });
+}
+
+// A car going north at `kmh`: a new position every half second.
+function drive(context, kmh, start = { latitude: 37.5, longitude: 127 }) {
+  let metres = 0;
+  return setInterval(() => {
+    metres += (kmh / 3.6) * 0.5;
+    context.setGeolocation({ ...start, latitude: start.latitude + metres / 111195, accuracy: 5 }).catch(() => {});
+  }, 500);
 }
 
 // Screen point of a frequency on the spectrum, using the chart's own layout rules.
@@ -748,9 +758,14 @@ async function cursorDb(page, hz) {
     await shot(page, `main-${name}-first`);
     await page.context().close();
 
-    page = await newPage(browser, base, errors, { viewport, seed: { vehicle: '12가 3456', recentVehicles: ['12가 3456', '34나 5678'] } });
+    // 속도 (GPS) on, driving at 80 km/h
+    page = await newPage(browser, base, errors, { viewport, seed: { vehicle: '12가 3456', recentVehicles: ['12가 3456', '34나 5678'], gps: true }, geo: { latitude: 37.5, longitude: 127, accuracy: 5 } });
+    const driving = drive(page.context(), 80);
     await running(page);
     await page.waitForTimeout(4000);
+    const kmh = await num(page, '#a-speed');
+    console.log(`speed (${name}): ${kmh} km/h`);
+    assert.ok(Math.abs(kmh - 80) < 4, 'speed from the position');
     await tapFrequency(page, 1250);
     await page.waitForTimeout(300);
     await shot(page, `main-${name}-live`);
@@ -809,6 +824,7 @@ async function cursorDb(page, hz) {
     await page.locator('dialog.sheet #f-memo').fill('주행 80km/h, 오른쪽 뒤 윙 소리');
     await page.locator('dialog.sheet').getByRole('button', { name: '저장' }).click();
     await page.waitForSelector('#toast:not([hidden])');
+    clearInterval(driving);
     await page.getByRole('button', { name: '일시정지' }).click();
     await page.waitForSelector('.analyzer[data-state="pause"]');
     await page.waitForTimeout(3000); // let the toast go
@@ -820,6 +836,8 @@ async function cursorDb(page, hz) {
     await page.waitForSelector('.stats-grid');
     await page.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
     await page.waitForTimeout(300);
+    const speedMeta = await page.locator('.meta dt:has-text("속도") + dd').textContent();
+    assert.match(speedMeta, /^평균 (7[6-9]|8[0-4]) km\/h · 최고 \d+ km\/h · 저장 순간 \d+ km\/h$/, speedMeta);
     await shot(page, `record-${name}`);
     await page.locator('.audio-card').scrollIntoViewIfNeeded();
     await shot(page, `record-${name}-sound`);

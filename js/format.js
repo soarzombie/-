@@ -55,3 +55,13 @@ export function fmtWhen(ts) {
   const d = new Date(ts);
   return `${d.getMonth() + 1}.${pad(d.getDate())} ${fmtTime(ts)}`;
 }
+
+// Speed kept with a measurement (GPS): "평균 62 km/h · 최고 70 km/h · 저장 순간 63 km/h".
+export function speedText(rec) {
+  const kmh = (v) => `${Math.round(v)} km/h`;
+  const parts = [];
+  if (Number.isFinite(rec.speedAvg)) parts.push(`평균 ${kmh(rec.speedAvg)}`);
+  if (Number.isFinite(rec.speedMax)) parts.push(`최고 ${kmh(rec.speedMax)}`);
+  if (Number.isFinite(rec.speed)) parts.push(`저장 순간 ${kmh(rec.speed)}`);
+  return parts.join(' · ') || '알 수 없음 (위치 신호 없음)';
+}

@@ -33,6 +33,7 @@ import { freqAxis, freqTicks, freqToX, xToFreq, checkFreqRange, checkDbRange } f
 import { PRESETS, PRESET_KEYS, choosePreset, customize, presetOf } from '../js/presets.js';
 import { micProfile, saveMicProfile, parseCalFile, calCorrection } from '../js/mics.js';
 import { Meter } from '../js/meter.js';
+import { haversine, trackSpeed } from '../js/gps.js';
 
 // IEC 61672-1 A-weighting (dB) at the exact base-10 octave frequencies 1000 * 10^(0.3n).
 const IEC_A = [
@@ -643,4 +644,29 @@ test('timed measurement: the meter counts exactly N seconds after the warm-up, t
   for (let i = 0; i < 40; i++) m.handleBlock(block);
   assert.equal(done, 1);
   assert.ok(!m.paused && m.elapsed > 1);
+});
+
+test('GPS speed: the phone-reported speed, else distance over time; standing still reads 0', () => {
+  assert.ok(Math.abs(haversine(37.5, 127, 37.5 + 1 / 60, 127) - 1853.2) < 1, 'one minute of latitude ≈ 1853 m');
+  const at = (t, north, extra = {}) => ({ lat: 37.5 + north / 111195, lon: 127, accuracy: 8, speed: null, t: t * 1000, ...extra });
+  let r = trackSpeed(null, at(0, 0));
+  assert.equal(r.kmh, null, 'one fix: not known yet');
+  r = trackSpeed(r.state, at(0.5, 10));
+  assert.equal(r.kmh, null, 'less than a second apart: wait');
+  r = trackSpeed(r.state, at(1, 20));
+  assert.ok(Math.abs(r.kmh - 72) < 0.5, `20 m in 1 s = 72 km/h: ${r.kmh}`);
+  r = trackSpeed(r.state, at(2, 40));
+  assert.ok(Math.abs(r.kmh - 72) < 0.5);
+  // stopped: the position wanders a few metres, which is less than the accuracy
+  for (let t = 3; t <= 6; t++) r = trackSpeed(r.state, at(t, 40 + (t % 2) * 4));
+  assert.ok(Math.abs(r.kmh - 72) < 0.5, 'still the last speed until the 5 s span is up');
+  r = trackSpeed(r.state, at(7, 42));
+  assert.equal(r.kmh, 0, 'no real movement in 5 s: 0 km/h');
+  // the phone's own speed wins; poor fixes are skipped; a long gap makes it unknown
+  r = trackSpeed(r.state, at(8, 42, { speed: 13.9 }));
+  assert.ok(Math.abs(r.kmh - 50.04) < 0.01);
+  r = trackSpeed(r.state, at(9, 500, { accuracy: 120 }));
+  assert.ok(Math.abs(r.kmh - 50.04) < 0.01, 'a 120 m fix is ignored');
+  r = trackSpeed(r.state, at(30, 600));
+  assert.equal(r.kmh, null, 'after a long gap: unknown');
 });

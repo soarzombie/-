@@ -178,6 +178,9 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
   white-space: nowrap;
   pointer-events: none;
 }
+/* 속도 (GPS), in the colour of its line on the time-axis graph */
+.speed-badge { padding: 3px 10px; border-radius: 999px; background: rgb(0 0 0 / 55%); border: 1px solid rgb(242 201 76 / 55%); color: #f2c94c; font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none; }
+.speed-badge[hidden] { display: none; }
 /* recording has its own clock, apart from the measuring status */
 .rec-badge { display: flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: rgb(60 10 16 / 85%); border: 1px solid rgb(255 79 94 / 70%); color: #ffd6da; font-size: 14px; font-weight: 700; white-space: nowrap; pointer-events: none; }
 .rec-badge i { width: 8px; height: 8px; border-radius: 50%; background: var(--rec); animation: rec-blink 1s steps(2, start) infinite; }

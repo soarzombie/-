@@ -12,6 +12,7 @@ const DEFAULTS = {
   view: 'spectrum', // 'spectrum' (frequency graph + time-axis graph below) | 'gram' (spectrogram) | 'octave' (1/3-octave bars)
   traceSec: 30, // seconds shown in the time-axis graph: 30 | 60 | 300
   timedSec: 10, // "N초 측정" button: 5 | 10 | 30 | 60
+  gps: false, // 속도 (GPS): show and keep the vehicle speed with the measurement
   weighting: 'A', // frequency weighting 'A' | 'C' | 'Z', for levels and spectrum alike
   timeWeighting: 'F', // level detector 'F' (Fast 125 ms) | 'S' (Slow 1 s)
   style: 'fill', // 'fill' | 'line' | 'bar'
