@@ -1,4 +1,4 @@
-// Signal-processing helpers shared by the meter and the tests.
+// Signal-processing helpers shared by the meter, the charts and the tests.
 // Pure functions only (no DOM, no Web Audio) so they also run under Node.
 
 // IEC 61672-1 A-weighting pole frequencies (Hz).
@@ -8,26 +8,12 @@ const F3 = 737.86223;
 const F4 = 12194.217;
 const A1000 = 1.9997; // dB, makes the analytic curve 0 dB at 1 kHz
 
-// 1/3-octave bands from 25 Hz to 10 kHz, the x axis of every spectrum chart.
-// `exact` is the base-2 centre 1000 * 2^(n/3) used for the edges; `major` marks the
-// octave centres that get an axis label.
-const THIRD_LABELS = [
-  '25', '31.5', '40', '50', '63', '80', '100', '125', '160', '200', '250', '315', '400', '500',
-  '630', '800', '1k', '1.25k', '1.6k', '2k', '2.5k', '3.15k', '4k', '5k', '6.3k', '8k', '10k',
-];
-const OCTAVE_LABELS = new Set(['31.5', '63', '125', '250', '500', '1k', '2k', '4k', '8k']);
-export const BANDS = THIRD_LABELS.map((label, i) => {
-  const exact = 1000 * 2 ** ((i - 16) / 3);
-  return { exact, label, major: OCTAVE_LABELS.has(label), lo: exact * 2 ** (-1 / 6), hi: exact * 2 ** (1 / 6) };
-});
-
-// Plain-language groups: low up to the 160 Hz band, mid 200 Hz – 1.25 kHz, high from 1.6 kHz.
-const LOW_MID = 178;
-const MID_HIGH = 1413;
-export const ZONE_NAMES = ['low', 'mid', 'high'];
-
 // Mean of w[n]^2 for the Blackman window (alpha = 0.16) the Web Audio AnalyserNode applies.
 export const BLACKMAN_POWER = 0.42 ** 2 + 0.5 ** 2 / 2 + 0.08 ** 2 / 2;
+
+// Turns an analyser bin (dB of the 1/N-scaled, windowed |X[k]|) into that bin's share of the
+// signal's mean square, one-sided. With it the bins of a spectrum add up to the overall level.
+const BIN_CORRECTION_DB = 10 * Math.log10(2 / BLACKMAN_POWER);
 
 export function aWeightDb(f) {
   if (f <= 0) return -Infinity;
@@ -82,113 +68,98 @@ export function toDb(meanSquare, offset = 0) {
   return meanSquare > 0 ? 10 * Math.log10(meanSquare) + offset : -Infinity;
 }
 
-// AnalyserNode.getFloatFrequencyData() bins (dB of |X[k]|, 1/N-scaled, Blackman-windowed)
-// to each bin's contribution to the signal's mean square, one-sided.
-export function analyserDbToPower(dbBins, out = new Float64Array(dbBins.length)) {
-  for (let k = 0; k < dbBins.length; k++) {
-    const db = dbBins[k];
-    out[k] = Number.isFinite(db) ? (2 * 10 ** (db / 10)) / BLACKMAN_POWER : 0;
-  }
-  out[0] = 0; // DC offset is not sound
+// Per-bin dB to add to analyser output for an A-weighted, calibrated level per bin.
+export function binLevelTable(binCount, binHz) {
+  const t = new Float32Array(binCount);
+  t[0] = -Infinity; // DC is not sound
+  for (let k = 1; k < binCount; k++) t[k] = BIN_CORRECTION_DB + aWeightDb(k * binHz);
+  return t;
+}
+
+export function binLevels(dbBins, table, offset, out = new Float32Array(dbBins.length)) {
+  for (let k = 0; k < dbBins.length; k++) out[k] = dbBins[k] + table[k] + offset;
   return out;
 }
 
-export function aWeightPower(power, binHz) {
-  const out = new Float64Array(power.length);
-  for (let k = 1; k < power.length; k++) out[k] = power[k] * 10 ** (aWeightDb(k * binHz) / 10);
-  return out;
+// Energy sum of per-bin levels: the overall level the spectrum represents.
+export function totalLevel(levels) {
+  let sum = 0;
+  for (const l of levels) if (l > -300) sum += 10 ** (l / 10);
+  return toDb(sum);
 }
 
-// Sum bins into bands; returns mean square per band.
-export function bandPowers(power, binHz, bands = BANDS) {
-  return bands.map(({ lo, hi }) => {
-    let sum = 0;
-    const k0 = Math.max(1, Math.ceil(lo / binHz));
-    const k1 = Math.min(power.length - 1, Math.floor(hi / binHz));
-    for (let k = k0; k <= k1; k++) sum += power[k];
-    return sum;
+// For each [edges[c], edges[c+1]) range, the slice of the (ascending) `freqs` inside it.
+export function rangeIndex(freqs, edges) {
+  const idx = new Int32Array(edges.length);
+  let i = 0;
+  edges.forEach((e, c) => {
+    while (i < freqs.length && freqs[i] < e) i++;
+    idx[c] = i;
   });
+  return idx;
 }
 
-// Per-bin band index and A-weighting gain, so a live analyser frame folds into
-// A-weighted band powers in one pass (see foldBands).
-export function bandMap(binCount, binHz, bands = BANDS) {
-  const bins = [];
-  const index = [];
-  const gainA = [];
-  for (let k = 1; k < binCount; k++) {
-    const f = k * binHz;
-    const b = bands.findIndex((band) => f >= band.lo && f < band.hi);
-    if (b < 0) continue;
-    bins.push(k);
-    index.push(b);
-    gainA.push(10 ** (aWeightDb(f) / 10));
-  }
-  return { bins: Int32Array.from(bins), index: Int16Array.from(index), gainA: Float64Array.from(gainA), size: bands.length };
-}
-
-export function foldBands(dbBins, map, out = new Float64Array(map.size)) {
-  out.fill(0);
-  const { bins, index, gainA } = map;
-  for (let j = 0; j < bins.length; j++) {
-    const db = dbBins[bins[j]];
-    if (db > -300) out[index[j]] += ((2 * 10 ** (db / 10)) / BLACKMAN_POWER) * gainA[j];
+// Collapses levels onto ranges: the loudest point inside each range, or, where a range is
+// narrower than the point spacing, the level interpolated at its centre frequency.
+export function reduceRanges(levels, freqs, idx, centres, out = new Float32Array(centres.length)) {
+  for (let c = 0; c < centres.length; c++) {
+    const lo = idx[c];
+    const hi = idx[c + 1];
+    if (hi > lo) {
+      let m = -Infinity;
+      for (let i = lo; i < hi; i++) if (levels[i] > m) m = levels[i];
+      out[c] = m;
+    } else if (lo <= 0 || lo >= freqs.length) {
+      out[c] = levels[Math.min(Math.max(lo, 0), freqs.length - 1)];
+    } else {
+      const t = (centres[c] - freqs[lo - 1]) / (freqs[lo] - freqs[lo - 1]);
+      out[c] = levels[lo - 1] + (levels[lo] - levels[lo - 1]) * t;
+    }
   }
   return out;
 }
 
-export function zoneOfFrequency(hz) {
-  if (hz < LOW_MID) return 'low';
-  if (hz < MID_HIGH) return 'mid';
-  return 'high';
+// n log-spaced frequencies from fmin to fmax, with their range edges (n + 1 values).
+export function logGrid(n, fmin, fmax) {
+  const r = Math.log(fmax / fmin);
+  const centres = Float32Array.from({ length: n }, (_, i) => fmin * Math.exp((r * (i + 0.5)) / n));
+  const edges = Float32Array.from({ length: n + 1 }, (_, i) => fmin * Math.exp((r * i) / n));
+  return { centres, edges };
 }
 
-// Percent share of energy in the low / mid / high groups (rounded, sums to 100).
-export function zoneShares(bandPower, bands = BANDS) {
-  const sums = { low: 0, mid: 0, high: 0 };
-  bands.forEach((band, i) => (sums[zoneOfFrequency(band.exact)] += bandPower[i] || 0));
-  const total = sums.low + sums.mid + sums.high;
-  if (!(total > 0)) return { low: 0, mid: 0, high: 0 };
-  const low = Math.round((sums.low / total) * 100);
-  const mid = Math.round((sums.mid / total) * 100);
-  return { low, mid, high: Math.max(0, 100 - low - mid) };
+// The strongest tonal peaks: local maxima standing `minProminence` dB above the median of their
+// +-1/3-octave neighbourhood (at least +-12 bins, so low frequencies have enough to compare with),
+// at least `minOctaves` apart, loudest first. Frequencies are refined by parabolic interpolation.
+export function findPeaks(levels, binHz, { count = 2, fmin = 30, fmax = 16000, minProminence = 6, minOctaves = 1 / 3 } = {}) {
+  const k0 = Math.max(3, Math.ceil(fmin / binHz));
+  const k1 = Math.min(levels.length - 3, Math.floor(fmax / binHz));
+  const candidates = [];
+  for (let k = k0; k <= k1; k++) {
+    const v = levels[k];
+    if (v > levels[k - 1] && v >= levels[k + 1] && v >= levels[k - 2] && v >= levels[k + 2]) candidates.push(k);
+  }
+  candidates.sort((a, b) => levels[b] - levels[a]);
+  const peaks = [];
+  for (const k of candidates.slice(0, 40)) {
+    const hz = refine(levels, k) * binHz;
+    if (peaks.some((p) => Math.abs(Math.log2(p.hz / hz)) < minOctaves)) continue;
+    const lo = Math.max(1, Math.min(k - 12, Math.floor(hz / 2 ** (1 / 3) / binHz)));
+    const hi = Math.min(levels.length - 1, Math.max(k + 12, Math.ceil((hz * 2 ** (1 / 3)) / binHz)));
+    const around = [];
+    for (let i = lo; i <= hi; i++) if (Math.abs(i - k) > 3) around.push(levels[i]);
+    around.sort((a, b) => a - b);
+    const prominence = around.length ? levels[k] - around[Math.floor(around.length / 2)] : 0;
+    if (prominence < minProminence) continue;
+    peaks.push({ hz, db: levels[k], prominence });
+    if (peaks.length >= count) break;
+  }
+  return peaks;
 }
 
-export function dominantZone(shares) {
-  return Object.entries(shares).sort((a, b) => b[1] - a[1])[0][0];
-}
-
-// Strongest bin between fmin and fmax, refined by parabolic interpolation.
-// `prominence` is how far (dB) it stands above the median of its +-1/3-octave neighbourhood,
-// so a clear whine or squeal scores high and broadband rumble scores low.
-export function findPeak(power, binHz, fmin = 20, fmax = 10000) {
-  const k0 = Math.max(2, Math.ceil(fmin / binHz));
-  const k1 = Math.min(power.length - 2, Math.floor(fmax / binHz));
-  let k = -1;
-  for (let i = k0; i <= k1; i++) if (k < 0 || power[i] > power[k]) k = i;
-  if (k < 0 || !(power[k] > 0)) return null;
-  const db = (i) => 10 * Math.log10(power[i] || 1e-30);
-  const a = db(k - 1);
-  const b = db(k);
-  const c = db(k + 1);
+function refine(levels, k) {
+  const a = levels[k - 1];
+  const b = levels[k];
+  const c = levels[k + 1];
   const denom = a - 2 * b + c;
-  const delta = denom !== 0 ? Math.max(-0.5, Math.min(0.5, (0.5 * (a - c)) / denom)) : 0;
-  const hz = (k + delta) * binHz;
-
-  const lo = Math.max(1, Math.floor(hz / 2 ** (1 / 3) / binHz));
-  const hi = Math.min(power.length - 1, Math.ceil((hz * 2 ** (1 / 3)) / binHz));
-  const around = [];
-  for (let i = lo; i <= hi; i++) if (Math.abs(i - k) > 4) around.push(db(i));
-  around.sort((x, y) => x - y);
-  const median = around.length ? around[Math.floor(around.length / 2)] : b;
-  return { hz, prominence: b - median };
-}
-
-// 'ok' | 'warn' | 'over' | 'none' (no criteria set for this mode).
-export function judge(value, warn, limit) {
-  if (!Number.isFinite(value) || limit == null) return 'none';
-  const v = Math.round(value * 10) / 10;
-  if (v > limit) return 'over';
-  if (warn != null && v >= warn) return 'warn';
-  return 'ok';
+  return k + (denom !== 0 && Number.isFinite(denom) ? Math.max(-0.5, Math.min(0.5, (0.5 * (a - c)) / denom)) : 0);
 }

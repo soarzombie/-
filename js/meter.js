@@ -1,22 +1,12 @@
-// Microphone sound level meter: A-weighted Leq / LAFmax from the AudioWorklet,
-// octave spectrum and dominant frequency from an AnalyserNode.
+// Microphone sound level meter for continuous analysis.
+// Levels (LAF now, LAeq / LAFmax / LAFmin since the last reset) come from the AudioWorklet,
+// which sees every sample; the spectrum comes from an AnalyserNode, per bin in dB(A).
 
-import {
-  designAWeighting,
-  analyserDbToPower,
-  aWeightPower,
-  bandPowers,
-  bandMap,
-  foldBands,
-  zoneShares,
-  findPeak,
-  toDb,
-} from './dsp.js';
+import { designAWeighting, binLevelTable, binLevels, toDb } from './dsp.js';
 
 const WARMUP_SEC = 0.5; // filter and Fast detector settle; also skips the tap on the screen
 const CLIP_LEVEL = 0.98;
-const FFT_SIZE = 16384; // ~3 Hz bins at 48 kHz, so the 25–40 Hz third-octave bands get several bins
-const SPECTRUM_MS = 100;
+export const FFT_SIZES = [2048, 4096, 8192, 16384];
 
 export class MicError extends Error {
   constructor(code, message) {
@@ -43,17 +33,19 @@ export class Meter {
     this.offset = offset;
     this.onLevel = null; // (dB(A) Fast) => void, about every 50 ms
     this.samples = 0;
-    this.job = null;
+    this.laf = -Infinity;
+    this.paused = false;
     this.stopped = false;
+    this.resetStats();
   }
 
-  // Best called from a tap handler; otherwise check `running` and call resume() on the next tap.
-  async start() {
+  // Best called from a tap handler; otherwise check `running` and call wake() on the next tap.
+  async start(fftSize = 4096) {
     if (!window.isSecureContext) throw micError('insecure');
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx || !navigator.mediaDevices?.getUserMedia) throw micError('unsupported');
     this.ctx = new Ctx();
-    // Not awaited: without a recent tap the context stays suspended until resume() is called again.
+    // Not awaited: without a recent tap the context stays suspended until wake() is called.
     this.ctx.resume().catch(() => {});
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
@@ -89,11 +81,8 @@ export class Meter {
         processorOptions: { sos: designAWeighting(fs), blockSize: Math.round(fs * 0.05) },
       });
       this.analyser = this.ctx.createAnalyser();
-      this.analyser.fftSize = FFT_SIZE;
-      this.analyser.smoothingTimeConstant = 0;
-      this.map = bandMap(this.analyser.frequencyBinCount, fs / FFT_SIZE);
-      this.liveDb = new Float32Array(this.analyser.frequencyBinCount);
-      this.livePower = new Float64Array(this.map.size);
+      this.analyser.smoothingTimeConstant = 0.5;
+      this.setFftSize(fftSize);
       // Both nodes must reach the destination to be rendered; the zero gain keeps it silent.
       const mute = this.ctx.createGain();
       mute.gain.value = 0;
@@ -103,6 +92,7 @@ export class Meter {
       this.analyser.connect(mute);
       mute.connect(this.ctx.destination);
       this.node.port.onmessage = (e) => this.handleBlock(e.data);
+      this.resetStats();
     } catch (err) {
       this.stop();
       throw err instanceof MicError ? err : micError('failed');
@@ -118,109 +108,65 @@ export class Meter {
     return this.ctx?.state === 'running';
   }
 
-  resume() {
+  wake() {
     return this.ctx?.resume();
   }
 
-  // Current A-weighted third-octave levels, dB(A), from the latest analyser frame.
-  liveBands() {
-    if (!this.analyser) return null;
-    this.analyser.getFloatFrequencyData(this.liveDb);
-    foldBands(this.liveDb, this.map, this.livePower);
-    return Array.from(this.livePower, (p) => toDb(p, this.offset));
+  setFftSize(n) {
+    this.analyser.fftSize = n;
+    const bins = n / 2;
+    this.binHz = this.sampleRate / n;
+    this.table = binLevelTable(bins, this.binHz);
+    this.rawDb = new Float32Array(bins);
+    this.levels = new Float32Array(bins);
+    this.freqs = Float32Array.from({ length: bins }, (_, k) => k * this.binHz);
+  }
+
+  // Current spectrum, dB(A) per analyser bin (calibrated). The array is reused between calls.
+  spectrum() {
+    this.analyser.getFloatFrequencyData(this.rawDb);
+    return binLevels(this.rawDb, this.table, this.offset, this.levels);
+  }
+
+  resetStats() {
+    this.stats = { n: 0, sumA: 0, max: 0, min: Infinity, clipped: false };
+    this.warmUntil = this.samples + WARMUP_SEC * this.sampleRate;
+  }
+
+  get elapsed() {
+    return this.stats.n / this.sampleRate;
+  }
+
+  get leq() {
+    return this.stats.n ? toDb(this.stats.sumA / this.stats.n, this.offset) : NaN;
+  }
+
+  get lmax() {
+    return this.stats.n ? toDb(this.stats.max, this.offset) : NaN;
+  }
+
+  get lmin() {
+    return this.stats.n ? toDb(this.stats.min, this.offset) : NaN;
   }
 
   handleBlock(b) {
     this.samples += b.n;
-    this.onLevel?.(toDb(b.fast, this.offset));
-    const job = this.job;
-    if (!job || this.samples < WARMUP_SEC * this.sampleRate) return;
-    job.n += b.n;
-    job.sumA += b.sumA;
-    job.fastMax = Math.max(job.fastMax, b.fastMax);
-    job.peak = Math.max(job.peak, b.peak);
-    job.onProgress?.({
-      elapsed: job.n / this.sampleRate,
-      leq: toDb(job.sumA / job.n, this.offset),
-      lmax: toDb(job.fastMax, this.offset),
-    });
-    if (job.n >= job.seconds * this.sampleRate) this.finish();
-  }
-
-  // Records for `seconds` and resolves with the analysed result.
-  record(seconds, onProgress) {
-    if (this.job) throw new Error('already recording');
-    return new Promise((resolve, reject) => {
-      const bins = this.analyser.frequencyBinCount;
-      const job = {
-        seconds,
-        onProgress,
-        resolve,
-        reject,
-        n: 0,
-        sumA: 0,
-        fastMax: 0,
-        peak: 0,
-        frames: 0,
-        power: new Float64Array(bins),
-        bandMax: new Float64Array(this.map.size),
-        scratchDb: new Float32Array(bins),
-        scratchPower: new Float64Array(bins),
-        scratchBands: new Float64Array(this.map.size),
-      };
-      job.timer = setInterval(() => {
-        if (job.n === 0) return; // still warming up
-        this.analyser.getFloatFrequencyData(job.scratchDb);
-        analyserDbToPower(job.scratchDb, job.scratchPower);
-        for (let k = 0; k < bins; k++) job.power[k] += job.scratchPower[k];
-        foldBands(job.scratchDb, this.map, job.scratchBands);
-        for (let b = 0; b < job.bandMax.length; b++) job.bandMax[b] = Math.max(job.bandMax[b], job.scratchBands[b]);
-        job.frames++;
-      }, SPECTRUM_MS);
-      this.job = job;
-    });
-  }
-
-  finish() {
-    const job = this.job;
-    this.job = null;
-    clearInterval(job.timer);
-    const binHz = this.sampleRate / FFT_SIZE;
-    const power = job.power.map((p) => p / Math.max(1, job.frames));
-    const powerA = aWeightPower(power, binHz);
-    const bandsA = bandPowers(powerA, binHz);
-    const peak = findPeak(powerA, binHz);
-    job.resolve({
-      leq: toDb(job.sumA / job.n, this.offset),
-      lmax: toDb(job.fastMax, this.offset),
-      clipped: job.peak >= CLIP_LEVEL,
-      bands: bandsA.map((p) => round1(toDb(p, this.offset))),
-      bandsMax: Array.from(job.bandMax, (p) => round1(toDb(p, this.offset))),
-      zones: zoneShares(bandsA),
-      peakHz: peak ? Math.round(peak.hz) : null,
-      peakProminence: peak ? round1(peak.prominence) : null,
-      durationSec: round1(job.n / this.sampleRate),
-      sampleRate: this.sampleRate,
-    });
-  }
-
-  cancel() {
-    if (!this.job) return;
-    clearInterval(this.job.timer);
-    this.job.reject(new MicError('cancelled', '측정을 취소했습니다.'));
-    this.job = null;
+    this.laf = toDb(b.fast, this.offset);
+    if (!this.paused) this.onLevel?.(this.laf);
+    if (this.paused || this.samples < this.warmUntil) return;
+    const s = this.stats;
+    s.n += b.n;
+    s.sumA += b.sumA;
+    s.max = Math.max(s.max, b.fastMax);
+    s.min = Math.min(s.min, b.fastMin);
+    if (b.peak >= CLIP_LEVEL) s.clipped = true;
   }
 
   stop() {
     this.stopped = true;
-    this.cancel();
     this.onLevel = null;
     if (this.node) this.node.port.onmessage = null;
     this.stream?.getTracks().forEach((t) => t.stop());
     if (this.ctx && this.ctx.state !== 'closed') this.ctx.close();
   }
-}
-
-function round1(v) {
-  return Number.isFinite(v) ? Math.round(v * 10) / 10 : null;
 }

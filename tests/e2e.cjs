@@ -107,24 +107,13 @@ async function newPage(browser, base, errors, { viewport = { width: 390, height:
     hasTouch: true,
     locale: 'ko-KR',
     timezoneId: 'Asia/Seoul',
-    permissions: mic ? ['microphone', 'geolocation'] : ['geolocation'],
-    geolocation: { latitude: 37.5112, longitude: 127.0981 },
+    permissions: mic ? ['microphone'] : [],
     acceptDownloads: true,
   });
-  // Short, no-delay measurements so the run takes seconds.
   await context.addInitScript((extra) => {
     if (localStorage.getItem('e2e-seeded')) return;
     localStorage.setItem('e2e-seeded', '1');
-    localStorage.setItem('noise-meter:settings:v1', JSON.stringify({
-      voice: false,
-      modes: {
-        drive: { warn: 75, limit: 80, duration: 3, delay: 0 },
-        idle: { warn: 55, limit: 65, duration: 3, delay: 0 },
-        exhaust: { warn: 95, limit: 100, duration: 3, delay: 0 },
-        inspect: { warn: null, limit: null, duration: 3, delay: 0 },
-      },
-      ...extra,
-    }));
+    localStorage.setItem('noise-meter:settings:v1', JSON.stringify(extra));
   }, seed);
   const page = await context.newPage();
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
@@ -137,19 +126,8 @@ async function shot(page, name, fullPage = false) {
   if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}.png`), fullPage });
 }
 
-async function measure(page, modeName) {
-  await page.evaluate(() => (location.hash = '#/'));
-  await page.waitForSelector('.meter[data-state="live"]');
-  await page.getByRole('radio', { name: modeName }).click();
-  await page.getByRole('button', { name: /측정 시작/ }).click();
-  await page.waitForSelector('.meter[data-state="recording"]');
-  await page.waitForURL(/#\/record\//, { timeout: 15000 });
-  await page.waitForSelector('.verdict');
-  const headline = parseFloat(await page.locator('.headline-value').textContent());
-  const verdict = (await page.locator('.verdict-label').textContent()).trim();
-  const peak = parseFloat((await page.locator('.figure').nth(2).locator('strong').textContent()).replace(/[^\d.]/g, ''));
-  return { headline, verdict, peak };
-}
+const num = async (page, sel) => parseFloat((await page.locator(sel).textContent()).replace(/[^\d.-]/g, ''));
+const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
 
 (async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'noise-e2e-'));
@@ -158,148 +136,135 @@ async function measure(page, modeName) {
   const base = `http://127.0.0.1:${server.address().port}`;
   const errors = [];
 
-  // Run 1: 1 kHz at -23 dBFS RMS -> 77.0 dB(A), drive mode (warn 75 / limit 80) -> 주의
+  // Run 1: 1 kHz at -23 dBFS RMS -> 77.0 dB(A) with the default +100 dB calibration
   const wav1 = path.join(tmp, 'tone-1k.wav');
   writeTone(wav1, 1000, 0.1);
   let browser = await launch(wav1);
   let page = await newPage(browser, base, errors);
-  await page.waitForSelector('.meter[data-state="live"]');
-  await page.getByRole('button', { name: /측정 시작/ }).click();
-  await page.locator('#f-vehicle').fill('12가 3456');
-  await page.locator('#f-driver').fill('김현장');
-  await shot(page, 'vehicle-sheet');
-  await page.getByRole('button', { name: '확인' }).click();
-  await page.waitForSelector('.meter[data-state="live"]');
-  await page.getByRole('button', { name: /측정 시작/ }).click();
-  await page.waitForURL(/#\/record\//, { timeout: 15000 });
-  let r = {
-    headline: parseFloat(await page.locator('.headline-value').textContent()),
-    verdict: (await page.locator('.verdict-label').textContent()).trim(),
-    peak: parseFloat((await page.locator('.figure').nth(2).locator('strong').textContent()).replace(/[^\d.]/g, '')),
-  };
+  await running(page);
+  await page.waitForTimeout(2500);
   const expected1 = toneDb(0.1);
-  console.log(`1 kHz: app ${r.headline} dB(A), expected ${expected1.toFixed(1)}; verdict ${r.verdict}; peak ${r.peak} Hz`);
-  assert.ok(Math.abs(r.headline - expected1) < 0.5, 'Leq of 1 kHz tone');
-  assert.equal(r.verdict, '주의');
-  assert.ok(Math.abs(r.peak - 1000) < 15, 'peak frequency');
-  await shot(page, 'result-drive', true);
+  const now1 = await num(page, '#a-now');
+  const leq1 = await num(page, '#a-leq');
+  const peak1 = await num(page, '#a-peak');
+  console.log(`1 kHz: now ${now1}, avg ${leq1} dB(A), expected ${expected1.toFixed(1)}; peak ${peak1} Hz`);
+  assert.ok(Math.abs(now1 - expected1) < 0.5, 'current level');
+  assert.ok(Math.abs(leq1 - expected1) < 0.3, 'average level');
+  assert.ok(Math.abs(peak1 - 1000) < 10, 'peak frequency');
 
-  // Share card falls back to a download in headless Chromium.
-  const [card] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '결과 보내기' }).click()]);
-  const cardPath = path.join(SHOTS || tmp, 'share-card.png');
-  await card.saveAs(cardPath);
-  assert.ok(fs.statSync(cardPath).size > 10000, 'share card PNG');
+  // pause freezes the clock, play resumes, reset clears
+  await page.getByRole('button', { name: '일시정지' }).click();
+  await page.waitForSelector('.analyzer[data-state="pause"]');
+  const t0 = await page.locator('#a-time').textContent();
+  await page.waitForTimeout(1300);
+  assert.equal(await page.locator('#a-time').textContent(), t0, 'clock stops while paused');
+  await page.getByRole('button', { name: '다시 측정' }).click();
+  await running(page);
+  await page.getByRole('button', { name: '초기화' }).click();
+  assert.equal(await page.locator('#a-time').textContent(), '00:00');
 
-  // Memo
-  await page.getByRole('button', { name: /메모·사진 추가/ }).click();
-  await page.locator('#f-memo').fill('시속 80km에서 오른쪽 뒤 윙 소리');
-  await page.getByRole('button', { name: '저장' }).click();
-  await page.waitForSelector('.memo');
+  // display options
+  await page.getByRole('button', { name: /FFT/ }).click();
+  assert.match(await page.locator('[data-opt=fft] b').textContent(), /8192/);
+  await page.getByRole('button', { name: /주파수 축/ }).click();
+  assert.match(await page.locator('[data-opt=scale] b').textContent(), /선형/);
+  await page.waitForTimeout(800);
+  await shot(page, 'tone-linear');
+  await page.getByRole('button', { name: /주파수 축/ }).click();
+  for (let i = 0; i < 3; i++) await page.getByRole('button', { name: /FFT/ }).click();
+  assert.match(await page.locator('[data-opt=fft] b').textContent(), /4096/);
 
-  // Second measurement in the same browser: inspect mode (no verdict)
-  await page.goto(`${base}/#/`);
-  r = await measure(page, '이상음');
-  assert.equal(r.verdict, '분석 완료');
-  assert.match(await page.locator('.verdict-msg').textContent(), /뚜렷한 소리/);
-  await shot(page, 'result-inspect', true);
-  await browser.close();
-
-  // Run 2: 100 Hz at -9 dBFS RMS; A-weighting takes off 19.1 dB -> 71.9 dB(A); idle (55 / 65) -> 초과
-  const wav2 = path.join(tmp, 'tone-100.wav');
-  writeTone(wav2, 100, 0.5);
-  browser = await launch(wav2);
-  page = await newPage(browser, base, errors);
-  await page.evaluate(() => {
-    localStorage.setItem('noise-meter:settings:v1', JSON.stringify({
-      ...JSON.parse(localStorage.getItem('noise-meter:settings:v1')),
-      vehicle: '34나 5678',
-      driver: '박기사',
-    }));
-  });
-  await page.reload();
-  r = await measure(page, '공회전');
-  const expected2 = toneDb(0.5, -19.1);
-  console.log(`100 Hz: app ${r.headline} dB(A), expected ${expected2.toFixed(1)}; verdict ${r.verdict}; peak ${r.peak} Hz`);
-  assert.ok(Math.abs(r.headline - expected2) < 0.6, 'A-weighted Leq of 100 Hz tone');
-  assert.equal(r.verdict, '초과');
-  assert.ok(Math.abs(r.peak - 100) < 5);
-  assert.match(await page.locator('.lead').textContent(), /저음/);
-
-  r = await measure(page, '배기');
-  console.log(`exhaust (LAFmax): app ${r.headline} dB(A); verdict ${r.verdict}`);
-  assert.ok(Math.abs(r.headline - expected2) < 0.6, 'LAFmax of steady tone equals Leq');
-  assert.equal(r.verdict, '정상');
-
-  // History, CSV, report
-  await page.goto(`${base}/#/history`);
+  // save -> history -> saved analysis -> share card + CSV
+  await page.waitForTimeout(1500);
+  await page.getByRole('button', { name: '저장', exact: true }).first().click();
+  const sheet = page.locator('dialog.sheet');
+  await sheet.locator('#f-vehicle').fill('12가 3456');
+  await sheet.locator('#f-memo').fill('공회전 1000Hz 시험음');
+  await sheet.getByRole('button', { name: '저장' }).click();
+  await page.waitForSelector('#toast:not([hidden])');
+  await page.locator('.tabbar a[data-tab=history]').click();
   await page.waitForSelector('.record-row');
-  assert.equal(await page.locator('.record-row').count(), 2);
-  await shot(page, 'history', true);
+  assert.equal(await page.locator('.record-row').count(), 1);
   const [csv] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: /엑셀/ }).click()]);
   const csvText = fs.readFileSync(await csv.path(), 'utf8');
   assert.ok(csvText.startsWith('﻿일시,차량번호'), 'CSV header with BOM');
-  assert.equal(csvText.trim().split('\r\n').length, 3);
+  await page.locator('.record-row').click();
+  await page.waitForSelector('.stats-grid');
+  assert.ok(Math.abs((await num(page, '.stats-grid div:first-child b')) - expected1) < 0.3);
+  const [card] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '결과 보내기' }).click()]);
+  const cardPath = path.join(SHOTS || tmp, 'share-card.png');
+  await card.saveAs(cardPath);
+  assert.ok(fs.statSync(cardPath).size > 20000, 'share card PNG');
 
-  await page.getByRole('link', { name: '보고서 만들기' }).click();
-  await page.waitForSelector('.report-table');
-  await shot(page, 'report', true);
-  if (SHOTS) {
-    await page.emulateMedia({ media: 'print' });
-    await page.pdf({ path: path.join(SHOTS, 'report.pdf'), format: 'A4', printBackground: true });
-    await page.emulateMedia({ media: 'screen' });
-  }
-
-  // Admin settings behind the PIN
-  await page.goto(`${base}/#/settings`);
+  // calibration: tell the app a reference meter read 3 dB more -> readings go up by 3 dB
+  await page.locator('.tabbar a[data-tab=settings]').click();
   await page.locator('#f-pin').fill('1111');
   await page.getByRole('button', { name: '확인' }).click();
   await page.waitForSelector('#pin-error:not([hidden])');
   await page.locator('#f-pin').fill('0000');
   await page.getByRole('button', { name: '확인' }).click();
-  await page.locator('#f-company').fill('한빛운수');
-  await page.locator('#f-drive-warn').fill('85');
-  await page.getByRole('button', { name: '설정 저장' }).click();
-  await page.waitForSelector('#settings-error:not([hidden])'); // warn 85 > limit 80 is refused
-  await page.locator('#f-drive-warn').fill('76');
-  await page.getByRole('button', { name: '설정 저장' }).click();
-  await page.waitForFunction(() => document.querySelector('#brand-company').textContent === '한빛운수');
+  await page.getByRole('button', { name: /보정 측정/ }).click();
+  await page.waitForSelector('#cal-result:not([hidden])', { timeout: 15000 });
+  const phone = await num(page, '#cal-phone');
+  assert.ok(Math.abs(phone - expected1) < 0.3, `calibration reading ${phone}`);
+  await page.locator('#f-cal-ref').fill(String(Math.round((phone + 3) * 10) / 10));
+  await page.getByRole('button', { name: '적용' }).click();
+  assert.match(await page.locator('#cal-offset').textContent(), /^103(\.0)? dB$/);
   await shot(page, 'settings', true);
-
+  await page.locator('.tabbar a[data-tab=home]').click();
+  await running(page);
+  await page.waitForTimeout(2000);
+  const now1c = await num(page, '#a-now');
+  console.log(`after +3 dB calibration: now ${now1c}`);
+  assert.ok(Math.abs(now1c - (expected1 + 3)) < 0.5, 'calibrated level');
   await browser.close();
 
-  // Run 3: cabin-like noise, the main screen in both orientations (screenshots only)
+  // Run 2: 100 Hz at -9 dBFS RMS; A-weighting takes off 19.1 dB -> 71.9 dB(A)
+  const wav2 = path.join(tmp, 'tone-100.wav');
+  writeTone(wav2, 100, 0.5);
+  browser = await launch(wav2);
+  page = await newPage(browser, base, errors);
+  await running(page);
+  await page.waitForTimeout(2500);
+  const expected2 = toneDb(0.5, -19.1);
+  const now2 = await num(page, '#a-now');
+  const peak2 = await num(page, '#a-peak');
+  console.log(`100 Hz: now ${now2} dB(A), expected ${expected2.toFixed(1)}; peak ${peak2} Hz`);
+  assert.ok(Math.abs(now2 - expected2) < 0.6, 'A-weighted level of 100 Hz tone');
+  assert.ok(Math.abs(peak2 - 100) < 6, 'low-frequency peak');
+  await browser.close();
+
+  // Run 3: cabin-like noise, screenshots in both orientations
   const wav3 = path.join(tmp, 'cabin.wav');
   writeCabinNoise(wav3);
   browser = await launch(wav3);
-  const seed = {
-    vehicle: '12가 3456',
-    driver: '김현장',
-    modes: { drive: { warn: 75, limit: 80, duration: 6, delay: 0 } },
-  };
   for (const [name, viewport] of [['portrait', { width: 390, height: 844 }], ['landscape', { width: 844, height: 390 }]]) {
-    page = await newPage(browser, base, errors, { viewport, mic: false, seed });
-    await page.waitForSelector('#r-overlay:not([hidden])');
+    page = await newPage(browser, base, errors, { viewport, mic: false });
+    await page.waitForSelector('#a-overlay:not([hidden])');
     await shot(page, `main-${name}-first`);
     await page.context().close();
 
-    page = await newPage(browser, base, errors, { viewport, seed });
-    await page.waitForSelector('.meter[data-state="live"]');
-    await page.waitForTimeout(1500);
+    page = await newPage(browser, base, errors, { viewport, seed: { vehicle: '12가 3456', recentVehicles: ['12가 3456', '34나 5678'] } });
+    await running(page);
+    await page.waitForTimeout(4000);
     await shot(page, `main-${name}-live`);
-    await page.getByRole('button', { name: /측정 시작/ }).click();
-    await page.waitForSelector('.meter[data-state="recording"]');
-    await page.waitForTimeout(3500);
-    await shot(page, `main-${name}-recording`);
-    await page.waitForURL(/#\/record\//, { timeout: 15000 });
-    await page.waitForTimeout(3200); // let the "saved" toast go
-    await shot(page, `result-${name}`);
-    if (name === 'portrait') {
-      await page.evaluate(() => (location.hash = '#/'));
-      await page.emulateMedia({ colorScheme: 'dark' });
-      await page.waitForSelector('.meter[data-state="live"]');
-      await page.waitForTimeout(1500);
-      await shot(page, 'main-portrait-dark');
-    }
+    await page.getByRole('button', { name: '저장', exact: true }).first().click();
+    await page.waitForSelector('dialog.sheet');
+    await shot(page, `save-${name}`);
+    await page.locator('dialog.sheet #f-memo').fill('주행 80km/h, 오른쪽 뒤 윙 소리');
+    await page.locator('dialog.sheet').getByRole('button', { name: '저장' }).click();
+    await page.waitForSelector('#toast:not([hidden])');
+    await page.getByRole('button', { name: '일시정지' }).click();
+    await page.waitForSelector('.analyzer[data-state="pause"]');
+    await page.waitForTimeout(3000); // let the toast go
+    await shot(page, `main-${name}-paused`);
+    await page.evaluate(() => (location.hash = '#/history'));
+    await page.waitForSelector('.record-row');
+    await shot(page, `history-${name}`);
+    await page.locator('.record-row').first().click();
+    await page.waitForSelector('.stats-grid');
+    await page.waitForTimeout(300);
+    await shot(page, `record-${name}`);
     await page.context().close();
   }
   await browser.close();

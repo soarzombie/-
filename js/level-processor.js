@@ -1,6 +1,6 @@
 // AudioWorklet: A-weights the microphone signal sample by sample and reports
-// energy sums plus the Fast (125 ms) time-weighted level, so Leq and LAFmax are
-// computed from every sample rather than from sampled analyser frames.
+// energy sums plus the Fast (125 ms) time-weighted level, so Leq, LAFmax and LAFmin
+// are computed from every sample rather than from sampled analyser frames.
 // Filter coefficients come from dsp.js via processorOptions.
 
 class LevelProcessor extends AudioWorkletProcessor {
@@ -20,6 +20,7 @@ class LevelProcessor extends AudioWorkletProcessor {
     this.sumA = 0;
     this.sumZ = 0;
     this.fastMax = 0;
+    this.fastMin = Infinity;
     this.peak = 0;
   }
 
@@ -44,6 +45,7 @@ class LevelProcessor extends AudioWorkletProcessor {
       this.sumZ += x * x;
       this.fast += (y2 - this.fast) * this.kFast;
       if (this.fast > this.fastMax) this.fastMax = this.fast;
+      if (this.fast < this.fastMin) this.fastMin = this.fast;
       const ax = x < 0 ? -x : x;
       if (ax > this.peak) this.peak = ax;
       if (++this.n >= this.blockSize) {
@@ -53,6 +55,7 @@ class LevelProcessor extends AudioWorkletProcessor {
           sumZ: this.sumZ,
           fast: this.fast,
           fastMax: this.fastMax,
+          fastMin: this.fastMin,
           peak: this.peak,
         });
         this.reset();

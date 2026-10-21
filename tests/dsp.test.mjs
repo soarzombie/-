@@ -3,18 +3,16 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import {
-  BANDS,
   aWeightDb,
   designAWeighting,
   sosMagnitude,
-  analyserDbToPower,
-  aWeightPower,
-  bandPowers,
-  bandMap,
-  foldBands,
-  zoneShares,
-  findPeak,
-  judge,
+  binLevelTable,
+  binLevels,
+  totalLevel,
+  rangeIndex,
+  reduceRanges,
+  logGrid,
+  findPeaks,
   toDb,
 } from '../js/dsp.js';
 
@@ -41,14 +39,6 @@ for (const fs of [44100, 48000]) {
     }
   });
 }
-
-test('third-octave bands run 25 Hz – 10 kHz, contiguous, octave centres marked', () => {
-  assert.equal(BANDS.length, 27);
-  assert.equal(BANDS[0].label, '25');
-  assert.equal(BANDS[26].label, '10k');
-  assert.deepEqual(BANDS.filter((b) => b.major).map((b) => b.label), ['31.5', '63', '125', '250', '500', '1k', '2k', '4k', '8k']);
-  for (let i = 1; i < BANDS.length; i++) assert.ok(Math.abs(BANDS[i].lo - BANDS[i - 1].hi) < 1e-9);
-});
 
 // Reference FFT mirroring the AnalyserNode spec: Blackman window, 1/N scaling, 20*log10|X|.
 function analyserSpectrum(x) {
@@ -92,76 +82,69 @@ function analyserSpectrum(x) {
 
 const sine = (f, amp, fs, N) => Float64Array.from({ length: N }, (_, n) => amp * Math.sin((2 * Math.PI * f * n) / fs));
 
-test('analyser bins convert back to the true mean square and land in the right band', () => {
-  const fs = 48000;
-  const N = 8192;
-  const amp = 0.25;
-  const power = analyserDbToPower(analyserSpectrum(sine(1000, amp, fs, N)));
-  const bands = bandPowers(power, fs / N);
-  const total = bands.reduce((a, b) => a + b, 0);
-  assert.ok(Math.abs(toDb(total) - toDb((amp * amp) / 2)) < 0.2, `total ${toDb(total)} dBFS`);
-  assert.equal(BANDS[bands.indexOf(Math.max(...bands))].label, '1k');
-});
+const noise = (seed, n, amp) => {
+  let x = seed;
+  return Float64Array.from({ length: n }, () => amp * (((x = (x * 16807) % 2147483647) / 2147483647) * 2 - 1));
+};
 
-test('A-weighting a 100 Hz tone lowers it by about 19 dB', () => {
+test('per-bin dB(A) levels add up to the true A-weighted level of a tone', () => {
   const fs = 48000;
-  const N = 8192;
-  const power = analyserDbToPower(analyserSpectrum(sine(100, 0.25, fs, N)));
-  const z = bandPowers(power, fs / N).reduce((a, b) => a + b, 0);
-  const a = bandPowers(aWeightPower(power, fs / N), fs / N).reduce((s, b) => s + b, 0);
-  assert.ok(Math.abs(toDb(a) - toDb(z) - aWeightDb(100)) < 0.5);
-});
-
-test('foldBands (live path) equals bandPowers of the A-weighted spectrum (recorded path)', () => {
-  const fs = 48000;
-  const N = 16384;
-  const db = analyserSpectrum(sine(80, 0.2, fs, N).map((v, n) => v + 0.05 * Math.sin((2 * Math.PI * 2500 * n) / fs)));
-  const live = foldBands(db, bandMap(N / 2, fs / N));
-  const recorded = bandPowers(aWeightPower(analyserDbToPower(db), fs / N), fs / N);
-  live.forEach((p, i) => {
-    if (recorded[i] > 1e-12) assert.ok(Math.abs(toDb(p) - toDb(recorded[i])) < 0.01, `band ${BANDS[i].label}`);
-  });
-  const loudest = live.indexOf(Math.max(...live));
-  assert.equal(BANDS[loudest].label, '2.5k'); // A-weighting lifts 2.5 kHz over the stronger 80 Hz tone
-});
-
-test('findPeak locates a tone and rates it prominent over noise', () => {
-  const fs = 48000;
-  const N = 8192;
-  let seed = 7;
-  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 2 - 1;
-  const x = sine(1250, 0.1, fs, N).map((v) => v + 0.01 * rand());
-  const peak = findPeak(analyserDbToPower(analyserSpectrum(x)), fs / N);
-  assert.ok(Math.abs(peak.hz - 1250) < 3, `peak at ${peak.hz}`);
-  assert.ok(peak.prominence > 15, `prominence ${peak.prominence}`);
-
-  // The app averages ~100 analyser frames per measurement; 16 is enough to tame noise variance.
-  const avg = new Float64Array(N / 2);
-  for (let frame = 0; frame < 16; frame++) {
-    const p = analyserDbToPower(analyserSpectrum(Float64Array.from({ length: N }, () => 0.05 * rand())));
-    for (let k = 0; k < avg.length; k++) avg[k] += p[k] / 16;
+  const N = 4096;
+  for (const [f, amp] of [[1000, 0.25], [100, 0.5], [4000, 0.1]]) {
+    const levels = binLevels(analyserSpectrum(sine(f, amp, fs, N)), binLevelTable(N / 2, fs / N), 100);
+    const expected = toDb((amp * amp) / 2, 100) + aWeightDb(f);
+    assert.ok(Math.abs(totalLevel(levels) - expected) < 0.3, `${f} Hz: ${totalLevel(levels).toFixed(2)} vs ${expected.toFixed(2)}`);
   }
-  const flat = findPeak(avg, fs / N);
-  assert.ok(flat.prominence < 6, `noise prominence ${flat.prominence}`);
 });
 
-test('zoneShares sums to 100 and follows band energy', () => {
-  const power = BANDS.map((b) => (b.label === '63' || b.label === '125' ? 1 : b.label === '4k' ? 2 : 0));
-  const shares = zoneShares(power);
-  assert.equal(shares.low + shares.mid + shares.high, 100);
-  assert.equal(shares.low, 50);
-  assert.equal(shares.mid, 0);
-  assert.equal(shares.high, 50);
-  assert.deepEqual(zoneShares(BANDS.map(() => 0)), { low: 0, mid: 0, high: 0 });
+test('findPeaks returns the two tones in noise, loudest first, with accurate frequencies', () => {
+  const fs = 48000;
+  const N = 8192;
+  const n = noise(7, N, 0.01);
+  const x = sine(1250, 0.1, fs, N).map((v, i) => v + 0.04 * Math.sin((2 * Math.PI * 3150 * i) / fs) + n[i]);
+  const levels = binLevels(analyserSpectrum(x), binLevelTable(N / 2, fs / N), 0);
+  const peaks = findPeaks(levels, fs / N, { count: 2 });
+  assert.equal(peaks.length, 2);
+  assert.ok(Math.abs(peaks[0].hz - 1250) < 2, `first ${peaks[0].hz}`);
+  assert.ok(Math.abs(peaks[1].hz - 3150) < 2, `second ${peaks[1].hz}`);
 });
 
-test('judge compares the rounded value with the criteria', () => {
-  assert.equal(judge(74.94, 75, 80), 'ok');
-  assert.equal(judge(74.96, 75, 80), 'warn');
-  assert.equal(judge(80.0, 75, 80), 'warn');
-  assert.equal(judge(80.06, 75, 80), 'over');
-  assert.equal(judge(70, null, null), 'none');
-  assert.equal(judge(NaN, 75, 80), 'none');
+test('findPeaks finds a low-frequency tone where a third octave spans only a few bins', () => {
+  const fs = 48000;
+  const N = 4096; // 11.7 Hz bins: 100 Hz +-1/3 octave is about 4 bins
+  const n = noise(11, N, 0.002);
+  const levels = binLevels(analyserSpectrum(sine(100, 0.5, fs, N).map((v, i) => v + n[i])), binLevelTable(N / 2, fs / N), 0);
+  const [peak] = findPeaks(levels, fs / N, { count: 2 });
+  assert.ok(peak && Math.abs(peak.hz - 100) < 3, `peak ${peak?.hz}`);
+});
+
+test('findPeaks finds nothing prominent in averaged broadband noise', () => {
+  const fs = 48000;
+  const N = 4096;
+  const table = binLevelTable(N / 2, fs / N);
+  const pow = new Float64Array(N / 2);
+  for (let frame = 0; frame < 32; frame++) {
+    const l = binLevels(analyserSpectrum(noise(frame + 3, N, 0.05)), table, 0);
+    l.forEach((v, k) => (pow[k] += 10 ** (v / 10) / 32));
+  }
+  const avg = Float32Array.from(pow, (p) => 10 * Math.log10(p));
+  assert.deepEqual(findPeaks(avg, fs / N, { count: 2 }), []);
+});
+
+test('reduceRanges keeps the loudest point per range and interpolates where a range is empty', () => {
+  const freqs = Float32Array.from([10, 20, 30, 40, 50, 60]);
+  const levels = Float32Array.from([1, 5, 2, 8, 3, 0]);
+  const edges = Float32Array.from([10, 35, 36, 61]);
+  const centres = Float32Array.from([22, 35.5, 50]);
+  const out = reduceRanges(levels, freqs, rangeIndex(freqs, edges), centres);
+  [5, 2 + (8 - 2) * 0.55, 8].forEach((v, i) => assert.ok(Math.abs(out[i] - v) < 1e-5, `range ${i}: ${out[i]}`));
+});
+
+test('logGrid spans fmin to fmax with geometric centres', () => {
+  const { centres, edges } = logGrid(10, 20, 20000);
+  assert.equal(edges.length, 11);
+  assert.ok(Math.abs(edges[0] - 20) < 1e-3 && Math.abs(edges[10] - 20000) < 0.1);
+  assert.ok(Math.abs(centres[0] - Math.sqrt(edges[0] * edges[1])) < 1e-3);
 });
 
 test('worklet reports Leq and Fast max that match the input tone', () => {
@@ -195,6 +178,8 @@ test('worklet reports Leq and Fast max that match the input tone', () => {
   assert.ok(Math.abs(leqA - expected) < 0.05, `LAeq ${leqA} vs ${expected}`);
   assert.ok(Math.abs(leqZ - expected) < 0.05);
   const fastMax = toDb(Math.max(...settled.map((m) => m.fastMax)));
+  const fastMin = toDb(Math.min(...settled.map((m) => m.fastMin)));
   assert.ok(Math.abs(fastMax - expected) < 0.2, `LAFmax ${fastMax}`);
+  assert.ok(Math.abs(fastMin - expected) < 0.2, `LAFmin ${fastMin}`);
   assert.ok(Math.abs(settled[0].peak - amp) < 0.01);
 });
