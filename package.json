@@ -1,6 +1,6 @@
 {
   "name": "vehicle-noise-meter",
-  "version": "0.13.2",
+  "version": "0.13.3",
   "private": true,
   "description": "현장용 실시간 소음 분석 웹앱 (PWA)",
   "scripts": {

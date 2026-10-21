@@ -10,6 +10,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { spawnSync } = require('node:child_process');
 const assert = require('node:assert/strict');
 const { chromium } = require('playwright');
 
@@ -130,6 +131,17 @@ function writeDemoFile(file, seconds = 20, rate = 48000) {
   fs.writeFileSync(file, buf);
 }
 
+// The average colour [r, g, b] of part of an image, or of a video's last frame (ffmpeg's crop: w:h:x:y,
+// which may use iw/ih); null where ffmpeg is not installed.
+const HAVE_FFMPEG = !spawnSync('ffmpeg', ['-version']).error;
+function colourAt(file, crop) {
+  if (!HAVE_FFMPEG) return null;
+  const out = spawnSync('ffmpeg', ['-v', 'error', '-i', file, '-vf', `crop=${crop},scale=1:1`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 1 << 26 });
+  assert.ok(out.stdout?.length >= 3, `ffmpeg read ${file}: ${out.stderr}`);
+  return [...out.stdout.subarray(-3)];
+}
+const near = (rgb, want) => rgb.every((v, i) => Math.abs(v - want[i]) < 60);
+
 const toneDb = (amp, weight = 0) => 20 * Math.log10(amp / Math.SQRT2) + OFFSET + weight;
 
 async function launch(wav) {
@@ -151,7 +163,7 @@ async function newPage(browser, base, errors, { viewport = { width: 390, height:
     hasTouch: true,
     locale: 'ko-KR',
     timezoneId: 'Asia/Seoul',
-    permissions: [...(mic ? ['microphone'] : []), ...(geo ? ['geolocation'] : [])],
+    permissions: [...(mic ? ['microphone', 'camera'] : []), ...(geo ? ['geolocation'] : [])],
     ...(geo ? { geolocation: geo } : {}),
     acceptDownloads: true,
   });
@@ -360,6 +372,82 @@ async function cursorDb(page, hz) {
   assert.ok(mb.x >= 0 && mb.y >= 0 && mb.x + mb.width <= 391 && mb.y + mb.height <= 845, `the menu stays on screen: ${JSON.stringify(mb)}`);
   await shot(page, 'sideways-menu');
   await page.keyboard.press('Escape');
+  // the camera window is dragged in the page's own directions: down the screen is right on the page
+  await page.getByRole('button', { name: '영상 녹화' }).click();
+  await page.waitForSelector('#a-cam:not([hidden])');
+  const camAt = () => page.locator('#a-cam').evaluate((e) => [e.offsetLeft, e.offsetTop]);
+  const sideCam0 = await camAt();
+  const sb = await page.locator('#a-cam').boundingBox();
+  const dragCam = async (dx, dy) => {
+    await page.mouse.move(sb.x + sb.width / 2, sb.y + sb.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(sb.x + sb.width / 2 + dx, sb.y + sb.height / 2 + dy, { steps: 5 });
+    await page.mouse.up();
+  };
+  await dragCam(-40, 70);
+  const sideCam1 = await camAt();
+  console.log(`camera window turned sideways: ${sideCam0} -> ${sideCam1}`);
+  assert.ok(Math.abs(sideCam1[0] - sideCam0[0] - 70) < 2 && Math.abs(sideCam1[1] - sideCam0[1] - 40) < 2, 'moved right and down on the page');
+  await shot(page, 'sideways-camera');
+  // the window is now where the finger let go: from there back to where it was
+  await page.mouse.move(sb.x + sb.width / 2 - 40, sb.y + sb.height / 2 + 70);
+  await page.mouse.down();
+  await page.mouse.move(sb.x + sb.width / 2, sb.y + sb.height / 2, { steps: 5 });
+  await page.mouse.up();
+  assert.deepEqual(await camAt(), sideCam0, 'and back');
+  await page.getByRole('button', { name: '영상 정지' }).click();
+  await page.waitForSelector('dialog.sheet h2:has-text("영상 녹화 끝")');
+  await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
+  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+  // as on an iPhone, the camera's picture stays portrait while the page is turned: a fake portrait
+  // camera, red above and blue below, shows red at the top of the screen (upright for the person holding
+  // the phone sideways) and, in the video, red on the left of the window (the page's own up is right)
+  await page.evaluate(() => {
+    const real = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    window.e2eRealGum = real;
+    navigator.mediaDevices.getUserMedia = (c) => {
+      if (!c.video) return real(c);
+      const cv = document.createElement('canvas');
+      cv.width = 360;
+      cv.height = 640;
+      const g = cv.getContext('2d');
+      const paint = () => {
+        g.fillStyle = '#ff0000';
+        g.fillRect(0, 0, 360, 320);
+        g.fillStyle = '#0000ff';
+        g.fillRect(0, 320, 360, 320);
+      };
+      paint();
+      setInterval(paint, 100);
+      return Promise.resolve(cv.captureStream(15));
+    };
+  });
+  await page.getByRole('button', { name: '영상 녹화' }).click();
+  await page.waitForSelector('#a-cam:not([hidden])');
+  const tc = await page.locator('#a-cam').evaluate((e) => ({ cw: e.parentElement.clientWidth, x: e.offsetLeft, y: e.offsetTop, w: e.offsetWidth, h: e.offsetHeight, t: e.querySelector('video').style.transform }));
+  assert.ok(tc.w > tc.h && /rotate\(-90deg\)/.test(tc.t), `a portrait camera is shown turned, as a wide window: ${JSON.stringify(tc)}`);
+  await page.waitForTimeout(1500);
+  if (HAVE_FFMPEG) {
+    const png = path.join(tmp, 'sideways-camera.png');
+    fs.writeFileSync(png, await page.screenshot({ clip: await page.locator('#a-cam').boundingBox() }));
+    const top = colourAt(png, 'iw*0.6:ih*0.25:iw*0.2:ih*0.1');
+    const bottom = colourAt(png, 'iw*0.6:ih*0.25:iw*0.2:ih*0.65');
+    console.log(`turned camera on screen: top ${top}, bottom ${bottom}`);
+    assert.ok(near(top, [255, 0, 0]) && near(bottom, [0, 0, 255]), 'upright on screen');
+  }
+  await page.getByRole('button', { name: '영상 정지' }).click();
+  await page.waitForSelector('dialog.sheet h2:has-text("영상 녹화 끝")');
+  const [tv] = await Promise.all([page.waitForEvent('download'), page.locator('dialog.sheet').getByRole('button', { name: '보내기' }).click()]);
+  if (HAVE_FFMPEG) {
+    const k = Math.min(2, 1280 / tc.cw);
+    const crop = (x, y, w, h) => [w, h, x, 64 + y].map((v) => Math.round(v * k)).join(':');
+    const left = colourAt(await tv.path(), crop(tc.x + tc.w * 0.1, tc.y + tc.h * 0.2, tc.w * 0.25, tc.h * 0.6));
+    const right = colourAt(await tv.path(), crop(tc.x + tc.w * 0.65, tc.y + tc.h * 0.2, tc.w * 0.25, tc.h * 0.6));
+    console.log(`turned camera in the video: left ${left}, right ${right}`);
+    assert.ok(near(left, [255, 0, 0]) && near(right, [0, 0, 255]), 'upright in the video');
+  }
+  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+  await page.evaluate(() => (navigator.mediaDevices.getUserMedia = window.e2eRealGum));
   await page.getByRole('button', { name: '세로 화면으로' }).click();
   await page.waitForFunction(() => document.documentElement.dataset.layout === 'portrait' && document.documentElement.dataset.rotate === 'off');
   assert.ok(await page.locator('.tabbar').isVisible(), 'back to portrait');
@@ -869,15 +957,37 @@ async function cursorDb(page, hz) {
   await chartSettings(page, { autoSave: 'off' });
   await page.evaluate(async () => (await import('./js/settings.js')).saveSettings({ vehicle: '' }));
 
-  // 영상: the readings and graphs with the sound as one video file, offered to send when it stops
+  // 영상: the readings, graphs and the camera window with the sound as one video file, offered to send
+  // when it stops; the camera window (Chromium's fake camera here) is dragged to another place
   await page.getByRole('button', { name: '영상 녹화' }).click();
   await page.waitForSelector('#a-video-badge:not([hidden])');
+  await page.waitForSelector('#a-cam:not([hidden])');
+  assert.ok(await page.locator('#a-cam video').evaluate((v) => v.videoWidth > 0 && !v.paused), 'the camera shows');
+  const camBox = await page.locator('#a-cam').boundingBox();
+  const chartArea = await page.locator('.an-chart').boundingBox();
+  await page.mouse.move(camBox.x + camBox.width / 2, camBox.y + camBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(camBox.x + camBox.width / 2 + 120, camBox.y + camBox.height / 2 + 90, { steps: 6 });
+  await page.mouse.move(chartArea.x + chartArea.width + 300, camBox.y + camBox.height / 2 + 90, { steps: 4 }); // past the edge: stays inside
+  await page.mouse.up();
+  const moved = await page.locator('#a-cam').boundingBox();
+  assert.ok(Math.abs(moved.y - camBox.y - 90) < 2, `camera window moved down (${camBox.y} -> ${moved.y})`);
+  assert.ok(Math.abs(moved.x + moved.width - (chartArea.x + chartArea.width - 1)) < 2, `camera window kept inside the graph (${moved.x + moved.width} vs ${chartArea.x + chartArea.width})`);
+  const camPos = await page.evaluate(async () => (await import('./js/settings.js')).getSettings().camPos);
+  assert.ok(camPos && camPos[0] === 1 && camPos[1] > 0, `camera place remembered (${camPos})`);
   await page.waitForTimeout(2600);
-  assert.match(await page.locator('#a-video-time').textContent(), /00:0[23]/);
+  assert.match(await page.locator('#a-video-time').textContent(), /00:0[2-4]/);
   await shot(page, 'video');
+  // where the camera window sits in the graph box (layout pixels), to find it in the video
+  const camIn = await page.evaluate(() => {
+    const c = document.querySelector('.an-chart');
+    const e = document.querySelector('#a-cam');
+    return { cw: c.clientWidth, x: e.offsetLeft, y: e.offsetTop, w: e.offsetWidth, h: e.offsetHeight };
+  });
   await page.getByRole('button', { name: '영상 정지' }).click();
   await page.waitForSelector('dialog.sheet h2:has-text("영상 녹화 끝")');
   const vText = await page.locator('dialog.sheet p').first().textContent();
+  assert.match(await page.locator('dialog.sheet .fine').textContent(), /카메라 화면/);
   const [vid] = await Promise.all([page.waitForEvent('download'), page.locator('dialog.sheet').getByRole('button', { name: '보내기' }).click()]);
   const vBytes = fs.readFileSync(await vid.path());
   const isMp4 = vBytes.subarray(4, 8).toString() === 'ftyp';
@@ -885,7 +995,22 @@ async function cursorDb(page, hz) {
   console.log(`video: ${vText}, ${vBytes.length} bytes, ${isMp4 ? 'MP4' : isWebm ? 'WebM' : 'unknown'}`);
   assert.ok(vBytes.length > 20000 && (isMp4 || isWebm), 'a playable video file');
   if (SHOTS) fs.writeFileSync(path.join(SHOTS, `video.${isMp4 ? 'mp4' : 'webm'}`), vBytes);
+  if (HAVE_FFMPEG) {
+    // the camera window is in the video where it sat on screen: its middle is the camera's picture,
+    // not the graph's background (64 px of readings above the graph, scaled like the frame)
+    const vf = path.join(tmp, `video.${isMp4 ? 'mp4' : 'webm'}`);
+    fs.writeFileSync(vf, vBytes);
+    const k = Math.min(2, 1280 / camIn.cw);
+    const crop = (x, y, w, h) => [w, h, x, 64 + y].map((v) => Math.round(v * k)).join(':');
+    const inCam = colourAt(vf, crop(camIn.x + camIn.w * 0.3, camIn.y + camIn.h * 0.3, camIn.w * 0.4, camIn.h * 0.4));
+    const left = camIn.x + camIn.w / 2 > camIn.cw / 2 ? 10 : camIn.cw - 70; // the other side of the graph
+    const graph = colourAt(vf, crop(left, camIn.y + camIn.h * 0.3, 60, camIn.h * 0.4));
+    console.log(`video frame: camera ${inCam}, graph ${graph}`);
+    assert.ok(inCam.reduce((a, v, i) => a + Math.abs(v - graph[i]), 0) > 60, 'the camera picture is in the video');
+  }
   await page.waitForSelector('dialog.sheet', { state: 'detached' });
+  assert.ok(await page.locator('#a-cam').isHidden(), 'the camera window closes with the video');
+  assert.equal(await page.locator('#a-cam video').evaluate((v) => v.srcObject), null, 'the camera is off');
 
   // attached file: 3 s of 1 kHz (77.0 dB(A)) then 3 s of 100 Hz (71.9 dB(A))
   // (passed as a buffer: Playwright here cannot attach files from non-ASCII paths, and the Korean name

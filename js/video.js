@@ -1,6 +1,6 @@
-// Video of the analyzer for sharing: the readings and the graphs on screen are drawn onto one canvas
-// about 30 times a second and recorded together with the microphone's sound (MediaRecorder: MP4 where
-// the browser can, as on iPhone and recent Chrome, else WebM).
+// Video of the analyzer for sharing: the readings, the graphs on screen and the camera window (camera.js)
+// are drawn onto one canvas about 30 times a second and recorded together with the microphone's sound
+// (MediaRecorder: MP4 where the browser can, as on iPhone and recent Chrome, else WebM).
 
 // H.264 MP4 plays everywhere (messengers, iPhone); without it WebM, and a plain MP4 last (some browsers
 // put VP9 in it, which phones may not play)
@@ -30,9 +30,11 @@ function offsetIn(el, root) {
 
 export class ScreenVideo {
   // chart: the element holding the graph canvases; readings(): { now, unit, tw, min, avg, max, time,
-  // extra, foot } as text; audioTrack: the microphone track; colors: { bg, panel, ink, sub }.
-  constructor({ chart, readings, audioTrack, colors }) {
+  // extra, foot } as text; audioTrack: the microphone track; colors: { bg, panel, ink, sub }; camera: the
+  // CameraWindow (drawn where it sits while it is on).
+  constructor({ chart, readings, audioTrack, colors, camera = null }) {
     this.chart = chart;
+    this.camera = camera;
     this.readings = readings;
     this.colors = colors;
     this.type = videoType();
@@ -114,5 +116,6 @@ export class ScreenVideo {
       const [x, y] = offsetIn(host, this.chart);
       g.drawImage(cv, x, HEAD + y, host.clientWidth, host.clientHeight);
     }
+    this.camera?.draw(g, HEAD);
   }
 }

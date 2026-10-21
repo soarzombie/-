@@ -1,6 +1,6 @@
 // Per-device settings (kept in localStorage).
 
-export const APP_VERSION = '0.13.2';
+export const APP_VERSION = '0.13.3';
 
 const KEY = 'noise-meter:settings:v1';
 
@@ -23,6 +23,7 @@ const DEFAULTS = {
   fftSize: 4096,
   scale: 'log',
   refId: '', // a saved record shown as a dashed reference on the live spectrum ('' = none)
+  camPos: null, // where the 영상 camera window sits on the graph: [x, y] as shares of the free room
   preset: 'custom', // measurement situation (presets.js): 'idle' | 'drive' | 'indoor' | 'custom'
   custom: null, // the user's own mix, kept while a situation is chosen
   // axis ranges ("축 범위"): frequency for the spectrum and spectrogram; dB ranges null = automatic
