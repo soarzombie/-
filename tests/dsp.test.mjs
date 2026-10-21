@@ -32,6 +32,7 @@ import { columnRange } from '../js/timeline.js';
 import { freqAxis, freqTicks, freqToX, xToFreq, checkFreqRange, checkDbRange } from '../js/spectrum.js';
 import { PRESETS, PRESET_KEYS, choosePreset, customize, presetOf } from '../js/presets.js';
 import { micProfile, saveMicProfile, parseCalFile, calCorrection } from '../js/mics.js';
+import { Meter } from '../js/meter.js';
 
 // IEC 61672-1 A-weighting (dB) at the exact base-10 octave frequencies 1000 * 10^(0.3n).
 const IEC_A = [
@@ -272,8 +273,8 @@ test('worklet keeps the last ringSec seconds of sound, oldest first, and holds i
   const feed = (n) => {
     for (let b = 0; b < n / 100; b++) proc.process([[Float32Array.from({ length: 100 }, () => (t++) / 10000)]]);
   };
-  const dump = () => {
-    proc.port.onmessage({ data: { type: 'dump', id: 'x' } });
+  const dump = (max) => {
+    proc.port.onmessage({ data: { type: 'dump', id: 'x', max } });
     return messages.filter((m) => m.type === 'audio').at(-1).samples;
   };
   feed(200);
@@ -282,6 +283,9 @@ test('worklet keeps the last ringSec seconds of sound, oldest first, and holds i
   const last = dump();
   assert.equal(last.length, 300);
   assert.ok(Math.abs(last[0] - 400 / 10000) < 1e-6 && Math.abs(last[299] - 699 / 10000) < 1e-6);
+  const tail = dump(120); // only the last 120 samples
+  assert.ok(tail.length === 120 && Math.abs(tail[0] - 580 / 10000) < 1e-6 && Math.abs(tail[119] - 699 / 10000) < 1e-6);
+  assert.equal(dump(1000).length, 300, 'no more than is buffered');
   proc.port.onmessage({ data: { type: 'pause', paused: true } });
   feed(200);
   assert.ok(Math.abs(dump()[299] - 699 / 10000) < 1e-6, 'paused: buffer unchanged');
@@ -610,4 +614,33 @@ test('microphone profiles: the phone mic keeps the old offset, others start unca
   assert.deepEqual([micProfile(st2, 'iMM-6C').offset, micProfile(st2, 'iMM-6C').calName, micProfile(st2, 'iPhone 마이크').offset], [118.4, 'imm.txt', 103]);
   const p2 = saveMicProfile(st2, 'iPhone 마이크', { offset: 101, calibratedAt: 2 });
   assert.deepEqual([p2.offset, p2.calibratedAt, p2.mics['iMM-6C'].offset], [101, 2, 118.4], 'the phone mic also updates the old fields');
+});
+
+test('timed measurement: the meter counts exactly N seconds after the warm-up, then pauses itself', () => {
+  const m = new Meter(100); // no audio context here: 48 kHz, blocks fed by hand as the worklet posts them
+  const posted = [];
+  m.node = { port: { postMessage: (msg) => posted.push(msg) } };
+  const block = { n: 2400, sumA: 2400 * 0.01, sumZ: 0, fast: 0.01, fastMax: 0.01, fastMin: 0.01, peak: 0.2 };
+  let done = 0;
+  m.measureFor(5, () => done++);
+  assert.ok(m.timed);
+  for (let i = 0; i < 10 + 5 * 20 - 1; i++) m.handleBlock(block); // 0.5 s warm-up, then 4.95 s
+  assert.equal(done, 0);
+  assert.ok(Math.abs(m.elapsed - 4.95) < 1e-9);
+  m.handleBlock(block);
+  assert.equal(done, 1, 'done once, at 5 s');
+  assert.equal(m.elapsed, 5);
+  assert.ok(m.paused && !m.timed);
+  assert.deepEqual(posted.at(-1), { type: 'pause', paused: true }, 'the worklet holds the sound buffer still');
+  for (let i = 0; i < 20; i++) m.handleBlock(block);
+  assert.equal(m.elapsed, 5, 'nothing more is counted while paused');
+  assert.ok(Math.abs(m.leq - 80) < 1e-9);
+  // cancelled: measuring just goes on
+  m.paused = false;
+  m.resetStats();
+  m.measureFor(1, () => done++);
+  m.cancelTimed();
+  for (let i = 0; i < 40; i++) m.handleBlock(block);
+  assert.equal(done, 1);
+  assert.ok(!m.paused && m.elapsed > 1);
 });

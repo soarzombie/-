@@ -34,6 +34,7 @@ const ICON = {
   info: svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><circle class="fill" cx="12" cy="7.8" r="1.2"/>'),
   chevron: svg('<path d="M7 10l5 5 5-5"/>'),
   axes: svg('<path d="M4 4v16h16"/><path d="M8 8h3M8 12h6M8 16h9"/>'),
+  timer: svg('<circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4l2.6 2M9.5 3h5M12 3v2.5"/>'),
   sliders: svg('<path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17" r="2"/>'),
 };
 
@@ -263,6 +264,7 @@ const MODES = [
 const OCTAVE_FFT = 32768; // 1.46 Hz bins, so even the 10 Hz band has some
 const CHART_STYLES = [['fill', '면'], ['line', '선'], ['bar', '막대']];
 const TW_NAME = { F: 'Fast', S: 'Slow' };
+const TIMED_SECS = [5, 10, 30, 60]; // "N초 측정" choices
 // quick frequency ranges for the "축 범위" sheet
 const FREQ_QUICK = [['전체', 20, 20000], ['저주파', 10, 200], ['저음', 20, 500], ['중음', 200, 5000], ['고음', 2000, 20000]];
 const fmtHzShort = (f) => (f >= 1000 ? `${f / 1000}k` : String(f));
@@ -329,7 +331,7 @@ async function renderAnalyzer() {
   if (!MODES.some((m) => m.id === getSettings().view)) saveSettings({ view: 'spectrum' }); // e.g. the old gauge or "both" view
   const s = getSettings();
   view.innerHTML = `
-    <section class="analyzer" data-state="off" data-rec="off">
+    <section class="analyzer" data-state="off" data-rec="off" data-timed="off">
       <div class="an-modes" role="group" aria-label="보기">
         ${MODES.map((m) => `<button type="button" class="mode" data-mode="${m.id}" aria-label="${m.label}" aria-pressed="${s.view === m.id}">${m.icon}</button>`).join('')}
       </div>
@@ -367,6 +369,7 @@ async function renderAnalyzer() {
           <button type="button" class="ctl ctl-rec" data-act="rec" aria-label="녹음 시작"><i class="rec-mark"></i><span class="ctl-cap" id="a-rec-cap">녹음</span></button>
         </div>
         <div class="ctl-group run-group" role="group" aria-label="측정">
+          <button type="button" class="ctl ctl-timed" data-act="timed" aria-label="${s.timedSec}초 측정">${ICON.timer}<span class="ctl-cap" id="a-timed-cap">${s.timedSec}초 측정</span></button>
           <button type="button" class="ctl ctl-main" data-act="toggle" aria-label="측정 시작">${ICON.play}<span class="ctl-cap" id="a-toggle-cap">측정 시작</span></button>
           <button type="button" class="ctl ctl-save" data-act="save" aria-label="저장">${ICON.save}<span class="ctl-cap">저장</span></button>
         </div>
@@ -382,6 +385,7 @@ async function renderAnalyzer() {
   const root = view.querySelector('.analyzer');
   const toggleBtn = view.querySelector('[data-act=toggle]');
   const recBtn = view.querySelector('[data-act=rec]');
+  const timedBtn = view.querySelector('[data-act=timed]');
   const chartBox = view.querySelector('.an-chart');
   const chart = new SpectrumView($('a-chart'), { cursor: true });
   chart.onCursor = bindCursorReadout($('a-cursor'));
@@ -455,7 +459,7 @@ async function renderAnalyzer() {
     toggleBtn.firstElementChild.outerHTML = paused ? ICON.play : ICON.pause;
     toggleBtn.setAttribute('aria-label', paused ? '다시 측정' : '일시정지');
     $('a-toggle-cap').textContent = paused ? '측정 계속' : '일시정지';
-    $('a-state').textContent = paused ? '일시정지' : '측정 중';
+    $('a-state').textContent = paused ? '일시정지' : meter?.timed ? `${Math.round(meter.limit / meter.sampleRate)}초 측정 중` : '측정 중';
   }
 
   // "홀드 재설정": the curves over the spectrum start again; levels and the time axis go on
@@ -562,7 +566,8 @@ async function renderAnalyzer() {
     const st = getSettings();
     meter = new Meter(st.offset, st.weighting, st.timeWeighting);
     try {
-      await meter.start(st.view === 'octave' ? OCTAVE_FFT : st.fftSize, st.audioSec, st.micId);
+      // the sound buffer also holds a whole timed measurement (up to a minute)
+      await meter.start(st.view === 'octave' ? OCTAVE_FFT : st.fftSize, st.audioSec > 0 ? Math.max(st.audioSec, ...TIMED_SECS) : 0, st.micId);
     } catch (err) {
       meter = null;
       if (err.code !== 'cancelled') {
@@ -668,6 +673,7 @@ async function renderAnalyzer() {
 
   function stopMic() {
     cancelAnimationFrame(raf);
+    showTimed(0);
     if (meter?.recording) {
       // leaving mid-recording keeps what was recorded, ready in the file tab
       const rate = meter.sampleRate;
@@ -685,6 +691,55 @@ async function renderAnalyzer() {
     $('a-now').textContent = '--.-';
     $('a-overlay').hidden = false;
     led.set(NaN, NaN);
+  }
+
+  // Timed measurement: start again from zero, measure exactly N seconds, pause, then offer to save.
+  // Tapping the button again or pausing cancels it; ↻ reset starts the N seconds again.
+  let timedTimer = 0;
+  async function startTimed() {
+    if (!(await startMic()) || !meter.running) return;
+    const sec = getSettings().timedSec;
+    meter.resetStats();
+    clearReadings();
+    meter.paused = false;
+    showRunning(false);
+    meter.measureFor(sec, () => timedDone(sec));
+    showTimed(sec);
+  }
+
+  // sec > 0: show the countdown on the button and in the status line; 0: back to the plain button.
+  function showTimed(sec) {
+    clearInterval(timedTimer);
+    root.dataset.timed = sec ? 'on' : 'off';
+    timedBtn.style.setProperty('--p', 0);
+    const idle = `${getSettings().timedSec}초 측정`;
+    timedBtn.setAttribute('aria-label', sec ? `${sec}초 측정 취소` : idle);
+    $('a-timed-cap').textContent = sec ? `남은 ${sec}초` : idle;
+    if (!sec) return;
+    $('a-state').textContent = `${sec}초 측정 중`;
+    timedTimer = setInterval(() => {
+      if (!meter?.timed) return;
+      timedBtn.style.setProperty('--p', Math.min(1, meter.elapsed / sec).toFixed(3));
+      $('a-timed-cap').textContent = `남은 ${Math.max(0, Math.ceil(sec - meter.elapsed - 1e-6))}초`;
+    }, 100);
+  }
+
+  function cancelTimed() {
+    meter?.cancelTimed();
+    showTimed(0);
+    if (meter) showRunning(meter.paused);
+    toast('정해진 시간 측정을 취소했습니다');
+  }
+
+  function timedDone(sec) {
+    onLevel(meter.laf); // the last block: the clock reads the full N seconds
+    showTimed(0);
+    showRunning(true);
+    $('a-state').textContent = `${sec}초 측정 끝`;
+    holds ||= newHolds(meter.levels.length);
+    draw(meter.levels);
+    const audio = getSettings().audioSec > 0 ? meter.captureAudio(sec) : Promise.resolve(new Float32Array(0));
+    openSave({ ...snapshot(), timedSec: sec }, audio);
   }
 
   // Everything needed to look at this moment again later.
@@ -726,8 +781,10 @@ async function renderAnalyzer() {
   }
 
   function openSave(rec, audio) {
-    const extra = getSettings().audioSec > 0 ? '<label class="check"><input type="checkbox" id="f-audio" checked> <span id="f-audio-label">방금 들린 소리도 함께 저장</span></label>' : '';
-    const dlg = saveSheet({ title: '지금 측정 저장', rec, timeLabel: '측정 시간', extra }, async (form) => {
+    const what = rec.timedSec ? `측정한 ${rec.timedSec}초 소리` : '방금 들린 소리';
+    const extra = getSettings().audioSec > 0 ? `<label class="check"><input type="checkbox" id="f-audio" checked> <span id="f-audio-label">${what}도 함께 저장</span></label>` : '';
+    const title = rec.timedSec ? `${rec.timedSec}초 측정 저장` : '지금 측정 저장';
+    const dlg = saveSheet({ title, rec, timeLabel: '측정 시간', extra }, async (form) => {
       const samples = form.querySelector('#f-audio')?.checked ? await audio : null;
       if (samples?.length) {
         rec.audio = encodeWav(samples, rec.sampleRate);
@@ -736,7 +793,7 @@ async function renderAnalyzer() {
     });
     audio.then((samples) => {
       const label = dlg.querySelector('#f-audio-label');
-      if (label) label.textContent = samples.length ? `방금 들린 소리 ${(samples.length / rec.sampleRate).toFixed(0)}초도 함께 저장` : '저장할 소리가 없습니다';
+      if (label) label.textContent = samples.length ? `${rec.timedSec ? '측정한' : '방금 들린'} 소리 ${(samples.length / rec.sampleRate).toFixed(0)}초도 함께 저장` : '저장할 소리가 없습니다';
     });
   }
 
@@ -760,6 +817,7 @@ async function renderAnalyzer() {
         ${segRow('weighting', '주파수 가중치', WEIGHTINGS.map((w) => [w, `${w}특성`]), st.weighting, `<span id="f-weight-note">${WEIGHT_NOTE[st.weighting]}</span> 바꾸면 최소·평균·최대가 새로 시작합니다.`)}
         ${segRow('timeWeighting', '시간 가중 (큰 숫자)', [['F', 'Fast 0.125초'], ['S', 'Slow 1초']], st.timeWeighting, 'Slow는 숫자가 덜 흔들려 읽기 쉽습니다. 바꾸면 최소·평균·최대가 새로 시작합니다.')}
         ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
+        ${segRow('timed', '정해진 시간 측정 (⏱ 버튼)', TIMED_SECS.map((n) => [n, n < 60 ? `${n}초` : '1분']), st.timedSec, '누르면 처음부터 이 시간만큼 재고 멈춘 뒤 저장 창을 엽니다.')}
         ${segRow('fft', 'FFT 크기', FFT_SIZES.map((n) => [n, n]), st.fftSize, '클수록 주파수를 잘게 나누지만 반응이 느려집니다. 1/3 옥타브 보기는 늘 32768로 계산합니다.')}
         ${segRow('scale', '주파수 축', [['log', '로그'], ['linear', '선형']], st.scale)}
         <button type="button" class="btn btn-wide" data-close>닫기</button>
@@ -787,7 +845,7 @@ async function renderAnalyzer() {
       setTimeout(micNote, 1500);
     };
     bindSegs(dlg, (key, v) => {
-      const numeric = { trace: 'traceSec', fft: 'fftSize' };
+      const numeric = { trace: 'traceSec', fft: 'fftSize', timed: 'timedSec' };
       change(numeric[key] ? { [numeric[key]]: Number(v) } : { [key]: v });
       if (key === 'weighting') dlg.querySelector('#f-weight-note').textContent = WEIGHT_NOTE[v];
     });
@@ -808,6 +866,7 @@ async function renderAnalyzer() {
       clearReadings();
     }
     if (st.fftSize !== prev.fftSize) applyFft();
+    if (st.timedSec !== prev.timedSec && !meter?.timed) showTimed(0);
     gram.configure({ scale: st.scale, fmin: st.freqMin, fmax: st.freqMax, colorRange: st.gramDb });
     if (st.traceSec !== prev.traceSec || st.traceDb !== prev.traceDb) {
       trace.configure({ windowSec: st.traceSec || 30, yRange: st.traceDb });
@@ -989,9 +1048,11 @@ async function renderAnalyzer() {
   view.querySelector('[data-act=mic]').onclick = () => startMic();
   toggleBtn.onclick = async () => {
     if (!meter || !meter.running) return startMic();
+    if (meter.timed) cancelTimed();
     meter.paused = !meter.paused;
     showRunning(meter.paused);
   };
+  timedBtn.onclick = () => (meter?.timed ? cancelTimed() : startTimed());
   // Recording is separate from measuring: it does not resume a paused measurement, pausing does not
   // stop it, and stopping it leaves the measurement running. It only turns the microphone on if needed.
   recBtn.onclick = async () => {
@@ -1009,7 +1070,7 @@ async function renderAnalyzer() {
   view.querySelector('[data-act=save]').onclick = () => {
     if (!meter || !holds || meter.elapsed < 1) return toast('측정을 시작한 뒤에 저장할 수 있습니다');
     // grab the sound first: it is "what was just heard", before the sheet takes any time
-    const audio = getSettings().audioSec > 0 ? meter.captureAudio() : Promise.resolve(new Float32Array(0));
+    const audio = getSettings().audioSec > 0 ? meter.captureAudio(getSettings().audioSec) : Promise.resolve(new Float32Array(0));
     openSave(snapshot(), audio);
   };
   view.querySelector('[data-act=help]').onclick = helpSheet;
@@ -1332,7 +1393,7 @@ async function renderHistory() {
 function recordRow(r) {
   return `<li><a class="record-row" href="#/record/${encodeURIComponent(r.id)}">
     <span class="rr-time">${fmtTime(r.ts)}</span>
-    <span class="rr-main"><strong>${esc(r.vehicle || (r.source === 'file' ? r.fileName : '차량 미입력'))}</strong><span>${esc(r.memo || `${r.source === 'file' ? '파일' : '측정'} ${fmtClock(r.elapsed)}${r.peaks?.[0] ? ` · 피크 ${fmtHz(r.peaks[0].hz)}` : ''}`)}</span></span>
+    <span class="rr-main"><strong>${esc(r.vehicle || (r.source === 'file' ? r.fileName : '차량 미입력'))}</strong><span>${esc(r.memo || `${r.source === 'file' ? '파일' : r.timedSec ? `${r.timedSec}초 측정` : '측정'} ${fmtClock(r.elapsed)}${r.peaks?.[0] ? ` · 피크 ${fmtHz(r.peaks[0].hz)}` : ''}`)}</span></span>
     <span class="rr-value"><small>평균</small>${fmtDb(r.leq)}<small>최대</small>${fmtDb(r.lmax)}</span>
   </a></li>`;
 }
@@ -1354,7 +1415,7 @@ async function renderRecord(id) {
       <div class="rec-layout">
         <header class="rec-head">
           <h1>${esc(rec.vehicle || (fromFile ? rec.fileName : '차량 미입력'))}</h1>
-          <p>${fmtDate(rec.ts)} · ${fromFile ? `파일 ${fmtClock(rec.elapsed)}` : `측정 ${fmtClock(rec.elapsed)}`}</p>
+          <p>${fmtDate(rec.ts)} · ${fromFile ? `파일 ${fmtClock(rec.elapsed)}` : `${rec.timedSec ? `${rec.timedSec}초 측정` : '측정'} ${fmtClock(rec.elapsed)}`}</p>
         </header>
         <section class="card chart-card">
           <div class="chart-box-rec"><div class="chart-plot" id="rec-chart"></div></div>

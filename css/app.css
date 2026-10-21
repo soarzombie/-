@@ -241,8 +241,8 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 
 /* round buttons with a caption, in two groups: record (red) | start / pause (blue), save */
 .an-controls { grid-area: controls; display: flex; align-items: flex-start; justify-content: center; padding-bottom: 18px; }
-.ctl-group { display: flex; align-items: flex-start; gap: 22px; }
-.rec-group { padding-right: 26px; margin-right: 26px; border-right: 1px solid var(--line); }
+.ctl-group { display: flex; align-items: flex-start; gap: 18px; }
+.rec-group { padding-right: 20px; margin-right: 20px; border-right: 1px solid var(--line); }
 .ctl {
   position: relative;
   display: grid;
@@ -270,6 +270,17 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 .analyzer[data-rec="on"] .rec-mark { width: 22px; height: 22px; border-radius: 5px; }
 .analyzer[data-rec="on"] .ctl-rec { box-shadow: 0 0 0 5px rgb(255 79 94 / 28%); }
 .analyzer[data-rec="on"] #a-rec-cap { color: var(--rec); font-weight: 800; }
+/* timed measurement: the ring around the button fills up as the seconds go by */
+.ctl-timed::before { content: ""; position: absolute; inset: -4px; border-radius: 50%; padding: 3px; background: conic-gradient(var(--accent) calc(var(--p, 0) * 360deg), rgb(255 255 255 / 12%) 0); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; opacity: 0; pointer-events: none; }
+.analyzer[data-timed="on"] .ctl-timed::before { opacity: 1; }
+.analyzer[data-timed="on"] .ctl-timed { color: var(--accent); }
+.analyzer[data-timed="on"] #a-timed-cap { color: var(--accent); font-weight: 800; }
+@media (max-width: 370px) {
+  .ctl-group { gap: 12px; }
+  .rec-group { padding-right: 14px; margin-right: 14px; }
+  .ctl { width: 54px; height: 54px; }
+  .ctl-main, .ctl-rec { width: 62px; height: 62px; }
+}
 
 .an-nav { grid-area: nav; display: none; gap: 6px; align-items: center; }
 .an-nav a { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 50%; background: var(--panel-2); border: 1px solid var(--line); color: var(--ink); }

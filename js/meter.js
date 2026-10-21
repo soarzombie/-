@@ -41,6 +41,8 @@ export class Meter {
     this.inputLabel = ''; // the name of the microphone in use, once it is open
     this.onInputLost = null; // the microphone was unplugged or taken away
     this.samples = 0;
+    this.limit = 0; // timed measurement: pause after this many measured samples
+    this.onLimit = null;
     this.laf = -Infinity;
     this._paused = false;
     this.stopped = false;
@@ -239,19 +241,36 @@ export class Meter {
     return binLevels(this.rawDb, this.table, this.offset, this.levels);
   }
 
+  // Timed measurement: after `sec` seconds of measuring (counted like `elapsed`, from the start or the
+  // last reset) the meter pauses itself and calls onDone. The 50 ms blocks add up to exactly `sec`.
+  measureFor(sec, onDone) {
+    this.limit = Math.round(sec * this.sampleRate);
+    this.onLimit = onDone;
+  }
+
+  cancelTimed() {
+    this.limit = 0;
+    this.onLimit = null;
+  }
+
+  get timed() {
+    return this.limit > 0;
+  }
+
   resetStats() {
     this.stats = { n: 0, sumA: 0, max: 0, min: Infinity, clipped: false };
     this.warmUntil = this.samples + WARMUP_SEC * this.sampleRate;
     this.node?.port.postMessage({ type: 'clear' });
   }
 
-  // The last few seconds of raw sound (Float32Array, oldest first); empty if recording is off.
-  captureAudio() {
+  // The last `sec` seconds of raw sound (Float32Array, oldest first; all that is buffered if no `sec`);
+  // empty if the sound buffer is off.
+  captureAudio(sec = 0) {
     if (!this.node) return Promise.resolve(new Float32Array(0));
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve) => {
       this.pending.set(id, resolve);
-      this.node.port.postMessage({ type: 'dump', id });
+      this.node.port.postMessage({ type: 'dump', id, max: Math.round(sec * this.sampleRate) });
       setTimeout(() => this.pending.has(id) && (this.pending.delete(id), resolve(new Float32Array(0))), 2000);
     });
   }
@@ -281,13 +300,19 @@ export class Meter {
     this.samples += b.n;
     this.laf = toDb(b.fast, this.offset);
     if (!this._paused) this.onLevel?.(this.laf);
-    if (this._paused || this.samples < this.warmUntil) return;
+    if (this._paused || this.samples <= this.warmUntil) return; // blocks ending within the warm-up
     const s = this.stats;
     s.n += b.n;
     s.sumA += b.sumA;
     s.max = Math.max(s.max, b.fastMax);
     s.min = Math.min(s.min, b.fastMin);
     if (b.peak >= CLIP_LEVEL) s.clipped = true;
+    if (this.limit && s.n >= this.limit) {
+      const done = this.onLimit;
+      this.cancelTimed();
+      this.paused = true;
+      done?.();
+    }
   }
 
   stop() {

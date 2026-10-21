@@ -24,7 +24,7 @@ class LevelProcessor extends AudioWorkletProcessor {
     this.port.onmessage = (e) => {
       const m = e.data;
       if (m.type === 'pause') this.paused = m.paused;
-      else if (m.type === 'dump') this.dump(m.id);
+      else if (m.type === 'dump') this.dump(m.id, m.max);
       else if (m.type === 'clear') this.ringFilled = 0;
       else if (m.type === 'sos') this.setSos(m.sos);
       else if (m.type === 'record') this.record(m.on);
@@ -59,9 +59,9 @@ class LevelProcessor extends AudioWorkletProcessor {
     this.recPos = 0;
   }
 
-  // Posts the buffered sound, oldest sample first.
-  dump(id) {
-    const n = this.ringFilled;
+  // Posts the buffered sound (the last `max` samples of it, if given), oldest sample first.
+  dump(id, max = 0) {
+    const n = max > 0 ? Math.min(max, this.ringFilled) : this.ringFilled;
     const out = new Float32Array(n);
     if (n) {
       const len = this.ring.length;

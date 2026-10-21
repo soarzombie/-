@@ -628,6 +628,43 @@ async function cursorDb(page, hz) {
   assert.ok(Math.abs((await num(page, '#a-now')) - expected2) < 0.6, 'back on the phone mic');
   assert.equal((await settingsOf(page)).micId, '');
 
+  // timed measurement: from zero, exactly 5 s, then it pauses by itself and the save sheet opens;
+  // tapping it again cancels and measuring goes on
+  await chartSettings(page, { timed: '5' });
+  assert.equal(await page.locator('#a-timed-cap').textContent(), '5초 측정');
+  await page.getByRole('button', { name: '5초 측정', exact: true }).click();
+  await page.waitForSelector('.analyzer[data-timed="on"]');
+  assert.equal(await page.locator('#a-state').textContent(), '5초 측정 중');
+  await page.getByRole('button', { name: '5초 측정 취소' }).click();
+  await page.waitForSelector('.analyzer[data-timed="off"]');
+  assert.equal(await page.locator('.analyzer').getAttribute('data-state'), 'run', 'cancelling keeps measuring');
+  await page.getByRole('button', { name: '5초 측정', exact: true }).click();
+  await page.waitForTimeout(2000);
+  assert.match(await page.locator('#a-timed-cap').textContent(), /^남은 [34]초$/);
+  await shot(page, 'timed');
+  await page.waitForSelector('dialog.sheet h2:has-text("5초 측정 저장")', { timeout: 10000 });
+  assert.equal(await page.locator('.analyzer').getAttribute('data-state'), 'pause');
+  assert.equal(await page.locator('#a-time').textContent(), '00:05');
+  assert.equal(await page.locator('#a-state').textContent(), '5초 측정 끝');
+  assert.ok(Math.abs((await num(page, '#a-leq')) - expected2) < 0.4, 'timed Leq');
+  await page.waitForFunction(() => /측정한 소리 5초/.test(document.querySelector('#f-audio-label')?.textContent || ''));
+  await shot(page, 'timed-save');
+  await page.locator('dialog.sheet').getByRole('button', { name: '저장' }).click();
+  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+  await page.locator('.tabbar a[data-tab=history]').click();
+  await page.locator('.record-row').first().click();
+  await page.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
+  assert.match(await page.locator('.rec-head p').first().textContent(), /5초 측정 00:05/);
+  const timedAudio = await page.evaluate(() => new Promise((r) => {
+    const a = document.querySelector('#rec-audio');
+    if (a.readyState >= 1) r(a.duration);
+    else a.onloadedmetadata = () => r(a.duration);
+  }));
+  console.log(`timed 5 s: saved sound ${timedAudio.toFixed(2)} s`);
+  assert.ok(Math.abs(timedAudio - 5) < 0.15, 'the saved sound is the measured 5 s');
+  await page.locator('.tabbar a[data-tab=home]').click();
+  await running(page);
+
   // attached file: 3 s of 1 kHz (77.0 dB(A)) then 3 s of 100 Hz (71.9 dB(A))
   // (passed as a buffer: Playwright here cannot attach files from non-ASCII paths, and the Korean name
   // is part of what is being checked)
