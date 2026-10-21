@@ -358,7 +358,7 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 :root[data-layout="landscape"] body[data-view="home"] .tabbar { display: none; }
 :root[data-layout="landscape"] body[data-view="home"] main { padding: calc(6px + env(safe-area-inset-top, 0px)) var(--gutter-r) calc(6px + env(safe-area-inset-bottom, 0px)) var(--gutter-l); }
 :root[data-layout="landscape"] .analyzer {
-  grid-template-columns: 176px auto minmax(0, 1fr) auto;
+  grid-template-columns: 156px auto minmax(0, 1fr) auto;
   grid-template-rows: auto minmax(0, 1fr) auto;
   grid-template-areas: "sub chart chart chart" "level chart chart chart" "controls controls modes nav";
   column-gap: 10px;
@@ -366,15 +366,17 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 }
 :root[data-layout="landscape"] .an-top { align-self: center; justify-self: center; width: min(100%, 340px); }
 :root[data-layout="landscape"] .an-modes { padding: 3px; }
-:root[data-layout="landscape"] .mode { height: 38px; }
+:root[data-layout="landscape"] .mode { height: 34px; }
 :root[data-layout="landscape"] .mode svg { width: 23px; height: 23px; }
 /* the level panel in its own column left of the chart, the status line above it */
 :root[data-layout="landscape"] .an-sub { grid-area: sub; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0; }
-:root[data-layout="landscape"] .an-preset { min-height: 28px; }
+:root[data-layout="landscape"] .an-preset { flex: 1 0 100%; justify-content: space-between; min-height: 30px; }
 :root[data-layout="landscape"] .an-mode-name { display: none; }
 :root[data-layout="landscape"] .an-level {
-  align-self: start;
+  align-self: stretch;
+  min-height: 0;
   grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   grid-template-areas: "led led" "now now" "stats stats" "help reset";
   row-gap: 4px;
   padding: 8px 6px 2px;
@@ -383,21 +385,25 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 :root[data-layout="landscape"] .round-btn { width: 34px; height: 34px; }
 :root[data-layout="landscape"] .round-btn svg { width: 23px; height: 23px; }
 :root[data-layout="landscape"] .lv-now { flex-wrap: wrap; column-gap: 5px; row-gap: 0; }
-:root[data-layout="landscape"] .lv-now b { flex-basis: 100%; text-align: center; font-size: 40px; }
+:root[data-layout="landscape"] .lv-now { align-self: center; }
+:root[data-layout="landscape"] .lv-now b { flex-basis: 100%; text-align: center; font-size: 48px; }
 :root[data-layout="landscape"] .lv-now span { font-size: 14px; }
 :root[data-layout="landscape"] .lv-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 2px; font-size: 11px; text-align: center; }
 :root[data-layout="landscape"] .lv-stats span { display: grid; }
-:root[data-layout="landscape"] .lv-stats b { font-size: 15px; }
+:root[data-layout="landscape"] .lv-stats b { font-size: 16px; }
 :root[data-layout="landscape"] .an-controls { align-items: center; padding: 0; }
 :root[data-layout="landscape"] .ctl-group { align-items: center; gap: 10px; }
 :root[data-layout="landscape"] .rec-group { padding-right: 12px; margin-right: 12px; }
-:root[data-layout="landscape"] .ctl { width: 48px; height: 48px; margin: 0; }
-:root[data-layout="landscape"] .ctl-main, :root[data-layout="landscape"] .ctl-rec { width: 54px; height: 54px; }
-:root[data-layout="landscape"] .ctl-main svg { width: 26px; height: 26px; }
-:root[data-layout="landscape"] .rec-mark { width: 22px; height: 22px; }
+:root[data-layout="landscape"] .ctl { width: 44px; height: 44px; margin: 0; }
+:root[data-layout="landscape"] .ctl svg { width: 22px; height: 22px; }
+:root[data-layout="landscape"] .ctl-main, :root[data-layout="landscape"] .ctl-rec { width: 48px; height: 48px; }
+:root[data-layout="landscape"] .ctl-main svg { width: 24px; height: 24px; }
+:root[data-layout="landscape"] .rec-mark { width: 20px; height: 20px; }
 :root[data-layout="landscape"] .analyzer[data-rec="on"] .rec-mark { width: 18px; height: 18px; }
 :root[data-layout="landscape"] .ctl-cap { display: none; }
 :root[data-layout="landscape"] .an-nav { display: flex; }
+:root[data-layout="landscape"] .an-nav a { width: 42px; height: 42px; }
+:root[data-layout="landscape"] .an-rotate { height: 34px; }
 
 /* ---------- pages (history, saved analysis, settings) ---------- */
 
