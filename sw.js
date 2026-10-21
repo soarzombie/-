@@ -1,6 +1,6 @@
 // Offline support: the app shell is cached so measuring works without signal.
 // Bump VERSION whenever any cached file changes so phones pick up the update.
-const VERSION = 'v0.10.0';
+const VERSION = 'v0.11.0';
 const CACHE = `noise-meter-${VERSION}`;
 const FILES = [
   './',
@@ -15,6 +15,7 @@ const FILES = [
   'js/levelbar.js',
   'js/level-processor.js',
   'js/meter.js',
+  'js/mics.js',
   'js/octave.js',
   'js/presets.js',
   'js/settings.js',

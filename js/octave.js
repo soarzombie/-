@@ -1,4 +1,4 @@
-// 1/3-octave bars, 25 Hz – 20 kHz: one bar per band (energy sum of the FFT bins in it), marks for
+// 1/3-octave bars, 10 Hz – 20 kHz (the bands under 20 Hz in a shaded "참고" zone): one bar per band (energy sum of the FFT bins in it), marks for
 // each band's maximum (peak hold) and minimum (minimum hold) since reset, and the overall level as a
 // last, wider bar.
 
@@ -74,11 +74,17 @@ export class OctaveView {
     }
     g.fillText(unit, 2 * k, Math.max(fs, y(hi - step / 2) + fs * 0.35));
 
-    // 30 bands, then a gap and a double-width bar for the overall level
+    // 34 bands, then a gap and a double-width bar for the overall level
     const n = BANDS.length;
     const slot = (x1 - x0) / (n + 3);
     const gap = Math.max(1, slot * 0.18);
     const { bands, max, min, total } = this.data;
+    const lowN = BANDS.filter((b) => b.low).length;
+    g.fillStyle = 'rgba(255, 255, 255, 0.045)';
+    g.fillRect(x0, yTop, lowN * slot, yBot - yTop);
+    g.fillStyle = c.axis;
+    g.textAlign = 'center';
+    g.fillText('참고', x0 + (lowN * slot) / 2, yTop + fs);
     BANDS.forEach((b, i) => {
       const bx = x0 + i * slot + gap / 2;
       const bw = slot - gap;
@@ -86,7 +92,7 @@ export class OctaveView {
       if (Number.isFinite(v) && v > lo) {
         const yy = y(v);
         g.fillStyle = line ? c.lineCur : BAR.fill;
-        g.globalAlpha = line ? 0.85 : 1;
+        g.globalAlpha = (line ? 0.85 : 1) * (b.low ? 0.55 : 1);
         g.fillRect(bx, yy, bw, yBot - yy);
         g.globalAlpha = 1;
         if (!line) {

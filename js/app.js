@@ -3,6 +3,7 @@
 
 import { APP_VERSION, getSettings, saveSettings, rememberVehicle } from './settings.js';
 import { PRESETS, CUSTOM, presetOf, choosePreset, customize } from './presets.js';
+import { micProfile, saveMicProfile, parseCalFile, calCorrection } from './mics.js';
 import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
 import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds } from './dsp.js';
 import * as store from './store.js';
@@ -133,6 +134,29 @@ function changeSettings(patch) {
   return saveSettings(customize(getSettings(), patch));
 }
 
+// Names phones give their own microphone; an external one keeps its own calibration.
+const BUILT_IN_MIC = /iphone|ipad|built-?in|internal|default|내장|기본|휴대폰|phone|microphone array|bottom|front|back/i;
+
+// The microphone now open: remember it, and (the first time) which one is the phone's own.
+function noteMic(meter) {
+  const st = getSettings();
+  const label = meter.inputLabel;
+  const patch = { lastMic: label };
+  if (!st.baseMic && label && (BUILT_IN_MIC.test(label) || !st.calibratedAt)) patch.baseMic = label;
+  saveSettings(patch);
+  return micProfile(getSettings(), label);
+}
+
+const micName = (label) => label || '휴대폰 마이크';
+
+async function audioInputs() {
+  try {
+    return (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput' && !['default', 'communications'].includes(d.deviceId));
+  } catch {
+    return [];
+  }
+}
+
 async function keepScreenOn() {
   try {
     return (await navigator.wakeLock?.request('screen')) || null;
@@ -229,10 +253,11 @@ const MODES = [
   { id: 'gram', name: '스펙트로그램', label: '스펙트로그램 (주파수별 시간 변화)', icon: svg('<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M7 9h2.5M12 9h5M7 12h6M15.5 12h1.5M7 15h1.5M11 15h6"/>') },
   { id: 'octave', name: '1/3 옥타브', label: '1/3 옥타브 막대', icon: svg('<path stroke-width="2.6" d="M5.5 19v-5M9.5 19v-9M13.5 19v-13M17.5 19v-7"/>') },
 ];
-const OCTAVE_FFT = 16384; // 2.9 Hz bins, so even the 25 Hz band has some
+const OCTAVE_FFT = 32768; // 1.46 Hz bins, so even the 10 Hz band has some
 const CHART_STYLES = [['fill', '면'], ['line', '선'], ['bar', '막대']];
+const TW_NAME = { F: 'Fast', S: 'Slow' };
 // quick frequency ranges for the "축 범위" sheet
-const FREQ_QUICK = [['전체', 20, 20000], ['저음', 20, 500], ['중음', 200, 5000], ['고음', 2000, 20000]];
+const FREQ_QUICK = [['전체', 20, 20000], ['저주파', 10, 200], ['저음', 20, 500], ['중음', 200, 5000], ['고음', 2000, 20000]];
 const fmtHzShort = (f) => (f >= 1000 ? `${f / 1000}k` : String(f));
 const STYLE_ORDER = CHART_STYLES.map(([v]) => v);
 const STYLE_NAME = Object.fromEntries(CHART_STYLES);
@@ -275,7 +300,7 @@ function helpSheet() {
       <h2>화면 보는 법</h2>
       <dl class="meta">
         <dt>측정 상황</dt><dd>왼쪽 위 버튼. <b>공회전</b>·<b>주행</b>·<b>실내</b>를 고르면 가중치·FFT·그래프 모양·추적·홀드·시간축 길이가 그 상황에 맞게 한 번에 바뀝니다. 그 뒤에 직접 바꾸면 <b>사용자 지정</b>이 되고, 사용자 지정을 다시 고르면 직접 맞춰 둔 설정으로 돌아옵니다.</dd>
-        <dt>큰 숫자</dt><dd>지금 소음 크기입니다 (0.125초 Fast). 색 막대는 초록 → 노랑 → 빨강, 빨강은 경고 기준 ${s.alertLevel} dB 이상입니다. 밝은 칸 하나는 최대값입니다.</dd>
+        <dt>큰 숫자</dt><dd>지금 소음 크기입니다. 숫자 옆 Fast(0.125초)는 빠른 변화를 따라가고, Slow(1초)는 덜 흔들려 읽기 쉽습니다. 설정에서 바꿉니다. 색 막대는 초록 → 노랑 → 빨강, 빨강은 경고 기준 ${s.alertLevel} dB 이상입니다. 밝은 칸 하나는 최대값입니다.</dd>
         <dt>최소·평균·최대</dt><dd>측정을 시작하거나 ↻ 초기화를 누른 뒤의 값입니다. 평균은 에너지 평균(Leq)입니다.</dd>
         <dt>A · C · Z</dt><dd>주파수 가중치. <b>A</b> 보통 소음(사람 귀에 가깝게) · <b>C</b> 엔진·부밍음처럼 저음이 큰 소리 · <b>Z</b> 거르지 않은 소리. 그래프 오른쪽 위 설정 버튼에서 바꿉니다.</dd>
         <dt>주파수 그래프</dt><dd>위쪽 큰 그래프. 가로는 주파수(20 Hz – 20 kHz), 세로는 dB입니다. 누르면 십자선 커서가 그 주파수의 값을 보여 주고, 한 번 더 누르면 커서 B로 두 곳을 비교합니다. 끌어서 옮기고 × 로 지웁니다.</dd>
@@ -302,13 +327,14 @@ async function renderAnalyzer() {
       </div>
       <div class="an-sub">
         <button type="button" class="an-preset" id="a-preset" aria-haspopup="menu" aria-expanded="false" aria-label="측정 상황: ${presetOf(s.preset).name}"><span>${presetOf(s.preset).name}</span>${ICON.chevron}</button>
+        <span class="an-mic" id="a-mic" hidden></span>
         <p class="an-mode-name" id="a-mode-name">${MODES.find((m) => m.id === s.view)?.name || ''}</p>
         <p class="an-status"><i class="rec-dot"></i><span id="a-state">대기</span><b id="a-time">00:00</b></p>
       </div>
       <div class="an-level">
         <div class="led" id="a-led" aria-hidden="true"></div>
         <button type="button" class="round-btn lv-help" data-act="help" aria-label="도움말">${ICON.info}</button>
-        <p class="lv-now"><b id="a-now">--.-</b><span id="a-unit">${unitOf(s.weighting)}</span></p>
+        <p class="lv-now"><b id="a-now">--.-</b><span id="a-unit">${unitOf(s.weighting)}</span><small class="lv-tw" id="a-tw">${TW_NAME[s.timeWeighting]}</small></p>
         <button type="button" class="round-btn lv-reset" data-act="reset" aria-label="초기화">${ICON.reset}</button>
         <p class="lv-stats"><span>최소 <b id="a-min">–</b></span><span>평균 <b id="a-leq">–</b></span><span>최대 <b id="a-max">–</b></span></p>
       </div>
@@ -372,6 +398,8 @@ async function renderAnalyzer() {
   let holdFrom = 0; // no hold updates before this time (the analyser settles after an FFT size change)
   let lastPeakAt = 0;
   let menu = null; // the open chart menu
+  let micProf = null; // calibration of the microphone in use (mics.js)
+  let knownInputs = null; // microphones seen, to notice one being plugged in
   let lastRowAt = 0;
   let range = [-20, 100];
   let octRange = [0, 100];
@@ -524,9 +552,9 @@ async function renderAnalyzer() {
       return true;
     }
     const st = getSettings();
-    meter = new Meter(st.offset, st.weighting);
+    meter = new Meter(st.offset, st.weighting, st.timeWeighting);
     try {
-      await meter.start(st.view === 'octave' ? OCTAVE_FFT : st.fftSize, st.audioSec);
+      await meter.start(st.view === 'octave' ? OCTAVE_FFT : st.fftSize, st.audioSec, st.micId);
     } catch (err) {
       meter = null;
       if (err.code !== 'cancelled') {
@@ -536,6 +564,16 @@ async function renderAnalyzer() {
       }
       return false;
     }
+    // this microphone's own calibration (offset, and the frequency response from its file)
+    micProf = noteMic(meter);
+    meter.setCalibration(micProf.offset, calCorrection(micProf.cal));
+    showMic();
+    if (meter.fellBack) toast('고른 마이크가 없어 휴대폰 기본 마이크로 측정합니다');
+    meter.onInputLost = () => {
+      toast('마이크 연결이 끊겨 다시 시작합니다');
+      restartMic();
+    };
+    audioInputs().then((list) => (knownInputs = list));
     meter.onLevel = onLevel;
     meter.onRecordFull = () => {
       if (!stopping) toast(`녹음은 최대 ${MAX_RECORD_SEC / 60}분입니다`);
@@ -549,6 +587,40 @@ async function renderAnalyzer() {
     keepScreenOn().then((w) => (wake = w));
     return true;
   }
+
+  // An external microphone shows its name (and whether it is calibrated) in place of the view name.
+  function showMic() {
+    const st = getSettings();
+    const label = meter?.inputLabel || '';
+    const external = !!label && label !== st.baseMic;
+    $('a-mic').hidden = !external;
+    view.querySelector('.an-sub').classList.toggle('has-mic', external);
+    if (!external) return;
+    $('a-mic').textContent = `🎤 ${label}${micProf?.calibratedAt ? '' : ' · 보정 안 됨'}`;
+    $('a-mic').classList.toggle('is-warn', !micProf?.calibratedAt);
+  }
+
+  async function restartMic() {
+    if (meter?.recording) return toast('녹음 중에는 마이크를 바꿀 수 없습니다');
+    stopMic();
+    await startMic();
+  }
+
+  function useMic(d) {
+    saveSettings({ micId: d.deviceId, micLabel: d.label });
+    restartMic().then(() => meter && toast(`마이크: ${micName(meter.inputLabel)}`));
+  }
+
+  // A microphone plugged in while measuring: offer it.
+  const onDeviceChange = async () => {
+    const list = await audioInputs();
+    const before = knownInputs;
+    knownInputs = list;
+    if (!before || !meter) return;
+    const added = list.find((d) => d.label && !before.some((b) => b.deviceId === d.deviceId));
+    if (added && added.label !== meter.inputLabel) toast(`새 마이크: ${added.label}`, { label: '이 마이크 쓰기', run: () => useMic(added) });
+  };
+  navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
 
   // Recorded sound -> a WAV file in the file tab. Measuring goes on; the message offers to open it.
   function keepRecording(samples, rate, leaving = false) {
@@ -634,8 +706,11 @@ async function renderAnalyzer() {
       sampleRate: meter.sampleRate,
       offset: meter.offset,
       weighting: meter.weighting,
+      timeWeighting: meter.timeWeighting,
       unit: meter.unit,
-      calibrated: !!st.calibratedAt,
+      calibrated: !!micProf?.calibratedAt,
+      mic: meter.inputLabel,
+      micCal: micProf?.calName || '',
       vehicle: '',
       memo: '',
       app: APP_VERSION,
@@ -671,14 +746,41 @@ async function renderAnalyzer() {
     const { dlg } = openSheet(`
       <div class="sheet-form chart-sheet">
         <h2>그래프 설정</h2>
+        <div class="seg-field mic-field"><span>마이크</span>
+          <select id="f-mic" aria-label="마이크"><option value="">휴대폰 기본 마이크</option></select>
+          <p class="fine seg-note" id="f-mic-note"></p></div>
         ${segRow('weighting', '주파수 가중치', WEIGHTINGS.map((w) => [w, `${w}특성`]), st.weighting, `<span id="f-weight-note">${WEIGHT_NOTE[st.weighting]}</span> 바꾸면 최소·평균·최대가 새로 시작합니다.`)}
+        ${segRow('timeWeighting', '시간 가중 (큰 숫자)', [['F', 'Fast 0.125초'], ['S', 'Slow 1초']], st.timeWeighting, 'Slow는 숫자가 덜 흔들려 읽기 쉽습니다. 바꾸면 최소·평균·최대가 새로 시작합니다.')}
         ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
-        ${segRow('fft', 'FFT 크기', FFT_SIZES.map((n) => [n, n]), st.fftSize, '클수록 주파수를 잘게 나누지만 반응이 느려집니다. 1/3 옥타브 보기는 늘 16384로 계산합니다.')}
+        ${segRow('fft', 'FFT 크기', FFT_SIZES.map((n) => [n, n]), st.fftSize, '클수록 주파수를 잘게 나누지만 반응이 느려집니다. 1/3 옥타브 보기는 늘 32768로 계산합니다.')}
         ${segRow('scale', '주파수 축', [['log', '로그'], ['linear', '선형']], st.scale)}
         <button type="button" class="btn btn-wide" data-close>닫기</button>
       </div>`);
+    const micSel = dlg.querySelector('#f-mic');
+    const micNote = () => {
+      const label = meter?.inputLabel || getSettings().lastMic;
+      const p = micProfile(getSettings(), label);
+      dlg.querySelector('#f-mic-note').textContent = `지금: ${micName(label)} · ${p.calibratedAt ? `${fmtShortDate(p.calibratedAt)} 보정 (${p.offset} dB)` : '보정 안 됨'}${p.cal ? ` · 보정 파일 ${p.calName}` : ''}. 외부 마이크는 설정(관리자)에서 따로 보정합니다.`;
+    };
+    micNote();
+    audioInputs().then((list) => {
+      const st2 = getSettings();
+      for (const d of list) {
+        const o = document.createElement('option');
+        o.value = d.deviceId;
+        o.textContent = d.label || '이름 없는 마이크';
+        micSel.append(o);
+      }
+      micSel.value = list.some((d) => d.deviceId === st2.micId) ? st2.micId : '';
+    });
+    micSel.onchange = () => {
+      const opt = micSel.selectedOptions[0];
+      useMic({ deviceId: micSel.value, label: micSel.value ? opt.textContent : '' });
+      setTimeout(micNote, 1500);
+    };
     bindSegs(dlg, (key, v) => {
-      change(key === 'weighting' ? { weighting: v } : key === 'trace' ? { traceSec: Number(v) } : key === 'fft' ? { fftSize: Number(v) } : { scale: v });
+      const numeric = { trace: 'traceSec', fft: 'fftSize' };
+      change(numeric[key] ? { [numeric[key]]: Number(v) } : { [key]: v });
       if (key === 'weighting') dlg.querySelector('#f-weight-note').textContent = WEIGHT_NOTE[v];
     });
   }
@@ -690,6 +792,11 @@ async function renderAnalyzer() {
       $('a-unit').textContent = unitOf(st.weighting);
       gram.unit = unitOf(st.weighting);
       if (meter) meter.setWeighting(st.weighting);
+      clearReadings();
+    }
+    if (st.timeWeighting !== prev.timeWeighting) {
+      $('a-tw').textContent = TW_NAME[st.timeWeighting];
+      if (meter) meter.setTimeWeighting(st.timeWeighting);
       clearReadings();
     }
     if (st.fftSize !== prev.fftSize) applyFft();
@@ -862,6 +969,7 @@ async function renderAnalyzer() {
   document.addEventListener('visibilitychange', onVisibility);
   cleanup = () => {
     document.removeEventListener('visibilitychange', onVisibility);
+    navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
     menu?.close();
     stopMic();
     chart.destroy();
@@ -974,7 +1082,12 @@ async function renderFile() {
     const st = getSettings();
     const calibrated = st.fileUnit !== 'fs';
     const unit = unitOf(st.weighting, !calibrated);
-    const a = analyzeSound(decoded.samples, decoded.rate, calibrated ? st.offset : 0, { weighting: st.weighting });
+    const prof = micProfile(st, st.lastMic);
+    const a = analyzeSound(decoded.samples, decoded.rate, calibrated ? prof.offset : 0, {
+      weighting: st.weighting,
+      timeWeighting: st.timeWeighting,
+      correction: calibrated ? calCorrection(prof.cal) : null,
+    });
     const range = rangeFor(a.max);
     const loudestAt = a.history.length ? a.history.indexOf(Math.max(...a.history)) * a.historyStep + a.historyStep : 0;
     const url = URL.createObjectURL(file);
@@ -1014,7 +1127,7 @@ async function renderFile() {
           <dl class="meta">
             <dt>피크</dt><dd>${a.peaks.length ? a.peaks.map((p) => `${fmtHz(p.hz)} <small>(${fmtDb(p.db)} ${unit})</small>`).join('<br>') : '뚜렷한 피크 없음'}</dd>
             <dt>가장 큰 순간</dt><dd>${fmtClock(loudestAt)} <button type="button" class="link" data-seek="${loudestAt}">여기 듣기</button></dd>
-            <dt>레벨 기준</dt><dd>${calibrated ? `이 휴대폰 보정값(${st.offset} dB)을 적용했습니다. 다른 기기로 녹음한 파일이면 참고값입니다.` : `파일의 디지털 크기(0 dBFS = 최대)에 ${st.weighting}특성만 적용했습니다.`}</dd>
+            <dt>레벨 기준</dt><dd>${calibrated ? `${esc(micName(st.lastMic))} 보정값(${prof.offset} dB${prof.cal ? ', 보정 파일' : ''})을 적용했습니다. 다른 기기·마이크로 녹음한 파일이면 참고값입니다.` : `파일의 디지털 크기(0 dBFS = 최대)에 ${st.weighting}특성만 적용했습니다.`}</dd>
             ${a.clipped ? '<dt>주의</dt><dd>소리가 파일의 최대 크기(0 dBFS)에 닿은 곳이 있어 실제보다 작게 나왔을 수 있습니다.</dd>' : ''}
           </dl>
         </section>
@@ -1130,7 +1243,9 @@ async function renderFile() {
         offset: a.offset,
         weighting: a.weighting,
         unit,
-        calibrated: calibrated && !!st.calibratedAt,
+        calibrated: calibrated && !!prof.calibratedAt,
+        mic: calibrated ? st.lastMic : '',
+        micCal: calibrated && prof.cal ? prof.calName : '',
         vehicle: '',
         memo: '',
         app: APP_VERSION,
@@ -1263,7 +1378,7 @@ async function renderRecord(id) {
             <dt>피크</dt><dd>${rec.peaks?.length ? rec.peaks.map((p) => `${fmtHz(p.hz)} <small>(${fmtDb(p.db)} ${unit})</small>`).join('<br>') : '뚜렷한 피크 없음'}</dd>
             <dt>메모</dt><dd class="memo">${esc(rec.memo) || '-'}</dd>
             ${fromFile ? `<dt>파일</dt><dd>${esc(rec.fileName)}</dd>` : `<dt>저장 순간</dt><dd>${fmtDb(rec.laf)} ${unit}</dd>`}
-            <dt>분석 설정</dt><dd>${rec.weighting || 'A'}특성 · FFT ${rec.fftSize} · ${unit.startsWith('dBFS') ? '파일 디지털 레벨(dBFS) 기준' : rec.calibrated ? '마이크 보정됨' : '마이크 보정 안 됨 (참고값)'}</dd>
+            <dt>분석 설정</dt><dd>${rec.weighting || 'A'}특성 · ${TW_NAME[rec.timeWeighting || 'F']} · FFT ${rec.fftSize} · ${unit.startsWith('dBFS') ? '파일 디지털 레벨(dBFS) 기준' : `${esc(micName(rec.mic))} ${rec.calibrated ? '보정됨' : '보정 안 됨 (참고값)'}${rec.micCal ? ' · 보정 파일' : ''}`}</dd>
           </dl>
         </section>
       </div>
@@ -1308,7 +1423,11 @@ async function renderRecord(id) {
     setTimeout(async () => {
       try {
         const { samples, rate } = await decodeAudioFile(rec.audio);
-        const a = analyzeSound(samples, rate, rec.offset ?? s.offset, { weighting: rec.weighting || 'A' });
+        const a = analyzeSound(samples, rate, rec.offset ?? s.offset, {
+          weighting: rec.weighting || 'A',
+          timeWeighting: rec.timeWeighting || 'F',
+          correction: rec.micCal ? calCorrection(micProfile(s, rec.mic).cal) : null,
+        });
         gram?.setStatic(a.frames, a.freqs, a.duration, { labels: fromFile ? 'absolute' : 'relative', unit });
         timeline?.set(a.history, a.historyStep, a.leq, unit);
         view.querySelector('#rec-gram-wait')?.remove();
@@ -1408,6 +1527,8 @@ async function renderSettings() {
 
   const s = getSettings();
   const count = (await store.allRecords()).length;
+  let calTarget = s.micLabel || s.lastMic || s.baseMic || ''; // calibrate this microphone
+  let calProf = micProfile(s, calTarget);
   view.innerHTML = `
     <div class="page">
       <h1 class="page-title">설정</h1>
@@ -1434,8 +1555,9 @@ async function renderSettings() {
 
         <section class="card">
           <h2>마이크 보정</h2>
-          <p>현재 보정값 <strong id="cal-offset">${s.offset} dB</strong> · <span id="cal-date">${s.calibratedAt ? `${fmtShortDate(s.calibratedAt)} 보정` : '보정 안 됨'}</span></p>
-          <p class="fine">휴대폰마다 마이크 감도가 달라 기기별로 한 번씩 보정해야 값이 맞습니다.</p>
+          <p>대상 마이크 <strong id="cal-mic">${esc(micName(calTarget))}</strong></p>
+          <p>현재 보정값 <strong id="cal-offset">${calProf.offset} dB</strong> · <span id="cal-date">${calProf.calibratedAt ? `${fmtShortDate(calProf.calibratedAt)} 보정` : '보정 안 됨'}</span></p>
+          <p class="fine">휴대폰·마이크마다 감도가 달라 하나씩 보정해야 값이 맞습니다. 외부 마이크를 쓰면 분석 화면 ⚙ 설정에서 그 마이크를 고른 뒤 여기서 보정하세요.</p>
           <ol class="guide">
             <li>정밀 소음계(기준기)와 휴대폰을 나란히 두세요.</li>
             <li>공회전 소리처럼 일정한 소리가 나게 하세요.</li>
@@ -1452,8 +1574,18 @@ async function renderSettings() {
           </div>
           <details>
             <summary>보정값 직접 입력</summary>
-            <label class="field field-num"><span>보정값 (dB)</span><input id="f-offset" type="number" inputmode="decimal" step="0.1" value="${s.offset}"></label>
+            <label class="field field-num"><span>보정값 (dB)</span><input id="f-offset" type="number" inputmode="decimal" step="0.1" value="${calProf.offset}"></label>
           </details>
+          <div class="cal-file">
+            <h3>마이크 보정 파일 <small>(외부 측정 마이크, 선택)</small></h3>
+            <p class="fine">UMIK·iMM-6C 등 측정 마이크와 함께 받은 주파수 특성 파일(.txt)을 넣으면 스펙트럼의 저음·고음 오차를 바로잡습니다. 큰 숫자(전체 dB)는 위 보정값으로 맞춥니다.</p>
+            <p id="cal-file-state">${calProf.cal ? `${esc(calProf.calName)} · ${calProf.cal.length}점 · ${fmtHz(calProf.cal[0][0])} – ${fmtHz(calProf.cal.at(-1)[0])}` : '보정 파일 없음'}</p>
+            <div class="inline-actions">
+              <label class="btn" for="f-cal-file">보정 파일 열기</label>
+              <input type="file" id="f-cal-file" accept=".txt,.cal,.frd,.csv,text/plain" hidden>
+              <button type="button" class="btn btn-quiet" data-act="cal-file-clear"${calProf.cal ? '' : ' hidden'}>지우기</button>
+            </div>
+          </div>
         </section>
 
         <section class="card">
@@ -1482,9 +1614,14 @@ async function renderSettings() {
   view.querySelector('[data-act=cal-measure]').onclick = async (e) => {
     const btn = e.currentTarget;
     btn.disabled = true;
-    calMeter = new Meter(getSettings().offset);
+    calMeter = new Meter(calProf.offset);
     try {
-      await calMeter.start();
+      await calMeter.start(4096, 0, getSettings().micId);
+      // the microphone that actually opened is the one being calibrated
+      calTarget = calMeter.inputLabel;
+      calProf = noteMic(calMeter);
+      calMeter.setCalibration(calProf.offset, null);
+      $('cal-mic').textContent = micName(calTarget);
       if (!calMeter.running) await calMeter.wake();
       const until = Date.now() + 12000;
       while (calMeter.elapsed < 5) {
@@ -1508,13 +1645,35 @@ async function renderSettings() {
   view.querySelector('[data-act=cal-apply]').onclick = () => {
     const ref = parseFloat($('f-cal-ref').value);
     if (!Number.isFinite(ref) || ref < 20 || ref > 140 || !Number.isFinite(calPhone)) return toast('소음계 값을 확인해 주세요');
-    const offset = round1(getSettings().offset + (ref - calPhone));
-    saveSettings({ offset, calibratedAt: Date.now() });
+    const offset = round1(calProf.offset + (ref - calPhone));
+    saveSettings(saveMicProfile(getSettings(), calTarget, { offset, calibratedAt: Date.now() }));
+    calProf = micProfile(getSettings(), calTarget);
     $('cal-offset').textContent = `${offset} dB`;
     $('cal-date').textContent = `${fmtShortDate(Date.now())} 보정`;
     $('f-offset').value = offset;
     $('cal-result').hidden = true;
     toast(`보정했습니다 (보정값 ${offset} dB)`);
+  };
+  $('f-cal-file').onchange = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const { points, serial } = parseCalFile(await file.text());
+      saveSettings(saveMicProfile(getSettings(), calTarget, { cal: points, calName: file.name, calSerial: serial || '' }));
+      calProf = micProfile(getSettings(), calTarget);
+      $('cal-file-state').textContent = `${file.name} · ${points.length}점 · ${fmtHz(points[0][0])} – ${fmtHz(points.at(-1)[0])}`;
+      view.querySelector('[data-act=cal-file-clear]').hidden = false;
+      toast(`${micName(calTarget)}에 보정 파일을 넣었습니다`);
+    } catch (err) {
+      toast(err.message || '보정 파일을 읽지 못했습니다');
+    }
+  };
+  view.querySelector('[data-act=cal-file-clear]').onclick = (e) => {
+    saveSettings(saveMicProfile(getSettings(), calTarget, { cal: null, calName: '', calSerial: '' }));
+    calProf = micProfile(getSettings(), calTarget);
+    $('cal-file-state').textContent = '보정 파일 없음';
+    e.currentTarget.hidden = true;
   };
   const clear = view.querySelector('[data-act=clear]');
   clear.onclick = async () => {
@@ -1543,14 +1702,14 @@ async function renderSettings() {
     const newPin = $('f-newpin').value.trim();
     if (newPin && !/^\d{4,12}$/.test(newPin)) return showError('비밀번호는 숫자 4–12자리로 입력해 주세요.');
     const before = getSettings();
+    if (round1(offset) !== calProf.offset) saveSettings(saveMicProfile(before, calTarget, { offset: round1(offset), calibratedAt: Date.now() }));
     saveSettings({
       company: $('f-company').value.trim() || before.company,
       audioSec: Number($('f-audio-sec').value),
       alertLevel: Math.round(alertLevel),
-      offset: round1(offset),
-      calibratedAt: round1(offset) !== before.offset ? Date.now() : before.calibratedAt,
       pin: newPin || before.pin,
     });
+    calProf = micProfile(getSettings(), calTarget);
     err.hidden = true;
     toast('설정을 저장했습니다');
   };

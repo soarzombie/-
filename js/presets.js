@@ -3,26 +3,32 @@
 // situation is chosen and comes back when 사용자 지정 is chosen again. Changing any of these settings by
 // hand while a situation is chosen turns it into 사용자 지정. Pure functions over a settings object.
 
-export const PRESET_KEYS = ['weighting', 'fftSize', 'style', 'scale', 'peakHold', 'minHold', 'maxTrack', 'minTrack', 'traceSec'];
+export const PRESET_KEYS = ['weighting', 'timeWeighting', 'fftSize', 'style', 'scale', 'peakHold', 'minHold', 'maxTrack', 'minTrack', 'traceSec'];
 
 export const PRESETS = [
   {
     id: 'idle',
     name: '공회전',
-    note: '세워 두고 엔진 저음을 자세히 · FFT 16384 · 선 · 피크·미니멈 홀드',
-    values: { weighting: 'A', fftSize: 16384, style: 'line', scale: 'log', peakHold: true, minHold: true, maxTrack: false, minTrack: false, traceSec: 60 },
+    note: '세워 두고 엔진 저음을 자세히 · Slow · FFT 16384 · 선 · 피크·미니멈 홀드',
+    values: { weighting: 'A', timeWeighting: 'S', fftSize: 16384, style: 'line', scale: 'log', peakHold: true, minHold: true, maxTrack: false, minTrack: false, traceSec: 60 },
   },
   {
     id: 'drive',
     name: '주행',
-    note: '달리면서 빠르게 · FFT 4096 · 최대값 추적 · 시간축 5분',
-    values: { weighting: 'A', fftSize: 4096, style: 'fill', scale: 'log', peakHold: true, minHold: false, maxTrack: true, minTrack: false, traceSec: 300 },
+    note: '달리면서 빠르게 · Fast · FFT 4096 · 최대값 추적 · 시간축 5분',
+    values: { weighting: 'A', timeWeighting: 'F', fftSize: 4096, style: 'fill', scale: 'log', peakHold: true, minHold: false, maxTrack: true, minTrack: false, traceSec: 300 },
   },
   {
     id: 'indoor',
     name: '실내',
-    note: '조용한 곳의 바닥 소음 · FFT 8192 · 미니멈 홀드·최소값 추적',
-    values: { weighting: 'A', fftSize: 8192, style: 'line', scale: 'log', peakHold: true, minHold: true, maxTrack: false, minTrack: true, traceSec: 60 },
+    note: '조용한 곳의 바닥 소음 · Slow · FFT 8192 · 미니멈 홀드·최소값 추적',
+    values: { weighting: 'A', timeWeighting: 'S', fftSize: 8192, style: 'line', scale: 'log', peakHold: true, minHold: true, maxTrack: false, minTrack: true, traceSec: 60 },
+  },
+  {
+    id: 'lowfreq',
+    name: '저주파',
+    note: '부밍음·웅웅거림 · Z특성(거르지 않음) · Slow · FFT 16384 · 1/3 옥타브 보기와 함께',
+    values: { weighting: 'Z', timeWeighting: 'S', fftSize: 16384, style: 'line', scale: 'log', peakHold: true, minHold: true, maxTrack: false, minTrack: false, traceSec: 60 },
   },
 ];
 

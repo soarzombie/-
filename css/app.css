@@ -149,6 +149,7 @@ body[data-view="home"] main { flex: 1 1 auto; min-height: 0; display: flex; padd
 .lv-now { grid-area: now; display: flex; justify-content: center; align-items: baseline; gap: 6px; line-height: 1.05; }
 .lv-now b { font-size: clamp(40px, 12vw, 52px); font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 .lv-now span { font-size: 19px; font-weight: 700; color: var(--ink-2); }
+.lv-tw { align-self: center; padding: 1px 6px; border: 1px solid var(--line); border-radius: 6px; font-size: 11px; font-weight: 700; color: var(--ink-3); }
 .analyzer[data-alert="true"] .lv-now b { color: var(--rec); }
 .lv-stats { grid-area: stats; display: flex; justify-content: center; flex-wrap: wrap; gap: 0 clamp(8px, 3vw, 14px); font-size: clamp(13px, 3.9vw, 15px); color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .lv-stats span { white-space: nowrap; }
@@ -720,4 +721,19 @@ select {
   .range-sheet > h2, .range-sheet > .alert, .range-sheet > .sheet-actions, .range-sheet > .range-freq { grid-column: 1 / -1; }
   .range-freq { grid-template-columns: auto 1fr; align-items: center; }
   .range-freq h3 { grid-column: 1 / -1; }
+}
+
+/* ---------- microphones ---------- */
+
+.an-mic { justify-self: center; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 700; color: var(--ink-2); }
+.an-mic.is-warn { color: var(--amber); }
+.an-sub.has-mic .an-mode-name { display: none; }
+.mic-field select { min-height: 44px; }
+.cal-file { display: grid; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.cal-file h3 { font-size: 15px; font-weight: 700; }
+.cal-file h3 small { font-weight: 500; color: var(--ink-3); }
+.inline-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+@media (orientation: landscape) and (min-width: 600px) {
+  .an-mic { max-width: 120px; }
+  .an-sub.has-mic .an-status span { display: none; }
 }

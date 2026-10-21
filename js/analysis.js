@@ -2,18 +2,19 @@
 // time, average and maximum spectrum, peaks, and a compact spectrum per frame (for the
 // spectrogram and for "the spectrum at the playback position"). Pure functions, runs under Node.
 
-import { binLevelTable, binLevels, frameSpectrum, levelHistory, findPeaks, logGrid, rangeIndex, reduceRanges } from './dsp.js';
+import { tauOf, binLevelTable, binLevels, frameSpectrum, levelHistory, findPeaks, logGrid, rangeIndex, reduceRanges } from './dsp.js';
 
 // Frequency points the per-frame spectra are kept at: 400 log-spaced, 20 Hz – 20 kHz.
 export const FRAME_GRID = logGrid(400, 20, 20000);
 
 // offset: dB added to dBFS (the phone's calibration, or 0 for plain digital level).
-// weighting: 'A' | 'C' | 'Z', for the levels and the spectra alike.
-export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFrames = 1500, weighting = 'A' } = {}) {
-  const levels = levelHistory(samples, rate, offset, 0.1, weighting);
+// weighting: 'A' | 'C' | 'Z', for the levels and the spectra alike; timeWeighting: 'F' | 'S';
+// correction: the microphone's frequency-response correction for the spectra (mics.js calCorrection).
+export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFrames = 1500, weighting = 'A', timeWeighting = 'F', correction = null } = {}) {
+  const levels = levelHistory(samples, rate, offset, 0.1, weighting, tauOf(timeWeighting));
   const bins = fftSize / 2;
   const binHz = rate / fftSize;
-  const table = binLevelTable(bins, binHz, weighting);
+  const table = binLevelTable(bins, binHz, weighting, correction);
   const freqs = Float32Array.from({ length: bins }, (_, k) => k * binHz);
   const idx = rangeIndex(freqs, FRAME_GRID.edges);
   const span = Math.max(0, samples.length - fftSize);
@@ -42,6 +43,7 @@ export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFra
     rate,
     offset,
     weighting,
+    timeWeighting,
     leq: levels.leq,
     lmax: levels.lmax,
     lmin: levels.lmin,

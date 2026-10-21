@@ -1,6 +1,6 @@
 // Per-device settings (kept in localStorage).
 
-export const APP_VERSION = '0.10.0';
+export const APP_VERSION = '0.11.0';
 
 const KEY = 'noise-meter:settings:v1';
 
@@ -12,6 +12,7 @@ const DEFAULTS = {
   view: 'spectrum', // 'spectrum' (frequency graph + time-axis graph below) | 'gram' (spectrogram) | 'octave' (1/3-octave bars)
   traceSec: 30, // seconds shown in the time-axis graph: 30 | 60 | 300
   weighting: 'A', // frequency weighting 'A' | 'C' | 'Z', for levels and spectrum alike
+  timeWeighting: 'F', // level detector 'F' (Fast 125 ms) | 'S' (Slow 1 s)
   style: 'fill', // 'fill' | 'line' | 'bar'
   fftSize: 4096,
   scale: 'log',
@@ -35,6 +36,12 @@ const DEFAULTS = {
   // dBFS -> dB SPL. Phones differ by 10 dB or more, so each device should be calibrated.
   offset: 100,
   calibratedAt: null,
+  // microphones (mics.js): the chosen input, the phone's own microphone, per-microphone calibration
+  micId: '', // deviceId from enumerateDevices; '' = the phone's default
+  micLabel: '',
+  baseMic: '', // name of the phone's own microphone (uses offset / calibratedAt above)
+  lastMic: '', // the microphone used last (for attached files and the calibration screen)
+  mics: {}, // name -> { offset, calibratedAt, cal: [[hz, db], ...], calName, calSerial }
   pin: '0000',
 };
 

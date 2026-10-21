@@ -1,6 +1,6 @@
 // AudioWorklet: frequency-weights the microphone signal sample by sample and reports
-// energy sums plus the Fast (125 ms) time-weighted level, so Leq, LAFmax and LAFmin
-// are computed from every sample rather than from sampled analyser frames.
+// energy sums plus the time-weighted level (Fast 125 ms or Slow 1 s; the `fast*` fields hold whichever
+// is set), so Leq, max and min are computed from every sample rather than from sampled analyser frames.
 // It also keeps the last `ringSec` seconds of raw sound, so "save" can include what was just heard
 // (held still while paused), and while recording it posts the raw sound in chunks (paused or not:
 // recording is separate from measuring).
@@ -13,7 +13,7 @@ class LevelProcessor extends AudioWorkletProcessor {
     const opts = options.processorOptions || {};
     this.setSos(opts.sos);
     this.blockSize = opts.blockSize || Math.round(sampleRate * 0.05);
-    this.kFast = 1 - Math.exp(-1 / (0.125 * sampleRate));
+    this.setTau(opts.tau || 0.125);
     this.fast = 0;
     this.ring = opts.ringSec > 0 ? new Float32Array(Math.round(sampleRate * opts.ringSec)) : null;
     this.ringPos = 0;
@@ -28,8 +28,13 @@ class LevelProcessor extends AudioWorkletProcessor {
       else if (m.type === 'clear') this.ringFilled = 0;
       else if (m.type === 'sos') this.setSos(m.sos);
       else if (m.type === 'record') this.record(m.on);
+      else if (m.type === 'tau') this.setTau(m.tau);
     };
     this.reset();
+  }
+
+  setTau(tau) {
+    this.kFast = 1 - Math.exp(-1 / (tau * sampleRate));
   }
 
   setSos(sos) {

@@ -363,7 +363,8 @@ async function chartSettings(page, picks, shotName) {
   assert.deepEqual([st.preset, st.fftSize, st.style, st.minHold, st.traceSec], ['custom', 16384, 'bar', true, 60], 'the own mix (공회전 + 막대)');
   // back to the settings the rest of this run expects
   await chartMenu(page, { style: own.style });
-  await chartSettings(page, { fft: String(own.fftSize), trace: String(own.traceSec) });
+  await chartSettings(page, { fft: String(own.fftSize), trace: String(own.traceSec), timeWeighting: own.timeWeighting });
+  assert.equal(await page.locator('#a-tw').textContent(), 'Fast');
 
   // axis ranges: frequency by quick pick and typed in, a range that is refused, fixed dB ranges,
   // a cursor that reads right on the narrowed axis, then back to the start

@@ -3,7 +3,7 @@
 // which sees every sample, keeps the last few seconds of sound and streams it while recording;
 // the spectrum comes from an AnalyserNode, per bin in dB with the same frequency weighting (A/C/Z).
 
-import { designWeighting, binLevelTable, binLevels, toDb, unitOf } from './dsp.js';
+import { designWeighting, binLevelTable, binLevels, toDb, unitOf, tauOf } from './dsp.js';
 
 const WARMUP_SEC = 0.5; // filter and Fast detector settle; also skips the tap on the screen
 const CLIP_LEVEL = 0.98;
@@ -31,11 +31,15 @@ function micError(code) {
 }
 
 export class Meter {
-  constructor(offset, weighting = 'A') {
+  constructor(offset, weighting = 'A', timeWeighting = 'F') {
     this.offset = offset;
     this.weighting = weighting;
+    this.timeWeighting = timeWeighting;
     this.onLevel = null; // (Fast level, dB) => void, about every 50 ms
     this.recording = null; // { chunks, samples, done } while recording
+    this.correction = null; // microphone frequency-response correction (mics.js), for the spectrum
+    this.inputLabel = ''; // the name of the microphone in use, once it is open
+    this.onInputLost = null; // the microphone was unplugged or taken away
     this.samples = 0;
     this.laf = -Infinity;
     this._paused = false;
@@ -55,18 +59,24 @@ export class Meter {
   }
 
   // Best called from a tap handler; otherwise check `running` and call wake() on the next tap.
-  async start(fftSize = 4096, ringSec = 0) {
+  // deviceId: a microphone from navigator.mediaDevices.enumerateDevices(); if it is gone, the phone's
+  // default microphone is used and `fellBack` is set.
+  async start(fftSize = 4096, ringSec = 0, deviceId = '') {
     if (!window.isSecureContext) throw micError('insecure');
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx || !navigator.mediaDevices?.getUserMedia) throw micError('unsupported');
     this.ctx = new Ctx();
     // Not awaited: without a recent tap the context stays suspended until wake() is called.
     this.ctx.resume().catch(() => {});
+    const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 };
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
-        video: false,
-      });
+      try {
+        this.stream = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { ...audio, deviceId: { exact: deviceId } } : audio, video: false });
+      } catch (err) {
+        if (!deviceId || !['OverconstrainedError', 'NotFoundError'].includes(err?.name)) throw err;
+        this.fellBack = true;
+        this.stream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
+      }
     } catch (err) {
       this.ctx.close();
       const code = {
@@ -84,6 +94,10 @@ export class Meter {
       this.stream.getTracks().forEach((t) => t.stop());
       throw new MicError('cancelled', '측정을 취소했습니다.');
     }
+    const track = this.stream.getAudioTracks()[0];
+    this.inputLabel = track?.label || '';
+    this.inputId = track?.getSettings?.().deviceId || '';
+    track?.addEventListener('ended', () => !this.stopped && this.onInputLost?.());
     try {
       if (!this.ctx.audioWorklet) throw micError('unsupported');
       await this.ctx.audioWorklet.addModule(new URL('./level-processor.js', import.meta.url));
@@ -93,7 +107,7 @@ export class Meter {
         numberOfInputs: 1,
         numberOfOutputs: 1,
         outputChannelCount: [1],
-        processorOptions: { sos: designWeighting(fs, this.weighting), blockSize: Math.round(fs * 0.05), ringSec },
+        processorOptions: { sos: designWeighting(fs, this.weighting), tau: tauOf(this.timeWeighting), blockSize: Math.round(fs * 0.05), ringSec },
       });
       this.analyser = this.ctx.createAnalyser();
       this.analyser.smoothingTimeConstant = 0.5;
@@ -138,7 +152,7 @@ export class Meter {
     this.analyser.fftSize = n;
     const bins = n / 2;
     this.binHz = this.sampleRate / n;
-    this.table = binLevelTable(bins, this.binHz, this.weighting);
+    this.table = binLevelTable(bins, this.binHz, this.weighting, this.correction);
     this.rawDb = new Float32Array(bins);
     this.levels = new Float32Array(bins);
     this.freqs = Float32Array.from({ length: bins }, (_, k) => k * this.binHz);
@@ -153,6 +167,21 @@ export class Meter {
     this.weighting = w;
     this.node?.port.postMessage({ type: 'sos', sos: designWeighting(this.sampleRate, w) });
     if (this.analyser) this.setFftSize(this.analyser.fftSize);
+    this.resetStats();
+  }
+
+  // Calibration of the microphone in use: offset (dB added to dBFS) and frequency-response correction.
+  setCalibration(offset, correction) {
+    this.offset = offset;
+    this.correction = correction;
+    if (this.analyser) this.setFftSize(this.analyser.fftSize);
+    this.resetStats();
+  }
+
+  // Fast ('F', 125 ms) or Slow ('S', 1 s). The max / min since reset start again.
+  setTimeWeighting(t) {
+    this.timeWeighting = t;
+    this.node?.port.postMessage({ type: 'tau', tau: tauOf(t) });
     this.resetStats();
   }
 

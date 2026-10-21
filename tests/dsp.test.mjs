@@ -13,6 +13,7 @@ import {
   bandLevels,
   newHolds,
   updateHolds,
+  tauOf,
   sosMagnitude,
   binLevelTable,
   binLevels,
@@ -30,6 +31,7 @@ import { encodeWav, decodeWav } from '../js/audio.js';
 import { columnRange } from '../js/timeline.js';
 import { freqAxis, freqTicks, freqToX, xToFreq, checkFreqRange, checkDbRange } from '../js/spectrum.js';
 import { PRESETS, PRESET_KEYS, choosePreset, customize, presetOf } from '../js/presets.js';
+import { micProfile, saveMicProfile, parseCalFile, calCorrection } from '../js/mics.js';
 
 // IEC 61672-1 A-weighting (dB) at the exact base-10 octave frequencies 1000 * 10^(0.3n).
 const IEC_A = [
@@ -325,14 +327,16 @@ test('analyzeSound of a two-part file: energy-average Leq, max/min of the parts,
   assert.ok(r.max[100] - r.min[100] > 20, 'a part with and a part without the 100 Hz tone');
 });
 
-test('third-octave bands run 25 Hz – 20 kHz and sum the bins that fall in them', () => {
-  assert.equal(BANDS.length, 30);
-  assert.equal(BANDS[0].label, '25');
-  assert.equal(BANDS[16].label, '1k');
+test('third-octave bands run 10 Hz – 20 kHz and sum the bins that fall in them', () => {
+  assert.equal(BANDS.length, 34);
+  assert.equal(BANDS[0].label, '10');
+  assert.equal(BANDS[20].label, '1k');
   assert.equal(BANDS.at(-1).label, '20k');
-  assert.ok(Math.abs(BANDS[16].exact - 1000) < 1e-9);
+  assert.ok(Math.abs(BANDS[20].exact - 1000) < 1e-9);
+  assert.ok(Math.abs(BANDS[0].exact - 9.84) < 0.01, 'nominal 10 Hz is the base-2 9.84 Hz');
+  assert.deepEqual(BANDS.filter((b) => b.low).map((b) => b.label), ['10', '12.5', '16'], 'under 20 Hz: a guide only');
   for (let i = 1; i < BANDS.length; i++) assert.ok(Math.abs(BANDS[i].lo - BANDS[i - 1].hi) < 1e-9, 'bands touch');
-  assert.deepEqual(Array.from(bandIndex(Float32Array.from([10, 25, 1000, 1100, 20000, 23000]))), [-1, 0, 16, 16, 29, -1]);
+  assert.deepEqual(Array.from(bandIndex(Float32Array.from([5, 10, 25, 1000, 1100, 20000, 23000]))), [-1, 0, 4, 20, 20, 33, -1]);
   const idx = Int16Array.from([-1, 3, 3, 4]);
   const out = bandLevels(Float32Array.from([90, 60, 60, -Infinity]), idx, 5);
   assert.ok(Math.abs(out[3] - (60 + 10 * Math.log10(2))) < 1e-4);
@@ -340,16 +344,20 @@ test('third-octave bands run 25 Hz – 20 kHz and sum the bins that fall in them
   assert.equal(out[0], -Infinity);
 });
 
-test('band levels of a tone equal the tone level, with a 16384-point analyser', () => {
+test('band levels of a tone equal the tone level, with the 32768-point analyser of the octave view', () => {
   const fs = 48000;
-  const N = 16384;
+  const N = 32768;
   const levels = binLevels(analyserSpectrum(sine(1000, 0.25, fs, N)), binLevelTable(N / 2, fs / N), 100);
   const freqs = Float32Array.from({ length: N / 2 }, (_, k) => (k * fs) / N);
   const bands = bandLevels(levels, bandIndex(freqs));
   const expected = toDb(0.25 ** 2 / 2, 100);
-  assert.ok(Math.abs(bands[16] - expected) < 0.3, `1 kHz band ${bands[16]} vs ${expected}`);
-  assert.ok(bands[13] < expected - 60 && bands[19] < expected - 60, 'neighbouring bands are quiet');
-  assert.ok(BANDS.every((_, b) => Number.isFinite(bands[b])), 'every band has bins at 2.9 Hz resolution');
+  assert.ok(Math.abs(bands[20] - expected) < 0.3, `1 kHz band ${bands[20]} vs ${expected}`);
+  assert.ok(bands[17] < expected - 60 && bands[23] < expected - 60, 'neighbouring bands are quiet');
+  assert.ok(BANDS.every((_, b) => Number.isFinite(bands[b])), 'every band, 10 Hz too, has bins at 1.46 Hz resolution');
+  for (const rate of [44100, 48000]) {
+    const idx = bandIndex(Float32Array.from({ length: N / 2 }, (_, k) => (k * rate) / N));
+    assert.ok(idx.includes(0), `the 10 Hz band has a bin at ${rate} Hz`);
+  }
 });
 
 function loadWorklet(fs) {
@@ -519,4 +527,76 @@ test('frequency axis over a chosen range: mapping, round trip and ticks', () => 
   assert.deepEqual(checkDbRange(-20, 100), [-20, 100]);
   assert.equal(typeof checkDbRange(50, 55), 'string');
   assert.equal(typeof checkDbRange(NaN, 80), 'string');
+});
+
+test('Slow time weighting (1 s) rises slower than Fast (125 ms), in levelHistory and the worklet', () => {
+  const fs = 48000;
+  // 1 s of silence, then a steady 1 kHz tone
+  const x = new Float64Array(3 * fs);
+  for (let i = fs; i < x.length; i++) x[i] = 0.2 * Math.sin((2 * Math.PI * 1000 * i) / fs);
+  const steady = toDb(0.02, 100);
+  const fast = levelHistory(x, fs, 100, 0.05, 'A', tauOf('F'));
+  const slow = levelHistory(x, fs, 100, 0.05, 'A', tauOf('S'));
+  const at = (r, t) => r.history[Math.round(t / r.step) - 1];
+  // 0.25 s after the start: Fast is nearly there (1 - e^-2 -> -0.6 dB), Slow is not (1 - e^-0.25 -> -6.5 dB)
+  assert.ok(Math.abs(at(fast, 1.25) - (steady + 10 * Math.log10(1 - Math.exp(-2)))) < 0.4, `Fast ${at(fast, 1.25)}`);
+  assert.ok(Math.abs(at(slow, 1.25) - (steady + 10 * Math.log10(1 - Math.exp(-0.25)))) < 0.4, `Slow ${at(slow, 1.25)}`);
+  assert.ok(Math.abs(at(slow, 3) - (steady + 10 * Math.log10(1 - Math.exp(-2)))) < 0.3, `Slow 2 s after the start: ${at(slow, 3)}`);
+  assert.equal(tauOf('X'), 0.125, 'unknown -> Fast');
+
+  // the worklet switches on a 'tau' message
+  const { Processor, messages } = loadWorklet(fs);
+  const proc = new Processor({ processorOptions: { sos: [], tau: tauOf('S') } });
+  const feed = (sec, amp) => {
+    for (let b = 0; b < (sec * fs) / 128; b++) proc.process([[Float32Array.from({ length: 128 }, (_, i) => amp * Math.sin((2 * Math.PI * 1000 * (b * 128 + i)) / fs))]]);
+  };
+  feed(0.25, 0.2);
+  const slowLevel = toDb(messages.at(-1).fast);
+  proc.port.onmessage({ data: { type: 'tau', tau: tauOf('F') } });
+  feed(0.5, 0.2); // from where Slow had got to, Fast is within 0.1 dB after 4 time constants
+  const fastLevel = toDb(messages.at(-1).fast);
+  const target = toDb(0.02);
+  assert.ok(slowLevel < target - 5, `Slow still rising after 0.25 s: ${slowLevel}`);
+  assert.ok(Math.abs(fastLevel - target) < 0.3, `Fast settles: ${fastLevel}`);
+});
+
+test('microphone calibration files: miniDSP, Dayton/REW style and bad files', () => {
+  const umik = ['"Sens Factor =-1.007dB, SERNO: 7090123"', '10.054\t-6.20', '20.0\t-1.50\t12.3', '100\t-0.20', '1000\t0.00', '10000\t0.80', '20000\t-2.40'].join('\r\n');
+  const u = parseCalFile(umik);
+  assert.equal(u.points.length, 6);
+  assert.equal(u.sensFactor, -1.007);
+  assert.equal(u.serial, '7090123');
+  assert.deepEqual(u.points[1], [20, -1.5], 'phase column ignored');
+  const rew = ['* Dayton Audio iMM-6C  Serial 123-4567', '* freq(Hz)  dB  phase', '20000, 1.1, 0', '5000, 0.4, 0', '1000, 0, 0', '200, 0.1, 0', '50, -0.9, 0', '18, -3.0, 0'].join('\n');
+  const r = parseCalFile(rew);
+  assert.equal(r.points[0][0], 18, 'sorted by frequency');
+  assert.equal(r.serial, '123-4567');
+  assert.throws(() => parseCalFile('hello\nworld'), /찾지 못했습니다/);
+  assert.throws(() => parseCalFile(['1000 0', '1100 0', '1200 0', '1300 0', '1400 0'].join('\n')), /좁습니다/);
+  assert.throws(() => parseCalFile(['10 -90', '100 0', '1000 0', '5000 0', '20000 0'].join('\n')), /이상합니다/);
+  // correction: minus the response, log-interpolated, held at the ends
+  const corr = calCorrection(u.points);
+  assert.ok(Math.abs(corr(1000)) < 1e-9);
+  assert.ok(Math.abs(corr(20) - 1.5) < 1e-9);
+  assert.ok(Math.abs(corr(Math.sqrt(20 * 100)) - (1.5 + 0.2) / 2) < 1e-9, 'halfway on a log scale');
+  assert.ok(Math.abs(corr(5) - 6.2) < 1e-9 && Math.abs(corr(24000) - 2.4) < 1e-9);
+  assert.equal(calCorrection(null), null);
+  // the spectrum table carries it
+  const t0 = binLevelTable(100, 10);
+  const t1 = binLevelTable(100, 10, 'A', calCorrection(u.points));
+  assert.ok(Math.abs(t1[2] - t0[2] - 1.5) < 1e-4, '20 Hz bin raised by 1.5 dB');
+});
+
+test('microphone profiles: the phone mic keeps the old offset, others start uncalibrated', () => {
+  const st = { offset: 103, calibratedAt: 1700000000000, baseMic: 'iPhone 마이크', mics: {} };
+  assert.deepEqual([micProfile(st, 'iPhone 마이크').offset, !!micProfile(st, 'iPhone 마이크').calibratedAt], [103, true]);
+  assert.deepEqual([micProfile(st, '').offset, micProfile(st, '').known], [103, true]);
+  const ext = micProfile(st, 'iMM-6C');
+  assert.deepEqual([ext.offset, ext.calibratedAt, ext.known], [103, null, false], 'external: starts from the phone offset, not calibrated');
+  const p1 = saveMicProfile(st, 'iMM-6C', { offset: 118.4, calibratedAt: 1, calName: 'imm.txt' });
+  assert.equal(p1.offset, undefined, 'the phone offset is untouched');
+  const st2 = { ...st, ...p1 };
+  assert.deepEqual([micProfile(st2, 'iMM-6C').offset, micProfile(st2, 'iMM-6C').calName, micProfile(st2, 'iPhone 마이크').offset], [118.4, 'imm.txt', 103]);
+  const p2 = saveMicProfile(st2, 'iPhone 마이크', { offset: 101, calibratedAt: 2 });
+  assert.deepEqual([p2.offset, p2.calibratedAt, p2.mics['iMM-6C'].offset], [101, 2, 118.4], 'the phone mic also updates the old fields');
 });

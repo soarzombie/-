@@ -9,6 +9,10 @@ const F4 = 12194.217;
 const A1000 = 1.9997; // dB, makes the analytic curve 0 dB at 1 kHz
 const C1000 = 0.0619;
 
+// Time weightings of the level detector: Fast (125 ms, follows quick changes) and Slow (1 s, steadier).
+export const TIME_WEIGHTINGS = { F: 0.125, S: 1 };
+export const tauOf = (t = 'F') => TIME_WEIGHTINGS[t] || TIME_WEIGHTINGS.F;
+
 // Frequency weightings: 'A' (default), 'C' (flatter, for loud and low sounds), 'Z' (none).
 export const WEIGHTINGS = ['A', 'C', 'Z'];
 export const unitOf = (w = 'A', digital = false) => `${digital ? 'dBFS' : 'dB'}(${w})`;
@@ -100,23 +104,26 @@ export function toDb(meanSquare, offset = 0) {
   return meanSquare > 0 ? 10 * Math.log10(meanSquare) + offset : -Infinity;
 }
 
-// Per-bin dB to add to analyser output for a weighted, calibrated level per bin.
-export function binLevelTable(binCount, binHz, weighting = 'A') {
+// Per-bin dB to add to analyser output for a weighted, calibrated level per bin. `correction(f)` is the
+// microphone's frequency-response correction from its calibration file (mics.js), if any.
+export function binLevelTable(binCount, binHz, weighting = 'A', correction = null) {
   const t = new Float32Array(binCount);
   t[0] = -Infinity; // DC is not sound
-  for (let k = 1; k < binCount; k++) t[k] = BIN_CORRECTION_DB + weightDb(k * binHz, weighting);
+  for (let k = 1; k < binCount; k++) t[k] = BIN_CORRECTION_DB + weightDb(k * binHz, weighting) + (correction ? correction(k * binHz) : 0);
   return t;
 }
 
-// 1/3-octave bands 25 Hz – 20 kHz (base-2 centres 1000 * 2^(n/3)); `major` marks octave centres.
+// 1/3-octave bands 10 Hz – 20 kHz (base-2 centres 1000 * 2^(n/3)); `major` marks octave centres, `low`
+// the bands under 20 Hz, where phone and USB microphones are not specified (shown as a guide only).
 const THIRD_LABELS = [
-  '25', '31.5', '40', '50', '63', '80', '100', '125', '160', '200', '250', '315', '400', '500', '630',
-  '800', '1k', '1.25k', '1.6k', '2k', '2.5k', '3.15k', '4k', '5k', '6.3k', '8k', '10k', '12.5k', '16k', '20k',
+  '10', '12.5', '16', '20', '25', '31.5', '40', '50', '63', '80', '100', '125', '160', '200', '250', '315', '400', '500',
+  '630', '800', '1k', '1.25k', '1.6k', '2k', '2.5k', '3.15k', '4k', '5k', '6.3k', '8k', '10k', '12.5k', '16k', '20k',
 ];
-const OCTAVE_LABELS = new Set(['31.5', '63', '125', '250', '500', '1k', '2k', '4k', '8k', '16k']);
+const OCTAVE_LABELS = new Set(['16', '31.5', '63', '125', '250', '500', '1k', '2k', '4k', '8k', '16k']);
+const BAND_1K = THIRD_LABELS.indexOf('1k');
 export const BANDS = THIRD_LABELS.map((label, i) => {
-  const exact = 1000 * 2 ** ((i - 16) / 3);
-  return { exact, label, major: OCTAVE_LABELS.has(label), lo: exact * 2 ** (-1 / 6), hi: exact * 2 ** (1 / 6) };
+  const exact = 1000 * 2 ** ((i - BAND_1K) / 3);
+  return { exact, label, major: OCTAVE_LABELS.has(label), low: exact < 19, lo: exact * 2 ** (-1 / 6), hi: exact * 2 ** (1 / 6) };
 });
 
 // Band number for each frequency point (-1 outside the bands).
@@ -326,13 +333,13 @@ export function stft(samples, rate, fftSize = 2048, hop = fftSize / 2) {
   return { frames, binHz: rate / fftSize, hopSec: hop / rate };
 }
 
-// The meter's level chain run over a whole recording: frequency weighting, Fast (125 ms) detector.
-// Returns LAeq of the whole file, LAFmax / LAFmin after the first 0.5 s (as live), and the Fast
+// The meter's level chain run over a whole recording: frequency weighting, Fast (or Slow) detector.
+// Returns Leq of the whole file, max / min after the first 0.5 s (as live), and the time-weighted
 // level every `step` seconds for a time-history graph.
-export function levelHistory(samples, rate, offset = 0, step = 0.1, weighting = 'A') {
+export function levelHistory(samples, rate, offset = 0, step = 0.1, weighting = 'A', tau = 0.125) {
   const sos = designWeighting(rate, weighting);
   const st = sos.map(() => [0, 0]);
-  const kFast = 1 - Math.exp(-1 / (0.125 * rate));
+  const kFast = 1 - Math.exp(-1 / (tau * rate));
   const warm = samples.length > rate ? Math.round(0.5 * rate) : 0;
   const every = Math.max(1, Math.round(step * rate));
   const history = new Float32Array(Math.floor(samples.length / every));
