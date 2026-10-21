@@ -86,6 +86,49 @@ function writeCabinNoise(file, seconds = 6, rate = 48000) {
   fs.writeFileSync(file, buf);
 }
 
+// Two steady parts: 1 kHz then 100 Hz, `part` seconds each (levels known exactly).
+function writeTwoTone(file, part = 3, rate = 48000) {
+  const n = 2 * part * rate;
+  const buf = Buffer.alloc(44 + n * 2);
+  writeWavHeader(buf, n, rate);
+  for (let i = 0; i < n; i++) {
+    const v = i < part * rate ? 0.1 * Math.sin((2 * Math.PI * 1000 * i) / rate) : 0.5 * Math.sin((2 * Math.PI * 100 * i) / rate);
+    buf.writeInt16LE(Math.round(v * 32767), 44 + i * 2);
+  }
+  fs.writeFileSync(file, buf);
+}
+
+// 20 s demo recording: road/tyre noise, engine orders rising with rpm, a brake squeal and a knock.
+function writeDemoFile(file, seconds = 20, rate = 48000) {
+  const n = seconds * rate;
+  const x = new Float64Array(n);
+  let seed = 99;
+  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 2 - 1;
+  let road = 0;
+  let tyre = 0;
+  let phase = 0;
+  for (let i = 0; i < n; i++) {
+    const t = i / rate;
+    const w = rand();
+    road += (w - road) * 0.02;
+    tyre += (w - tyre) * 0.15;
+    phase += (2 * Math.PI * (45 + 2.5 * t)) / rate; // engine speeding up
+    x[i] = 3 * road + 0.6 * tyre + 0.04 * w + 0.12 * (Math.sin(phase) + 0.6 * Math.sin(2 * phase) + 0.3 * Math.sin(4 * phase));
+  }
+  const rms = Math.sqrt(x.reduce((s, v) => s + v * v, 0) / n);
+  for (let i = 0; i < n; i++) {
+    const t = i / rate;
+    let v = (x[i] / rms) * 0.1;
+    if (t > 8 && t < 11.5) v += 0.05 * Math.sin(Math.PI * ((t - 8) / 3.5)) * Math.sin(2 * Math.PI * 3150 * t); // brake squeal
+    if (t > 15 && t < 15.25) v += 0.6 * Math.exp(-(t - 15) * 25) * (Math.sin(2 * Math.PI * 70 * t) + 0.5 * rand()); // knock
+    x[i] = v;
+  }
+  const buf = Buffer.alloc(44 + n * 2);
+  writeWavHeader(buf, n, rate);
+  for (let i = 0; i < n; i++) buf.writeInt16LE(Math.max(-32767, Math.min(32767, Math.round(x[i] * 32767))), 44 + i * 2);
+  fs.writeFileSync(file, buf);
+}
+
 const toneDb = (amp, aWeight = 0) => 20 * Math.log10(amp / Math.SQRT2) + OFFSET + aWeight;
 
 async function launch(wav) {
@@ -236,7 +279,7 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
   assert.deepEqual(span, [20, 20000], 'saved spectrum spans 20 Hz – 20 kHz');
   const [csv] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: /엑셀/ }).click()]);
   const csvText = fs.readFileSync(await csv.path(), 'utf8');
-  assert.ok(csvText.startsWith('﻿일시,차량번호'), 'CSV header with BOM');
+  assert.ok(csvText.startsWith('\uFEFF일시,출처,차량번호'), 'CSV header with BOM');
   await page.locator('.record-row').click();
   await page.waitForSelector('.stats-grid');
   assert.ok(Math.abs((await num(page, '.stats-grid div:first-child b')) - expected1) < 0.3);
@@ -301,6 +344,47 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
   console.log(`100 Hz: now ${now2} dB(A), expected ${expected2.toFixed(1)}; peak ${peak2} Hz`);
   assert.ok(Math.abs(now2 - expected2) < 0.6, 'A-weighted level of 100 Hz tone');
   assert.ok(Math.abs(peak2 - 100) < 6, 'low-frequency peak');
+
+  // attached file: 3 s of 1 kHz (77.0 dB(A)) then 3 s of 100 Hz (71.9 dB(A))
+  // (passed as a buffer: Playwright here cannot attach files from non-ASCII paths, and the Korean name
+  // is part of what is being checked)
+  const twoTone = path.join(tmp, 'two-tone.wav');
+  writeTwoTone(twoTone);
+  await page.locator('.tabbar a[data-tab=file]').click();
+  await page.setInputFiles('#fa-input', { name: '두 구간 시험음.wav', mimeType: 'audio/wav', buffer: fs.readFileSync(twoTone) });
+  await page.waitForSelector('#fa-result .stats-grid', { timeout: 20000 });
+  const l1 = toneDb(0.1);
+  const l2 = toneDb(0.5, -19.1);
+  const fileLeq = 10 * Math.log10((10 ** (l1 / 10) + 10 ** (l2 / 10)) / 2);
+  const fLeq = await num(page, '#fa-result .stats-grid div:nth-child(1) b');
+  const fMax = await num(page, '#fa-result .stats-grid div:nth-child(2) b');
+  const fMin = await num(page, '#fa-result .stats-grid div:nth-child(3) b');
+  console.log(`file: Leq ${fLeq} (expected ${fileLeq.toFixed(1)}), max ${fMax}, min ${fMin}`);
+  assert.ok(Math.abs(fLeq - fileLeq) < 0.3, 'file Leq');
+  assert.ok(Math.abs(fMax - l1) < 0.4 && Math.abs(fMin - l2) < 0.6, 'file max/min');
+  assert.match(await page.locator('.file-name').textContent(), /두 구간 시험음/);
+  assert.match(await page.locator('#fa-result .meta').textContent(), /1,00\d Hz|99\d Hz/);
+  // digital level: the same numbers without the +100 dB calibration
+  await page.getByRole('button', { name: /레벨 기준/ }).click();
+  await page.waitForFunction(() => /dBFS/.test(document.querySelector('#fa-result .stats-grid small')?.textContent || ''));
+  assert.ok(Math.abs((await num(page, '#fa-result .stats-grid div:nth-child(1) b')) - (fileLeq - OFFSET)) < 0.3, 'dBFS Leq');
+  await page.getByRole('button', { name: /레벨 기준/ }).click();
+  await page.waitForFunction(() => /dB\(A\)/.test(document.querySelector('#fa-result .stats-grid small')?.textContent || ''));
+  // tapping the time history seeks; the spectrum then shows that moment
+  await page.evaluate(() => document.querySelector('#fa-time').scrollIntoView({ block: 'center' }));
+  const tl = await page.locator('#fa-time').boundingBox();
+  await page.mouse.click(tl.x + 30 + (tl.width - 36) * 0.9, tl.y + tl.height / 2);
+  const t = await page.evaluate(() => document.querySelector('#fa-audio').currentTime);
+  assert.ok(Math.abs(t - 5.4) < 0.4, `seek to ${t}`);
+  assert.match(await page.locator('#fa-cur-label').textContent(), /재생 위치/);
+  await page.getByRole('button', { name: '기록에 저장' }).click();
+  await page.locator('dialog.sheet').getByRole('button', { name: '저장' }).click();
+  await page.waitForSelector('#toast:not([hidden])');
+  await page.locator('.tabbar a[data-tab=history]').click();
+  await page.locator('.record-row').first().click();
+  await page.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
+  assert.match(await page.locator('.rec-head h1').textContent(), /두 구간 시험음/);
+  assert.ok(Math.abs((await num(page, '.stats-grid div:first-child b')) - fileLeq) < 0.3, 'saved file Leq');
   await browser.close();
 
   // Run 3: cabin-like noise, screenshots in both orientations
@@ -350,6 +434,29 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
     await shot(page, `record-${name}`);
     await page.locator('.audio-card').scrollIntoViewIfNeeded();
     await shot(page, `record-${name}-sound`);
+    await page.context().close();
+  }
+
+  // file analysis screenshots with the 20 s demo recording
+  const demo = path.join(tmp, 'demo.wav');
+  writeDemoFile(demo);
+  const demoFile = { name: '주행 녹음 예시.wav', mimeType: 'audio/wav', buffer: fs.readFileSync(demo) };
+  for (const [name, viewport] of [['portrait', { width: 390, height: 844 }], ['landscape', { width: 844, height: 390 }]]) {
+    page = await newPage(browser, base, errors, { viewport, mic: false });
+    await page.evaluate(() => (location.hash = '#/file'));
+    await page.waitForSelector('#fa-drop');
+    if (name === 'portrait') await shot(page, 'file-empty');
+    await page.setInputFiles('#fa-input', demoFile);
+    await page.waitForSelector('#fa-result .stats-grid', { timeout: 20000 });
+    await page.waitForTimeout(400);
+    await shot(page, `file-${name}`);
+    await shot(page, `file-${name}-full`, true);
+    await page.evaluate(() => document.querySelector('#fa-gram').scrollIntoView({ block: 'center' }));
+    const gb = await page.locator('#fa-gram').boundingBox();
+    await page.mouse.click(gb.x + gb.width / 2, gb.y + 8 + (gb.height - 30) * (1 - 9.5 / 20)); // the squeal, ~9.5 s
+    await page.waitForTimeout(300);
+    await page.locator('.fa-chart').scrollIntoViewIfNeeded();
+    await shot(page, `file-${name}-seek`, true);
     await page.context().close();
   }
   await browser.close();

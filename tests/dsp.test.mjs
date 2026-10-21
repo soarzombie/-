@@ -14,8 +14,10 @@ import {
   logGrid,
   findPeaks,
   stft,
+  levelHistory,
   toDb,
 } from '../js/dsp.js';
+import { analyzeSound, frameAt } from '../js/analysis.js';
 import { encodeWav, decodeWav } from '../js/audio.js';
 
 // IEC 61672-1 A-weighting (dB) at the exact base-10 octave frequencies 1000 * 10^(0.3n).
@@ -248,4 +250,39 @@ test('worklet keeps the last ringSec seconds of sound, oldest first, and holds i
   proc.port.onmessage({ data: { type: 'clear' } });
   assert.equal(dump().length, 0);
   assert.ok(messages.some((m) => m.type === 'level'));
+});
+
+test('levelHistory gives the same LAeq / LAFmax / LAFmin as the worklet for a steady tone', () => {
+  const fs = 48000;
+  const x = sine(1000, 0.2, fs, 2 * fs);
+  const r = levelHistory(x, fs, 100, 0.1);
+  const expected = toDb(0.02, 100);
+  assert.ok(Math.abs(r.leq - expected) < 0.05, `Leq ${r.leq}`);
+  assert.ok(Math.abs(r.lmax - expected) < 0.2 && Math.abs(r.lmin - expected) < 0.2, `max ${r.lmax} min ${r.lmin}`);
+  assert.equal(r.history.length, 20);
+  assert.ok(Math.abs(r.history[15] - expected) < 0.2);
+  assert.ok(Math.abs(r.peak - 0.2) < 1e-3);
+});
+
+test('analyzeSound of a two-part file: energy-average Leq, max/min of the parts, peaks and per-time spectra', () => {
+  const fs = 48000;
+  const a1 = sine(1000, 0.1, fs, 3 * fs);
+  const a2 = sine(100, 0.5, fs, 3 * fs);
+  const x = new Float32Array(6 * fs);
+  x.set(a1, 0);
+  x.set(a2, 3 * fs);
+  const r = analyzeSound(x, fs, 100);
+  const l1 = toDb(0.005, 100); // 77.0 dB(A)
+  const l2 = toDb(0.125, 100) + aWeightDb(100); // 71.8 dB(A)
+  const leq = 10 * Math.log10((10 ** (l1 / 10) + 10 ** (l2 / 10)) / 2);
+  assert.ok(Math.abs(r.duration - 6) < 1e-9);
+  assert.ok(Math.abs(r.leq - leq) < 0.2, `Leq ${r.leq} vs ${leq}`);
+  assert.ok(Math.abs(r.lmax - l1) < 0.3, `max ${r.lmax}`);
+  assert.ok(Math.abs(r.lmin - l2) < 0.5, `min ${r.lmin}`);
+  const hz = r.peaks.map((p) => p.hz).sort((a, b) => a - b);
+  assert.ok(hz.some((f) => Math.abs(f - 100) < 4) && hz.some((f) => Math.abs(f - 1000) < 6), `peaks ${hz}`);
+  const loudestAt = (frame) => r.freqs[frame.indexOf(Math.max(...frame))];
+  assert.ok(Math.abs(loudestAt(frameAt(r, 1.5)) - 1000) < 40, 'early frame is the 1 kHz part');
+  assert.ok(Math.abs(loudestAt(frameAt(r, 4.5)) - 100) < 8, 'late frame is the 100 Hz part');
+  assert.ok(r.frames.length <= 1501 && r.frames[0].length === 400);
 });

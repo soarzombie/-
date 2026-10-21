@@ -168,7 +168,22 @@ function refine(levels, k) {
   return k + (denom !== 0 && Number.isFinite(denom) ? Math.max(-0.5, Math.min(0.5, (0.5 * (a - c)) / denom)) : 0);
 }
 
-// In-place iterative radix-2 FFT (length must be a power of two).
+// In-place iterative radix-2 FFT (length must be a power of two). Twiddle factors are cached
+// per size, so analysing a whole file costs no trigonometry per frame.
+const TWIDDLES = new Map();
+function twiddles(n) {
+  let t = TWIDDLES.get(n);
+  if (!t) {
+    t = { cos: new Float64Array(n / 2), sin: new Float64Array(n / 2) };
+    for (let k = 0; k < n / 2; k++) {
+      t.cos[k] = Math.cos((-2 * Math.PI * k) / n);
+      t.sin[k] = Math.sin((-2 * Math.PI * k) / n);
+    }
+    TWIDDLES.set(n, t);
+  }
+  return t;
+}
+
 export function fft(re, im) {
   const n = re.length;
   for (let i = 1, j = 0; i < n; i++) {
@@ -180,13 +195,14 @@ export function fft(re, im) {
       [im[i], im[j]] = [im[j], im[i]];
     }
   }
+  const { cos, sin } = twiddles(n);
   for (let len = 2; len <= n; len <<= 1) {
-    const ang = (-2 * Math.PI) / len;
     const half = len >> 1;
+    const step = n / len;
     for (let i = 0; i < n; i += len) {
       for (let k = 0; k < half; k++) {
-        const wr = Math.cos(ang * k);
-        const wi = Math.sin(ang * k);
+        const wr = cos[k * step];
+        const wi = sin[k * step];
         const a = i + k;
         const b = a + half;
         const vr = re[b] * wr - im[b] * wi;
@@ -200,25 +216,77 @@ export function fft(re, im) {
   }
 }
 
-// Short-time spectra of recorded samples in the AnalyserNode's convention (Blackman window,
-// 1/N scaling, dB of |X|), so binLevels() turns them into the same dB(A) the live view shows.
-export function stft(samples, rate, fftSize = 2048, hop = fftSize / 2) {
-  const win = Float64Array.from(
-    { length: fftSize },
-    (_, n) => 0.42 - 0.5 * Math.cos((2 * Math.PI * n) / fftSize) + 0.08 * Math.cos((4 * Math.PI * n) / fftSize),
-  );
+const WINDOWS = new Map();
+function blackman(n) {
+  let w = WINDOWS.get(n);
+  if (!w) {
+    w = Float64Array.from({ length: n }, (_, i) => 0.42 - 0.5 * Math.cos((2 * Math.PI * i) / n) + 0.08 * Math.cos((4 * Math.PI * i) / n));
+    WINDOWS.set(n, w);
+  }
+  return w;
+}
+
+// One frame in the AnalyserNode's convention (Blackman window, 1/N scaling, dB of |X|), so
+// binLevels() turns it into the same dB(A) per bin the live view shows.
+export function frameSpectrum(samples, start, fftSize, out = new Float32Array(fftSize / 2)) {
+  const win = blackman(fftSize);
   const re = new Float64Array(fftSize);
   const im = new Float64Array(fftSize);
+  for (let n = 0; n < fftSize; n++) re[n] = (samples[start + n] || 0) * win[n];
+  fft(re, im);
+  for (let k = 0; k < out.length; k++) out[k] = 20 * Math.log10(Math.hypot(re[k], im[k]) / fftSize);
+  return out;
+}
+
+export function stft(samples, rate, fftSize = 2048, hop = fftSize / 2) {
   const frames = [];
-  for (let start = 0; start + fftSize <= samples.length; start += hop) {
-    for (let n = 0; n < fftSize; n++) {
-      re[n] = samples[start + n] * win[n];
-      im[n] = 0;
-    }
-    fft(re, im);
-    const out = new Float32Array(fftSize / 2);
-    for (let k = 0; k < out.length; k++) out[k] = 20 * Math.log10(Math.hypot(re[k], im[k]) / fftSize);
-    frames.push(out);
-  }
+  for (let start = 0; start + fftSize <= samples.length; start += hop) frames.push(frameSpectrum(samples, start, fftSize));
   return { frames, binHz: rate / fftSize, hopSec: hop / rate };
+}
+
+// The meter's level chain run over a whole recording: A-weighting, Fast (125 ms) detector.
+// Returns LAeq of the whole file, LAFmax / LAFmin after the first 0.5 s (as live), and the Fast
+// level every `step` seconds for a time-history graph.
+export function levelHistory(samples, rate, offset = 0, step = 0.1) {
+  const sos = designAWeighting(rate);
+  const st = sos.map(() => [0, 0]);
+  const kFast = 1 - Math.exp(-1 / (0.125 * rate));
+  const warm = samples.length > rate ? Math.round(0.5 * rate) : 0;
+  const every = Math.max(1, Math.round(step * rate));
+  const history = new Float32Array(Math.floor(samples.length / every));
+  let fast = 0;
+  let sum = 0;
+  let max = 0;
+  let min = Infinity;
+  let peak = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const x = samples[i];
+    let y = x;
+    for (let s = 0; s < sos.length; s++) {
+      const c = sos[s];
+      const z = st[s];
+      const out = c[0] * y + z[0];
+      z[0] = c[1] * y - c[3] * out + z[1];
+      z[1] = c[2] * y - c[4] * out;
+      y = out;
+    }
+    const y2 = y * y;
+    sum += y2;
+    fast += (y2 - fast) * kFast;
+    if (i >= warm) {
+      if (fast > max) max = fast;
+      if (fast < min) min = fast;
+    }
+    const ax = x < 0 ? -x : x;
+    if (ax > peak) peak = ax;
+    if ((i + 1) % every === 0) history[(i + 1) / every - 1] = toDb(fast, offset);
+  }
+  return {
+    leq: toDb(sum / Math.max(1, samples.length), offset),
+    lmax: toDb(max, offset),
+    lmin: Number.isFinite(min) ? toDb(min, offset) : -Infinity,
+    history,
+    step: every / rate,
+    peak,
+  };
 }

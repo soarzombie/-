@@ -4,6 +4,7 @@
 
 import { reduceRanges } from './dsp.js';
 import { SPECTRUM_COLORS, plotBox, columnsFor, drawXAxis } from './spectrum.js';
+import { fmtClock } from './format.js';
 
 const SPAN = 60; // dB of colour range below the running top
 
@@ -31,9 +32,10 @@ const LUT = (() => {
 })();
 
 export class SpectrogramView {
-  constructor(host, { rowsPerSec = 20 } = {}) {
+  constructor(host, { rowsPerSec = 20, onSeek = null } = {}) {
     this.host = host;
     this.rowsPerSec = rowsPerSec;
+    this.unit = 'dB(A)';
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'spectrum-canvas';
     this.canvas.setAttribute('role', 'img');
@@ -49,6 +51,24 @@ export class SpectrogramView {
     this.playhead = null;
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(host);
+    if (onSeek) {
+      // saved sound: tap a row to play from there (bottom = start, top = end)
+      let dragging = false;
+      const seek = (e) => {
+        if (!this.staticData || !this.box) return;
+        const yy = e.clientY - this.host.getBoundingClientRect().top;
+        const t = ((this.box.yBot - yy) / (this.box.yBot - this.box.yTop)) * this.staticData.durationSec;
+        onSeek(Math.max(0, Math.min(this.staticData.durationSec, t)));
+      };
+      host.addEventListener('pointerdown', (e) => {
+        dragging = true;
+        host.setPointerCapture?.(e.pointerId);
+        seek(e);
+      });
+      host.addEventListener('pointermove', (e) => dragging && seek(e));
+      host.addEventListener('pointerup', () => (dragging = false));
+      host.addEventListener('pointercancel', () => (dragging = false));
+    }
   }
 
   configure({ scale = this.scale, xLabels = this.xLabels } = {}) {
@@ -118,9 +138,11 @@ export class SpectrogramView {
     this.draw();
   }
 
-  // Saved: frames are dB(A)-per-bin spectra, oldest first, spaced hopSec apart.
-  setStatic(frames, freqs, durationSec) {
-    this.staticData = { frames, freqs, durationSec };
+  // Saved: frames are dB(A) spectra at `freqs`, oldest first, evenly spread over durationSec.
+  // labels 'relative' counts back from the save moment at the top; 'absolute' shows m:ss from the start.
+  setStatic(frames, freqs, durationSec, { labels = 'relative', unit = 'dB(A)' } = {}) {
+    this.staticData = { frames, freqs, durationSec, labels };
+    this.unit = unit;
     this.renderStatic();
     this.draw();
   }
@@ -133,13 +155,23 @@ export class SpectrogramView {
     const all = columnsPerFrame.flatMap((f) => Array.from(f)).filter(Number.isFinite).sort((a, b) => a - b);
     this.top = all.length ? all[Math.floor(all.length * 0.995)] + 2 : 60;
     const H = this.img.height;
-    const image = this.ig.createImageData(this.img.width, H);
-    const row = { data: new Uint8ClampedArray(this.img.width * 4) };
+    const W = this.img.width;
+    const image = this.ig.createImageData(W, H);
+    const row = { data: new Uint8ClampedArray(W * 4) };
+    const values = new Float32Array(W);
+    const F = frames.length;
     for (let y = 0; y < H; y++) {
-      // top row = the newest frame
-      const f = Math.round((1 - y / Math.max(1, H - 1)) * (frames.length - 1));
-      this.paintRow(row, columnsPerFrame[f], this.top - SPAN);
-      image.data.set(row.data, y * this.img.width * 4);
+      // top row = the newest frames; each row keeps the loudest of the frames it covers,
+      // so a short knock in a long file still shows
+      const f1 = Math.min(F - 1, Math.floor(((H - y) / H) * F));
+      const f0 = Math.max(0, Math.min(f1, Math.floor(((H - y - 1) / H) * F)));
+      values.fill(-Infinity);
+      for (let f = f0; f <= f1; f++) {
+        const col = columnsPerFrame[f];
+        for (let i = 0; i < W; i++) if (col[i] > values[i]) values[i] = col[i];
+      }
+      this.paintRow(row, values, this.top - SPAN);
+      image.data.set(row.data, y * W * 4);
     }
     this.ig.putImageData(image, 0, 0);
   }
@@ -159,15 +191,17 @@ export class SpectrogramView {
     g.imageSmoothingEnabled = true;
     g.drawImage(this.img, box.x0, box.yTop, box.x1 - box.x0, box.yBot - box.yTop);
 
-    // time axis: 0 at the top, older further down
+    // time axis: newest at the top, older further down
     const total = this.staticData ? this.staticData.durationSec : (box.yBot - box.yTop) / this.rowsPerSec;
-    const every = total > 24 ? 10 : total > 10 ? 5 : 2;
+    const every = [2, 5, 10, 15, 30, 60, 120, 300].find((s) => total / s <= 6) || 600;
     g.font = `500 ${11 * k}px ${c.font}`;
     g.fillStyle = c.axis;
     g.textAlign = 'left';
+    const absolute = this.staticData?.labels === 'absolute';
     for (let s = 0; s <= total + 1e-6; s += every) {
-      const yy = box.yTop + (s / total) * (box.yBot - box.yTop);
-      g.fillText(s === 0 ? (this.staticData ? '저장' : '지금') : `-${s}초`, 2 * k, Math.min(box.yBot, Math.max(box.yTop + 9 * k, yy + 4 * k)));
+      const yy = absolute ? box.yBot - (s / total) * (box.yBot - box.yTop) : box.yTop + (s / total) * (box.yBot - box.yTop);
+      const text = absolute ? fmtClock(s) : s === 0 ? (this.staticData ? '저장' : '지금') : `-${s}초`;
+      g.fillText(text, 2 * k, Math.min(box.yBot, Math.max(box.yTop + 9 * k, yy + 4 * k)));
     }
     if (this.xLabels) drawXAxis(g, box, this.h, this.scale, k, c);
 
@@ -183,7 +217,7 @@ export class SpectrogramView {
     if (this.top != null) {
       g.textAlign = 'right';
       g.fillStyle = 'rgba(255,255,255,0.8)';
-      g.fillText(`${Math.round(this.top - SPAN)}–${Math.round(this.top)} dB(A)`, box.x1 - 4 * k, box.yTop + 13 * k);
+      g.fillText(`${Math.round(this.top - SPAN)}–${Math.round(this.top)} ${this.unit}`, box.x1 - 4 * k, box.yTop + 13 * k);
     }
   }
 

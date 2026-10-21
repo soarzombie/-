@@ -14,12 +14,14 @@ A company-internal real-time noise analyzer web app (PWA) for field use, referen
 
 ```
 index.html, css/app.css     App shell (bottom tab bar) and styles (dark only; portrait and landscape analyzer layouts)
-js/app.js                   Screens + hash router (#/ analyzer, #/history, #/record/<id>, #/settings)
+js/app.js                   Screens + hash router (#/ analyzer, #/file attached-file analysis, #/history, #/record/<id>, #/settings)
 js/meter.js                 Mic meter: getUserMedia -> AudioWorklet (LAF, LAeq/LAFmax/LAFmin since reset, sound ring buffer) + AnalyserNode (spectrum per bin)
 js/level-processor.js       AudioWorklet: A-weighting biquads, energy sums, Fast (125 ms) max/min, raw-sound ring buffer (dump/pause/clear messages)
 js/spectrum.js              drawSpectrum() + SpectrumView: fill/line styles, max hold, log/linear axis fixed to 20 kHz, peak labels, A/B cursors; plotBox/freqToX shared layout
 js/spectrogram.js           SpectrogramView: live waterfall (newest row on top) and static render from saved sound with playhead
-js/audio.js                 encodeWav/decodeWav (16-bit mono PCM)
+js/audio.js                 encodeWav/decodeWav (16-bit mono PCM), decodeAudioFile (any browser-playable file -> 48 kHz mono, first 5 min)
+js/analysis.js              analyzeSound(): levelHistory + average/max spectrum + per-frame spectra on a 400-point log grid + peaks; frameAt()
+js/timeline.js              TimelineView: Fast level over time with Leq line and playhead, tap to seek
 js/gauge.js                 SVG needle gauge 20–130 dB with alert zone and min/max marks
 js/dsp.js                   Pure DSP (A-weighting design, binLevelTable/binLevels, findPeaks, rangeIndex/reduceRanges, logGrid, fft/stft)
 js/settings.js              localStorage settings (display options, calibration offset, alert level, PIN)
@@ -49,6 +51,7 @@ No build step. After changing any cached file, bump `VERSION` in `sw.js` (and ad
 - **Layouts:** portrait = head, chart (fills spare height), option chips, gauge with the controls row overlapping its hub, numbers; landscape (>= 600px wide) = chart full screen with numbers/status overlaid and one bottom control row; the tab bar hides on the analyzer in landscape.
 - **Frequency axis** is always 20 Hz – 20 kHz (log) / 0 – 20 kHz (linear); the spectrogram uses the same plotBox so columns line up with the spectrum.
 - **Saved snapshots** store a 241-point log-spaced resample (20 Hz and 20 kHz included) of the current and max-hold spectra (missing points as -999), stats, peaks and, if enabled, `audio` (WAV Blob) + `audioSec`. The record screen recomputes the spectrogram from the WAV with `stft()` (same analyser convention, so levels match the live view).
+- **Attached files** are analysed on the device only: decode -> analyzeSound() with the calibration offset ("보정 dB(A)") or 0 ("파일 dBFS"). Saved file records have `source: 'file'`, `fileName`, `unit`, and keep the original file as `audio` when <= 30 MB. Records with sound (mic or file) rebuild spectrogram + timeline with analyzeSound() on open.
 - **Copy:** Korean, plain words. **Escaping:** user text goes through `esc()`; CSV cells are guarded against formula injection.
 - **Testing:** DSP changes need unit tests in `tests/dsp.test.mjs`; flow changes should keep `tests/e2e.cjs` passing.
 

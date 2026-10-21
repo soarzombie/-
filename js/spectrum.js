@@ -69,7 +69,7 @@ export function drawXAxis(g, box, h, scale, k, c) {
 }
 
 // data: { freqs, cur, max?, peaks? }
-// opts: { scale, style, range: [lo, hi], fontScale, colors, cache, xLabels, cursors: [{ hz, name }] }
+// opts: { scale, style, range: [lo, hi], unit, fontScale, colors, cache, xLabels, cursors: [{ hz, name }] }
 // Returns the plot box and the per-column values it drew (for cursor read-outs).
 export function drawSpectrum(g, w, h, data, opts = {}) {
   const c = opts.colors || SPECTRUM_COLORS;
@@ -100,7 +100,7 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
     g.stroke();
     g.fillText(String(v), 2 * k, yy + fs * 0.35);
   }
-  g.fillText('dB(A)', 2 * k, Math.max(fs, y(hi - step / 2) + fs * 0.35));
+  g.fillText(opts.unit || 'dB(A)', 2 * k, Math.max(fs, y(hi - step / 2) + fs * 0.35));
   const ticks = scale === 'log' ? LOG_TICKS : Array.from({ length: FMAX / 2000 + 1 }, (_, i) => i * 2000);
   ticks.forEach((f) => {
     const xx = Math.round(freqToX(f, box, scale)) + 0.5;

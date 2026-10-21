@@ -1,14 +1,16 @@
 // Screens and navigation. Routes live in the URL hash so the phone's back button works:
-// #/ (real-time analyzer), #/history, #/record/<id>, #/settings
+// #/ (real-time analyzer), #/file (analyse an attached file), #/history, #/record/<id>, #/settings
 
 import { APP_VERSION, getSettings, saveSettings, rememberVehicle } from './settings.js';
 import { Meter, FFT_SIZES } from './meter.js';
-import { findPeaks, logGrid, rangeIndex, reduceRanges, stft, binLevelTable, binLevels } from './dsp.js';
+import { findPeaks, logGrid, rangeIndex, reduceRanges } from './dsp.js';
 import * as store from './store.js';
 import { esc, fmtDb, fmtHz, fmtClock, fmtDate, fmtDay, fmtShortDate, fmtTime, fileStamp } from './format.js';
 import { SpectrumView } from './spectrum.js';
 import { SpectrogramView } from './spectrogram.js';
-import { encodeWav, decodeWav } from './audio.js';
+import { encodeWav, decodeAudioFile } from './audio.js';
+import { analyzeSound, frameAt } from './analysis.js';
+import { TimelineView } from './timeline.js';
 import { Gauge } from './gauge.js';
 import { summaryText, renderCard, recordsCsv, deliverFile } from './share.js';
 
@@ -25,10 +27,12 @@ const ICON = {
   history: svg('<path d="M4 6h16M4 12h16M4 18h10"/>'),
   settings: svg('<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>'),
   mic: svg('<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/>'),
+  file: svg('<path d="M9 18V5l10-2v13"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/>'),
 };
 
 const routes = {
   home: renderAnalyzer,
+  file: renderFile,
   history: renderHistory,
   record: renderRecord,
   settings: renderSettings,
@@ -125,6 +129,45 @@ const round1 = (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : null);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const MISSING = -999; // stored for empty spectrum points (JSON has no -Infinity)
 
+// Bottom sheet for vehicle number and memo; `beforeSave(form)` can add to the record, then it is stored.
+function saveSheet({ title, rec, timeLabel, extra = '' }, beforeSave) {
+  const st = getSettings();
+  const { dlg, close } = openSheet(`
+    <form class="sheet-form">
+      <h2>${title}</h2>
+      <dl class="save-summary">
+        <div><dt>평균</dt><dd>${fmtDb(rec.leq)}</dd></div>
+        <div><dt>최대</dt><dd>${fmtDb(rec.lmax)}</dd></div>
+        <div><dt>최소</dt><dd>${fmtDb(rec.lmin)}</dd></div>
+        <div><dt>${timeLabel}</dt><dd>${fmtClock(rec.elapsed)}</dd></div>
+      </dl>
+      <label class="field"><span>차량번호 <small>(선택)</small></span>
+        <input id="f-vehicle" value="${esc(st.vehicle)}" placeholder="예: 12가 3456" autocomplete="off"></label>
+      ${st.recentVehicles.length ? `<div class="chips">${st.recentVehicles.map((v) => `<button type="button" class="chip-pick" data-v="${esc(v)}">${esc(v)}</button>`).join('')}</div>` : ''}
+      <label class="field"><span>메모 <small>(선택)</small></span>
+        <textarea id="f-memo" rows="3" placeholder="예: 시속 80km, 오른쪽 뒤에서 윙 소리"></textarea></label>
+      ${extra}
+      <div class="sheet-actions">
+        <button type="button" class="btn btn-quiet" data-close>취소</button>
+        <button class="btn btn-primary" type="submit">저장</button>
+      </div>
+    </form>`);
+  const input = dlg.querySelector('#f-vehicle');
+  dlg.querySelectorAll('.chip-pick').forEach((b) => (b.onclick = () => (input.value = b.dataset.v)));
+  dlg.querySelector('form').onsubmit = async (e) => {
+    e.preventDefault();
+    e.submitter && (e.submitter.disabled = true);
+    rec.vehicle = input.value.trim();
+    rec.memo = dlg.querySelector('#f-memo').value.trim();
+    if (rec.vehicle) rememberVehicle(rec.vehicle);
+    await beforeSave?.(dlg);
+    await store.putRecord(rec);
+    close();
+    toast('기록에 저장했습니다');
+  };
+  return dlg;
+}
+
 /* ---------- real-time analyzer ---------- */
 
 async function renderAnalyzer() {
@@ -165,6 +208,7 @@ async function renderAnalyzer() {
         <div class="num num-min"><span>최소</span><b id="a-min">–</b></div>
       </div>
       <nav class="an-nav" aria-label="메뉴">
+        <a href="#/file" aria-label="파일 분석">${ICON.file}</a>
         <a href="#/history" aria-label="기록">${ICON.history}</a>
         <a href="#/settings" aria-label="설정">${ICON.settings}</a>
       </nav>
@@ -336,47 +380,18 @@ async function renderAnalyzer() {
   }
 
   function openSave(rec, audio) {
-    const st = getSettings();
-    const { dlg, close } = openSheet(`
-      <form class="sheet-form">
-        <h2>지금 측정 저장</h2>
-        <dl class="save-summary">
-          <div><dt>평균</dt><dd>${fmtDb(rec.leq)}</dd></div>
-          <div><dt>최대</dt><dd>${fmtDb(rec.lmax)}</dd></div>
-          <div><dt>최소</dt><dd>${fmtDb(rec.lmin)}</dd></div>
-          <div><dt>측정 시간</dt><dd>${fmtClock(rec.elapsed)}</dd></div>
-        </dl>
-        <label class="field"><span>차량번호 <small>(선택)</small></span>
-          <input id="f-vehicle" value="${esc(st.vehicle)}" placeholder="예: 12가 3456" autocomplete="off"></label>
-        ${st.recentVehicles.length ? `<div class="chips">${st.recentVehicles.map((v) => `<button type="button" class="chip-pick" data-v="${esc(v)}">${esc(v)}</button>`).join('')}</div>` : ''}
-        <label class="field"><span>메모 <small>(선택)</small></span>
-          <textarea id="f-memo" rows="3" placeholder="예: 시속 80km, 오른쪽 뒤에서 윙 소리"></textarea></label>
-        ${st.audioSec > 0 ? '<label class="check"><input type="checkbox" id="f-audio" checked> <span id="f-audio-label">방금 들린 소리도 함께 저장</span></label>' : ''}
-        <div class="sheet-actions">
-          <button type="button" class="btn btn-quiet" data-close>취소</button>
-          <button class="btn btn-primary" type="submit">저장</button>
-        </div>
-      </form>`);
-    const input = dlg.querySelector('#f-vehicle');
-    dlg.querySelectorAll('.chip-pick').forEach((b) => (b.onclick = () => (input.value = b.dataset.v)));
-    audio.then((samples) => {
-      const label = dlg.querySelector('#f-audio-label');
-      if (label) label.textContent = samples.length ? `방금 들린 소리 ${(samples.length / meter.sampleRate).toFixed(0)}초도 함께 저장` : '저장할 소리가 없습니다';
-    });
-    dlg.querySelector('form').onsubmit = async (e) => {
-      e.preventDefault();
-      rec.vehicle = input.value.trim();
-      rec.memo = dlg.querySelector('#f-memo').value.trim();
-      if (rec.vehicle) rememberVehicle(rec.vehicle);
-      const samples = dlg.querySelector('#f-audio')?.checked ? await audio : null;
+    const extra = getSettings().audioSec > 0 ? '<label class="check"><input type="checkbox" id="f-audio" checked> <span id="f-audio-label">방금 들린 소리도 함께 저장</span></label>' : '';
+    const dlg = saveSheet({ title: '지금 측정 저장', rec, timeLabel: '측정 시간', extra }, async (form) => {
+      const samples = form.querySelector('#f-audio')?.checked ? await audio : null;
       if (samples?.length) {
         rec.audio = encodeWav(samples, rec.sampleRate);
         rec.audioSec = round1(samples.length / rec.sampleRate);
       }
-      await store.putRecord(rec);
-      close();
-      toast('기록에 저장했습니다');
-    };
+    });
+    audio.then((samples) => {
+      const label = dlg.querySelector('#f-audio-label');
+      if (label) label.textContent = samples.length ? `방금 들린 소리 ${(samples.length / rec.sampleRate).toFixed(0)}초도 함께 저장` : '저장할 소리가 없습니다';
+    });
   }
 
   const onVisibility = () => {
@@ -449,6 +464,261 @@ async function renderAnalyzer() {
   if ((await micPermission()) === 'granted') startMic();
 }
 
+/* ---------- attached file ---------- */
+
+const AUDIO_ACCEPT = 'audio/*,video/mp4,video/quicktime,video/webm,.mp3,.m4a,.aac,.wav,.ogg,.oga,.opus,.flac,.webm,.amr,.3gp,.caf';
+const MAX_SEC = 300;
+const KEEP_AUDIO_BYTES = 30 * 1024 * 1024; // bigger files are analysed but not stored with the record
+let openedFile = null; // the last file, so coming back to the tab shows it again
+
+// y range that fits a spectrum: 120 dB ending a little above its loudest point
+function rangeFor(levels) {
+  let top = -Infinity;
+  for (const v of levels) if (v > top) top = v;
+  const hi = Number.isFinite(top) ? Math.ceil((top + 10) / 20) * 20 : 100;
+  return [hi - 120, hi];
+}
+
+// 241-point copy of a spectrum for storing with a record (same grid as live snapshots)
+function forRecord(levels, freqs) {
+  const grid = logGrid(241, 20, 20000);
+  const out = reduceRanges(levels, freqs, rangeIndex(freqs, grid.edges), grid.centres);
+  return {
+    freqs: Array.from(grid.centres, (f) => Math.round(f * 10) / 10),
+    values: Array.from(out, (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : MISSING)),
+  };
+}
+
+async function renderFile() {
+  view.innerHTML = `
+    <div class="page file-page">
+      <h1 class="page-title">파일 분석</h1>
+      <label class="file-drop" id="fa-drop">
+        <input type="file" id="fa-input" accept="${AUDIO_ACCEPT}">
+        ${ICON.file}
+        <strong>음원·녹음 파일 열기</strong>
+        <span>mp3 · m4a · wav · aac · ogg · 동영상 소리 등 · 처음 ${MAX_SEC / 60}분까지 분석</span>
+      </label>
+      <p class="fine file-hint">휴대폰 녹음 앱으로 녹음한 파일, 카톡·메신저로 받은 파일(먼저 휴대폰에 저장)을 열 수 있습니다. 파일은 이 휴대폰 안에서만 분석되고 어디에도 올라가지 않습니다.</p>
+      <div id="fa-result"></div>
+    </div>`;
+  const $ = (id) => view.querySelector(`#${id}`);
+  const result = $('fa-result');
+  let teardown = null;
+  cleanup = () => teardown?.();
+
+  async function open(file) {
+    teardown?.();
+    teardown = null;
+    openedFile = file;
+    $('fa-drop').classList.add('is-compact');
+    view.querySelector('.file-hint')?.remove();
+    result.innerHTML = '<p class="busy">파일 여는 중…</p>';
+    let decoded;
+    try {
+      decoded = await decodeAudioFile(file, { maxSec: MAX_SEC });
+    } catch {
+      result.innerHTML = '<p class="alert">이 파일은 열 수 없습니다. mp3, m4a, wav 같은 소리 파일인지 확인해 주세요.</p>';
+      return;
+    }
+    if (!decoded.samples.length) {
+      result.innerHTML = '<p class="alert">소리가 없는 파일입니다.</p>';
+      return;
+    }
+    teardown = await showAnalysis(file, decoded);
+  }
+
+  async function showAnalysis(file, decoded) {
+    result.innerHTML = '<p class="busy">소리 분석 중…</p>';
+    await sleep(30); // let the message paint before the number crunching
+    const st = getSettings();
+    const calibrated = st.fileUnit !== 'fs';
+    const unit = calibrated ? 'dB(A)' : 'dBFS(A)';
+    const a = analyzeSound(decoded.samples, decoded.rate, calibrated ? st.offset : 0);
+    const range = rangeFor(a.max);
+    const loudestAt = a.history.length ? a.history.indexOf(Math.max(...a.history)) * a.historyStep + a.historyStep : 0;
+    const url = URL.createObjectURL(file);
+    result.innerHTML = `
+      <div class="file-layout">
+      <section class="card file-head">
+        <h2 class="file-name">${esc(file.name)}</h2>
+        <p class="fine">${fmtClock(decoded.duration)} · ${decoded.rate / 1000} kHz · ${decoded.channels === 1 ? '모노' : `${decoded.channels}채널 → 모노로 분석`} · ${(file.size / 1048576).toFixed(1)} MB${decoded.capped ? ` · 처음 ${MAX_SEC / 60}분만 분석` : ''}</p>
+        <audio controls preload="auto" id="fa-audio" src="${url}"></audio>
+      </section>
+        <section class="card chart-card fa-chart">
+          <div class="chart-box-rec"><div class="chart-plot" id="fa-chart"></div></div>
+          ${cursorBox('fa-cursor')}
+          <p class="legend" data-style="${st.style}"><i class="lg-cur"></i><span id="fa-cur-label">전체 평균</span> <i class="lg-max"></i>전체 최대
+            <button type="button" class="link" id="fa-avg" hidden>전체 평균 보기</button></p>
+        </section>
+        <div class="an-options" role="group" aria-label="분석 설정">
+          <button type="button" class="opt" data-opt="unit"><span>레벨 기준</span><b>${calibrated ? '보정 dB(A)' : '파일 dBFS'}</b></button>
+          <button type="button" class="opt" data-opt="style"><span>모양</span><b>${st.style === 'line' ? '선' : '면'}</b></button>
+          <button type="button" class="opt" data-opt="scale"><span>주파수 축</span><b>${st.scale === 'log' ? '로그' : '선형'}</b></button>
+        </div>
+        <section class="stats-grid">
+          <div><span>평균 Leq</span><b>${fmtDb(a.leq)}</b><small>${unit}</small></div>
+          <div><span>최대</span><b>${fmtDb(a.lmax)}</b><small>${unit}</small></div>
+          <div><span>최소</span><b>${fmtDb(a.lmin)}</b><small>${unit}</small></div>
+        </section>
+        <section class="card">
+          <h2>시간축 <small>누르면 그 시점부터 재생</small></h2>
+          <div class="gram-box-rec"><div class="gram-plot" id="fa-gram"></div></div>
+        </section>
+        <section class="card">
+          <h2>시간별 소음도 <small>누르면 그 시점으로 이동</small></h2>
+          <div class="timeline-box"><div class="gram-plot" id="fa-time"></div></div>
+        </section>
+        <section class="card">
+          <dl class="meta">
+            <dt>피크</dt><dd>${a.peaks.length ? a.peaks.map((p) => `${fmtHz(p.hz)} <small>(${fmtDb(p.db)} ${unit})</small>`).join('<br>') : '뚜렷한 피크 없음'}</dd>
+            <dt>가장 큰 순간</dt><dd>${fmtClock(loudestAt)} <button type="button" class="link" data-seek="${loudestAt}">여기 듣기</button></dd>
+            <dt>레벨 기준</dt><dd>${calibrated ? `이 휴대폰 보정값(${st.offset} dB)을 적용했습니다. 다른 기기로 녹음한 파일이면 참고값입니다.` : '파일의 디지털 크기(0 dBFS = 최대)에 A특성만 적용했습니다.'}</dd>
+            ${a.clipped ? '<dt>주의</dt><dd>소리가 파일의 최대 크기(0 dBFS)에 닿은 곳이 있어 실제보다 작게 나왔을 수 있습니다.</dd>' : ''}
+          </dl>
+        </section>
+      </div>
+      <div class="action-bar">
+        <label class="btn" for="fa-input">다른 파일 열기</label>
+        <button class="btn btn-primary" data-act="fa-save">기록에 저장</button>
+      </div>`;
+
+    const player = $('fa-audio');
+    const chart = new SpectrumView($('fa-chart'), { cursor: true });
+    chart.onCursor = bindCursorReadout($('fa-cursor'));
+    $('fa-cursor').querySelector('.cr-close').onclick = () => chart.clearCursors();
+    let atPosition = false; // false: whole-file average, true: spectrum at the playback position
+    let raf = 0;
+    const seek = (t) => {
+      player.currentTime = t;
+      atPosition = true;
+      show();
+    };
+    const gram = new SpectrogramView($('fa-gram'), { onSeek: seek });
+    gram.setStatic(a.frames, a.freqs, a.duration, { labels: 'absolute', unit });
+    const timeline = new TimelineView($('fa-time'), { onSeek: seek });
+    timeline.set(a.history, a.historyStep, a.leq, unit);
+
+    function show() {
+      const st2 = getSettings();
+      const t = player.currentTime;
+      chart.update(
+        { freqs: a.freqs, cur: atPosition ? frameAt(a, t) : a.avg, max: a.max, peaks: atPosition ? [] : a.peaks },
+        { scale: st2.scale, style: st2.style, range, unit },
+      );
+      $('fa-cur-label').textContent = atPosition ? `재생 위치 ${fmtClock(t)}` : '전체 평균';
+      $('fa-avg').hidden = !atPosition;
+      gram.setPlayhead(atPosition ? t : null);
+      timeline.setPlayhead(atPosition ? t : null);
+    }
+    const follow = () => {
+      show();
+      if (!player.paused) raf = requestAnimationFrame(follow);
+    };
+    player.addEventListener('play', () => {
+      atPosition = true;
+      cancelAnimationFrame(raf);
+      follow();
+    });
+    player.addEventListener('seeked', show);
+    player.addEventListener('pause', show);
+    player.addEventListener('ended', () => {
+      atPosition = false;
+      show();
+    });
+    $('fa-avg').onclick = () => {
+      player.pause();
+      atPosition = false;
+      show();
+    };
+    result.querySelectorAll('[data-seek]').forEach((b) => (b.onclick = () => {
+      seek(Number(b.dataset.seek));
+      player.play().catch(() => {});
+    }));
+    result.querySelectorAll('[data-opt]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        const st2 = getSettings();
+        if (b.dataset.opt === 'unit') {
+          saveSettings({ fileUnit: st2.fileUnit === 'fs' ? 'cal' : 'fs' });
+          teardown?.();
+          teardown = await showAnalysis(file, decoded);
+          return;
+        }
+        if (b.dataset.opt === 'style') {
+          const style = st2.style === 'line' ? 'fill' : 'line';
+          saveSettings({ style });
+          b.querySelector('b').textContent = style === 'line' ? '선' : '면';
+          result.querySelector('.legend').dataset.style = style;
+        } else {
+          const scale = st2.scale === 'log' ? 'linear' : 'log';
+          saveSettings({ scale });
+          b.querySelector('b').textContent = scale === 'log' ? '로그' : '선형';
+          gram.configure({ scale });
+        }
+        show();
+      }),
+    );
+    result.querySelector('[data-act=fa-save]').onclick = () => {
+      const avg = forRecord(a.avg, a.freqs);
+      const rec = {
+        id: store.newId(),
+        ts: Date.now(),
+        source: 'file',
+        fileName: file.name,
+        leq: round1(a.leq),
+        lmax: round1(a.lmax),
+        lmin: round1(a.lmin),
+        laf: null,
+        elapsed: round1(a.duration),
+        clipped: a.clipped,
+        peaks: a.peaks.map((p) => ({ hz: Math.round(p.hz), db: round1(p.db) })),
+        spectrum: { freqs: avg.freqs, cur: avg.values, max: forRecord(a.max, a.freqs).values, range },
+        fftSize: 4096,
+        sampleRate: decoded.rate,
+        offset: a.offset,
+        unit,
+        calibrated: calibrated && !!st.calibratedAt,
+        vehicle: '',
+        memo: '',
+        app: APP_VERSION,
+      };
+      const keep = file.size <= KEEP_AUDIO_BYTES;
+      saveSheet(
+        { title: '파일 분석 저장', rec, timeLabel: '길이', extra: keep ? '' : '<p class="fine">파일이 커서(30MB 초과) 분석 결과만 저장합니다.</p>' },
+        () => {
+          if (keep) {
+            rec.audio = file;
+            rec.audioSec = round1(a.duration);
+          }
+        },
+      );
+    };
+    show();
+    return () => {
+      cancelAnimationFrame(raf);
+      player.pause();
+      chart.destroy();
+      gram.destroy();
+      timeline.destroy();
+      URL.revokeObjectURL(url);
+    };
+  }
+
+  $('fa-input').onchange = (e) => e.target.files[0] && open(e.target.files[0]);
+  const drop = $('fa-drop');
+  drop.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    drop.classList.add('is-over');
+  });
+  drop.addEventListener('dragleave', () => drop.classList.remove('is-over'));
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    drop.classList.remove('is-over');
+    if (e.dataTransfer.files[0]) open(e.dataTransfer.files[0]);
+  });
+  if (openedFile) open(openedFile);
+}
+
 /* ---------- history ---------- */
 
 async function renderHistory() {
@@ -486,7 +756,7 @@ async function renderHistory() {
 function recordRow(r) {
   return `<li><a class="record-row" href="#/record/${encodeURIComponent(r.id)}">
     <span class="rr-time">${fmtTime(r.ts)}</span>
-    <span class="rr-main"><strong>${esc(r.vehicle || '차량 미입력')}</strong><span>${esc(r.memo || `측정 ${fmtClock(r.elapsed)}${r.peaks?.[0] ? ` · 피크 ${fmtHz(r.peaks[0].hz)}` : ''}`)}</span></span>
+    <span class="rr-main"><strong>${esc(r.vehicle || (r.source === 'file' ? r.fileName : '차량 미입력'))}</strong><span>${esc(r.memo || `${r.source === 'file' ? '파일' : '측정'} ${fmtClock(r.elapsed)}${r.peaks?.[0] ? ` · 피크 ${fmtHz(r.peaks[0].hz)}` : ''}`)}</span></span>
     <span class="rr-value"><small>평균</small>${fmtDb(r.leq)}<small>최대</small>${fmtDb(r.lmax)}</span>
   </a></li>`;
 }
@@ -500,40 +770,43 @@ async function renderRecord(id) {
     return;
   }
   const s = getSettings();
+  const fromFile = rec.source === 'file';
+  const unit = rec.unit || 'dB(A)';
   view.innerHTML = `
     <div class="page">
       <a class="back" href="#/history">← 기록 목록</a>
       <div class="rec-layout">
         <header class="rec-head">
-          <h1>${esc(rec.vehicle || '차량 미입력')}</h1>
-          <p>${fmtDate(rec.ts)} · 측정 ${fmtClock(rec.elapsed)}</p>
+          <h1>${esc(rec.vehicle || (fromFile ? rec.fileName : '차량 미입력'))}</h1>
+          <p>${fmtDate(rec.ts)} · ${fromFile ? `파일 ${fmtClock(rec.elapsed)}` : `측정 ${fmtClock(rec.elapsed)}`}</p>
         </header>
         <section class="card chart-card">
           <div class="chart-box-rec"><div class="chart-plot" id="rec-chart"></div></div>
           ${cursorBox('rec-cursor')}
-          <p class="legend" data-style="${s.style}"><i class="lg-cur"></i>저장 순간 <i class="lg-max"></i>측정 중 최대 <span class="fine">· 그래프를 누르면 커서</span></p>
+          <p class="legend" data-style="${s.style}"><i class="lg-cur"></i>${fromFile ? '전체 평균' : '저장 순간'} <i class="lg-max"></i>${fromFile ? '전체 최대' : '측정 중 최대'} <span class="fine">· 그래프를 누르면 커서</span></p>
         </section>
         <section class="stats-grid">
-          <div><span>평균</span><b>${fmtDb(rec.leq)}</b><small>dB(A)</small></div>
-          <div><span>최대</span><b>${fmtDb(rec.lmax)}</b><small>dB(A)</small></div>
-          <div><span>최소</span><b>${fmtDb(rec.lmin)}</b><small>dB(A)</small></div>
+          <div><span>평균</span><b>${fmtDb(rec.leq)}</b><small>${unit}</small></div>
+          <div><span>최대</span><b>${fmtDb(rec.lmax)}</b><small>${unit}</small></div>
+          <div><span>최소</span><b>${fmtDb(rec.lmin)}</b><small>${unit}</small></div>
         </section>
-        ${rec.clipped ? '<p class="alert">소리가 휴대폰 마이크의 측정 한계를 넘은 순간이 있었습니다. 실제 최대값은 더 클 수 있습니다.</p>' : ''}
+        ${rec.clipped ? `<p class="alert">${fromFile ? '소리가 파일의 최대 크기(0 dBFS)에 닿은 곳이 있어 실제보다 작게 나왔을 수 있습니다.' : '소리가 휴대폰 마이크의 측정 한계를 넘은 순간이 있었습니다. 실제 최대값은 더 클 수 있습니다.'}</p>` : ''}
         ${rec.audio
           ? `<section class="card audio-card">
-              <h2>저장된 소리 <small>${rec.audioSec}초</small></h2>
+              <h2>${fromFile ? '파일 소리' : '저장된 소리'} <small>${fmtClock(rec.audioSec)}</small></h2>
               <audio controls preload="metadata" id="rec-audio"></audio>
               <div class="gram-box-rec"><div class="gram-plot" id="rec-gram"></div><p class="gram-wait" id="rec-gram-wait">소리 분석 중…</p></div>
-              <p class="fine">시간축 그래프: 맨 위가 저장한 순간, 아래로 갈수록 그 전 소리입니다. 재생하면 흰 선이 따라갑니다.</p>
+              <div class="timeline-box"><div class="gram-plot" id="rec-time"></div></div>
+              <p class="fine">${fromFile ? '시간축 그래프는 아래가 처음, 위가 끝입니다.' : '시간축 그래프: 맨 위가 저장한 순간, 아래로 갈수록 그 전 소리입니다.'} 그래프를 누르면 그 시점부터 들을 수 있습니다.</p>
               <button type="button" class="btn btn-wide" data-act="share-audio">소리 파일 보내기</button>
             </section>`
           : ''}
         <section class="card">
           <dl class="meta">
-            <dt>피크</dt><dd>${rec.peaks?.length ? rec.peaks.map((p) => `${fmtHz(p.hz)} <small>(${fmtDb(p.db)} dB(A))</small>`).join('<br>') : '뚜렷한 피크 없음'}</dd>
+            <dt>피크</dt><dd>${rec.peaks?.length ? rec.peaks.map((p) => `${fmtHz(p.hz)} <small>(${fmtDb(p.db)} ${unit})</small>`).join('<br>') : '뚜렷한 피크 없음'}</dd>
             <dt>메모</dt><dd class="memo">${esc(rec.memo) || '-'}</dd>
-            <dt>저장 순간</dt><dd>${fmtDb(rec.laf)} dB(A)</dd>
-            <dt>분석 설정</dt><dd>FFT ${rec.fftSize} · ${rec.calibrated ? '마이크 보정됨' : '마이크 보정 안 됨 (참고값)'}</dd>
+            ${fromFile ? `<dt>파일</dt><dd>${esc(rec.fileName)}</dd>` : `<dt>저장 순간</dt><dd>${fmtDb(rec.laf)} dB(A)</dd>`}
+            <dt>분석 설정</dt><dd>FFT ${rec.fftSize} · ${unit === 'dB(A)' ? (rec.calibrated ? '마이크 보정됨' : '마이크 보정 안 됨 (참고값)') : '파일 디지털 레벨(dBFS) 기준'}</dd>
           </dl>
         </section>
       </div>
@@ -550,14 +823,16 @@ async function renderRecord(id) {
   const sp = rec.spectrum;
   chart.update(
     { freqs: Float32Array.from(sp.freqs), cur: Float32Array.from(sp.cur), max: Float32Array.from(sp.max), peaks: rec.peaks },
-    { scale: 'log', style: s.style, range: sp.range },
+    { scale: 'log', style: s.style, range: sp.range, unit },
   );
   let gram = null;
+  let timeline = null;
   let audioUrl = null;
   let raf = 0;
   cleanup = () => {
     chart.destroy();
     gram?.destroy();
+    timeline?.destroy();
     cancelAnimationFrame(raf);
     if (audioUrl) URL.revokeObjectURL(audioUrl);
   };
@@ -566,29 +841,41 @@ async function renderRecord(id) {
     const player = view.querySelector('#rec-audio');
     audioUrl = URL.createObjectURL(rec.audio);
     player.src = audioUrl;
-    gram = new SpectrogramView(view.querySelector('#rec-gram'));
-    // the time-axis view is worked out from the saved sound itself
-    setTimeout(async () => {
-      const { samples, rate } = await decodeWav(rec.audio);
-      const { frames, binHz } = stft(samples, rate, 2048, 512);
-      const table = binLevelTable(1024, binHz);
-      const freqs = Float32Array.from({ length: 1024 }, (_, k) => k * binHz);
-      gram?.setStatic(frames.map((f) => binLevels(f, table, rec.offset)), freqs, samples.length / rate);
-      view.querySelector('#rec-gram-wait')?.remove();
-    }, 30);
-    const follow = () => {
-      gram?.setPlayhead(player.currentTime);
-      if (!player.paused) raf = requestAnimationFrame(follow);
+    const seek = (t) => {
+      player.currentTime = t;
+      follow();
     };
+    gram = new SpectrogramView(view.querySelector('#rec-gram'), { onSeek: seek });
+    timeline = new TimelineView(view.querySelector('#rec-time'), { onSeek: seek });
+    // the time-axis views are worked out from the stored sound itself
+    setTimeout(async () => {
+      try {
+        const { samples, rate } = await decodeAudioFile(rec.audio);
+        const a = analyzeSound(samples, rate, rec.offset ?? s.offset);
+        gram?.setStatic(a.frames, a.freqs, a.duration, { labels: fromFile ? 'absolute' : 'relative', unit });
+        timeline?.set(a.history, a.historyStep, a.leq, unit);
+        view.querySelector('#rec-gram-wait')?.remove();
+      } catch {
+        const wait = view.querySelector('#rec-gram-wait');
+        if (wait) wait.textContent = '이 소리는 분석할 수 없습니다';
+      }
+    }, 30);
+    function follow() {
+      gram?.setPlayhead(player.currentTime);
+      timeline?.setPlayhead(player.currentTime);
+      cancelAnimationFrame(raf);
+      if (!player.paused) raf = requestAnimationFrame(follow);
+    }
     player.addEventListener('play', follow);
     player.addEventListener('seeked', follow);
-    player.addEventListener('ended', () => gram?.setPlayhead(null));
+    player.addEventListener('ended', () => {
+      gram?.setPlayhead(null);
+      timeline?.setPlayhead(null);
+    });
+    const audioName = fromFile && rec.fileName ? rec.fileName : `소음분석_${(rec.vehicle || '기록').replace(/\s/g, '')}_${fileStamp(rec.ts)}.wav`;
     view.querySelector('[data-act=share-audio]').onclick = async () => {
-      const result = await deliverFile(rec.audio, `소음분석_${(rec.vehicle || '기록').replace(/\s/g, '')}_${fileStamp(rec.ts)}.wav`, {
-        title: '저장된 소리',
-        text: summaryText(rec, s),
-      });
-      if (result === 'downloaded') toast('소리 파일(WAV)을 저장했습니다');
+      const result = await deliverFile(rec.audio, audioName, { title: '저장된 소리', text: summaryText(rec, s) });
+      if (result === 'downloaded') toast('소리 파일을 저장했습니다');
     };
   }
 
