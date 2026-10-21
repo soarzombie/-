@@ -4,7 +4,13 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import {
   aWeightDb,
+  cWeightDb,
+  weightDb,
   designAWeighting,
+  designWeighting,
+  BANDS,
+  bandIndex,
+  bandLevels,
   sosMagnitude,
   binLevelTable,
   binLevels,
@@ -33,7 +39,32 @@ test('analytic A-weighting matches the IEC table', () => {
   }
 });
 
+// IEC 61672-1 C-weighting at the same frequencies.
+const IEC_C = [
+  [-5, -3.0], [-4, -0.8], [-3, -0.2], [-2, 0.0], [-1, 0.0],
+  [0, 0], [1, -0.2], [2, -0.8], [3, -3.0],
+];
+
+test('analytic C-weighting matches the IEC table; Z is flat', () => {
+  for (const [n, expected] of IEC_C) {
+    const f = 1000 * 10 ** (0.3 * n);
+    assert.ok(Math.abs(cWeightDb(f) - expected) < 0.1, `${f} Hz: ${cWeightDb(f)}`);
+    assert.equal(weightDb(f, 'Z'), 0);
+    assert.equal(weightDb(f, 'C'), cWeightDb(f));
+    assert.equal(weightDb(f), aWeightDb(f));
+  }
+  assert.deepEqual(designWeighting(48000, 'Z'), []);
+});
+
 for (const fs of [44100, 48000]) {
+  test(`digital C-weighting filter tracks the analytic curve at ${fs} Hz`, () => {
+    for (const f of [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000]) {
+      const digital = 20 * Math.log10(sosMagnitude(designWeighting(fs, 'C'), f, fs));
+      const tol = f <= 4000 ? 0.1 : 0.7;
+      assert.ok(Math.abs(digital - cWeightDb(f)) < tol, `${f} Hz: digital ${digital.toFixed(2)} vs ${cWeightDb(f).toFixed(2)}`);
+    }
+  });
+
   test(`digital A-weighting filter tracks the analytic curve at ${fs} Hz`, () => {
     for (const f of [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000]) {
       const digital = 20 * Math.log10(sosMagnitude(designAWeighting(fs), f, fs));
@@ -285,4 +316,112 @@ test('analyzeSound of a two-part file: energy-average Leq, max/min of the parts,
   assert.ok(Math.abs(loudestAt(frameAt(r, 1.5)) - 1000) < 40, 'early frame is the 1 kHz part');
   assert.ok(Math.abs(loudestAt(frameAt(r, 4.5)) - 100) < 8, 'late frame is the 100 Hz part');
   assert.ok(r.frames.length <= 1501 && r.frames[0].length === 400);
+});
+
+test('third-octave bands run 25 Hz – 20 kHz and sum the bins that fall in them', () => {
+  assert.equal(BANDS.length, 30);
+  assert.equal(BANDS[0].label, '25');
+  assert.equal(BANDS[16].label, '1k');
+  assert.equal(BANDS.at(-1).label, '20k');
+  assert.ok(Math.abs(BANDS[16].exact - 1000) < 1e-9);
+  for (let i = 1; i < BANDS.length; i++) assert.ok(Math.abs(BANDS[i].lo - BANDS[i - 1].hi) < 1e-9, 'bands touch');
+  assert.deepEqual(Array.from(bandIndex(Float32Array.from([10, 25, 1000, 1100, 20000, 23000]))), [-1, 0, 16, 16, 29, -1]);
+  const idx = Int16Array.from([-1, 3, 3, 4]);
+  const out = bandLevels(Float32Array.from([90, 60, 60, -Infinity]), idx, 5);
+  assert.ok(Math.abs(out[3] - (60 + 10 * Math.log10(2))) < 1e-4);
+  assert.equal(out[4], -Infinity);
+  assert.equal(out[0], -Infinity);
+});
+
+test('band levels of a tone equal the tone level, with a 16384-point analyser', () => {
+  const fs = 48000;
+  const N = 16384;
+  const levels = binLevels(analyserSpectrum(sine(1000, 0.25, fs, N)), binLevelTable(N / 2, fs / N), 100);
+  const freqs = Float32Array.from({ length: N / 2 }, (_, k) => (k * fs) / N);
+  const bands = bandLevels(levels, bandIndex(freqs));
+  const expected = toDb(0.25 ** 2 / 2, 100);
+  assert.ok(Math.abs(bands[16] - expected) < 0.3, `1 kHz band ${bands[16]} vs ${expected}`);
+  assert.ok(bands[13] < expected - 60 && bands[19] < expected - 60, 'neighbouring bands are quiet');
+  assert.ok(BANDS.every((_, b) => Number.isFinite(bands[b])), 'every band has bins at 2.9 Hz resolution');
+});
+
+function loadWorklet(fs) {
+  const messages = [];
+  let Processor;
+  const context = {
+    sampleRate: fs,
+    AudioWorkletProcessor: class {
+      constructor() {
+        this.port = { postMessage: (m) => messages.push(m) };
+      }
+    },
+    registerProcessor: (_name, cls) => (Processor = cls),
+  };
+  vm.runInNewContext(readFileSync(new URL('../js/level-processor.js', import.meta.url), 'utf8'), context);
+  return { Processor, messages };
+}
+
+test('worklet switches weighting on an sos message', () => {
+  const fs = 48000;
+  const { Processor, messages } = loadWorklet(fs);
+  const proc = new Processor({ processorOptions: { sos: designWeighting(fs, 'A') } });
+  const amp = 0.5;
+  let n0 = 0;
+  const run = (sec) => {
+    for (let block = 0; block < (sec * fs) / 128; block++, n0 += 128) {
+      proc.process([[Float32Array.from({ length: 128 }, (_, i) => amp * Math.sin((2 * Math.PI * 100 * (n0 + i)) / fs))]]);
+    }
+  };
+  const levelOf = (list) => toDb(list.reduce((s, m) => s + m.sumA, 0) / list.reduce((s, m) => s + m.n, 0));
+  const expected = toDb((amp * amp) / 2);
+  run(1);
+  assert.ok(Math.abs(levelOf(messages.slice(10)) - (expected + aWeightDb(100))) < 0.1, 'A');
+  for (const [w, weight] of [['C', cWeightDb(100)], ['Z', 0]]) {
+    proc.port.onmessage({ data: { type: 'sos', sos: designWeighting(fs, w) } });
+    const from = messages.length + 10;
+    run(1);
+    assert.ok(Math.abs(levelOf(messages.slice(from)) - (expected + weight)) < 0.1, w);
+  }
+});
+
+test('worklet streams the sound in chunks while recording, not while paused', () => {
+  const fs = 1000; // chunks of 0.5 s = 500 samples
+  const { Processor, messages } = loadWorklet(fs);
+  const proc = new Processor({ processorOptions: { sos: [] } });
+  let t = 0;
+  const feed = (n) => {
+    for (let b = 0; b < n / 100; b++) proc.process([[Float32Array.from({ length: 100 }, () => (t++) / 10000)]]);
+  };
+  const chunks = () => messages.filter((m) => m.type === 'chunk');
+  feed(300);
+  proc.port.onmessage({ data: { type: 'record', on: true } });
+  feed(700);
+  assert.equal(chunks().length, 1);
+  assert.equal(chunks()[0].samples.length, 500);
+  assert.ok(Math.abs(chunks()[0].samples[0] - 300 / 10000) < 1e-6, 'starts where recording started');
+  proc.port.onmessage({ data: { type: 'pause', paused: true } });
+  feed(400);
+  proc.port.onmessage({ data: { type: 'pause', paused: false } });
+  feed(100);
+  proc.port.onmessage({ data: { type: 'record', on: false } });
+  const all = chunks();
+  assert.equal(all.length, 2);
+  assert.equal(all[1].last, true);
+  assert.equal(all[1].samples.length, 300);
+  assert.ok(Math.abs(all[1].samples[199] - 999 / 10000) < 1e-6 && Math.abs(all[1].samples[200] - 1400 / 10000) < 1e-6, 'paused part skipped');
+  feed(600);
+  assert.equal(chunks().length, 2, 'nothing after stop');
+});
+
+test('analyzeSound with C and Z weighting', () => {
+  const fs = 48000;
+  const x = sine(100, 0.5, fs, 2 * fs);
+  for (const w of ['A', 'C', 'Z']) {
+    const r = analyzeSound(x, fs, 100, { weighting: w });
+    const expected = toDb(0.125, 100) + weightDb(100, w);
+    assert.equal(r.weighting, w);
+    assert.ok(Math.abs(r.leq - expected) < 0.2, `${w}: Leq ${r.leq} vs ${expected}`);
+    const top = Math.max(...r.avg);
+    assert.ok(top < expected && top > expected - 6, `${w}: spectrum peak ${top}`);
+  }
 });

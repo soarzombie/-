@@ -1,13 +1,14 @@
 // Microphone sound level meter for continuous analysis.
-// Levels (LAF now, LAeq / LAFmax / LAFmin since the last reset) come from the AudioWorklet,
-// which sees every sample and keeps the last few seconds of sound; the spectrum comes from an
-// AnalyserNode, per bin in dB(A).
+// Levels (Fast now, Leq / Fast max / Fast min since the last reset) come from the AudioWorklet,
+// which sees every sample, keeps the last few seconds of sound and streams it while recording;
+// the spectrum comes from an AnalyserNode, per bin in dB with the same frequency weighting (A/C/Z).
 
-import { designAWeighting, binLevelTable, binLevels, toDb } from './dsp.js';
+import { designWeighting, binLevelTable, binLevels, toDb, unitOf } from './dsp.js';
 
 const WARMUP_SEC = 0.5; // filter and Fast detector settle; also skips the tap on the screen
 const CLIP_LEVEL = 0.98;
 export const FFT_SIZES = [2048, 4096, 8192, 16384];
+export const MAX_RECORD_SEC = 300; // the file analysis reads the first 5 minutes
 
 export class MicError extends Error {
   constructor(code, message) {
@@ -30,9 +31,11 @@ function micError(code) {
 }
 
 export class Meter {
-  constructor(offset) {
+  constructor(offset, weighting = 'A') {
     this.offset = offset;
-    this.onLevel = null; // (dB(A) Fast) => void, about every 50 ms
+    this.weighting = weighting;
+    this.onLevel = null; // (Fast level, dB) => void, about every 50 ms
+    this.recording = null; // { chunks, samples, done } while recording
     this.samples = 0;
     this.laf = -Infinity;
     this._paused = false;
@@ -90,7 +93,7 @@ export class Meter {
         numberOfInputs: 1,
         numberOfOutputs: 1,
         outputChannelCount: [1],
-        processorOptions: { sos: designAWeighting(fs), blockSize: Math.round(fs * 0.05), ringSec },
+        processorOptions: { sos: designWeighting(fs, this.weighting), blockSize: Math.round(fs * 0.05), ringSec },
       });
       this.analyser = this.ctx.createAnalyser();
       this.analyser.smoothingTimeConstant = 0.5;
@@ -105,6 +108,7 @@ export class Meter {
       mute.connect(this.ctx.destination);
       this.node.port.onmessage = (e) => {
         if (e.data.type === 'level') this.handleBlock(e.data);
+        else if (e.data.type === 'chunk') this.handleChunk(e.data);
         else if (e.data.type === 'audio') {
           this.pending.get(e.data.id)?.(e.data.samples);
           this.pending.delete(e.data.id);
@@ -134,13 +138,73 @@ export class Meter {
     this.analyser.fftSize = n;
     const bins = n / 2;
     this.binHz = this.sampleRate / n;
-    this.table = binLevelTable(bins, this.binHz);
+    this.table = binLevelTable(bins, this.binHz, this.weighting);
     this.rawDb = new Float32Array(bins);
     this.levels = new Float32Array(bins);
     this.freqs = Float32Array.from({ length: bins }, (_, k) => k * this.binHz);
   }
 
-  // Current spectrum, dB(A) per analyser bin (calibrated). The array is reused between calls.
+  get unit() {
+    return unitOf(this.weighting);
+  }
+
+  // A, C or Z. Levels since the last reset mix weightings, so they start again.
+  setWeighting(w) {
+    this.weighting = w;
+    this.node?.port.postMessage({ type: 'sos', sos: designWeighting(this.sampleRate, w) });
+    if (this.analyser) this.setFftSize(this.analyser.fftSize);
+    this.resetStats();
+  }
+
+  // Records the raw microphone sound (not while paused) until stopRecording() or MAX_RECORD_SEC.
+  startRecording() {
+    if (!this.node || this.recording) return;
+    this.recording = { chunks: [], samples: 0, done: null };
+    this.node.port.postMessage({ type: 'record', on: true });
+  }
+
+  get recordedSec() {
+    return this.recording ? this.recording.samples / this.sampleRate : 0;
+  }
+
+  // Resolves the recorded sound as one Float32Array.
+  stopRecording() {
+    const r = this.recording;
+    if (!r) return Promise.resolve(new Float32Array(0));
+    return (r.stopped ||= new Promise((resolve) => {
+      r.done = resolve;
+      this.node.port.postMessage({ type: 'record', on: false });
+    }));
+  }
+
+  handleChunk({ samples, last }) {
+    const r = this.recording;
+    if (!r) return;
+    const room = MAX_RECORD_SEC * this.sampleRate - r.samples;
+    if (room > 0) {
+      const keep = samples.length > room ? samples.subarray(0, room) : samples;
+      r.chunks.push(keep);
+      r.samples += keep.length;
+    }
+    if (last) r.done?.(this.takeRecording());
+    else if (r.samples >= MAX_RECORD_SEC * this.sampleRate) this.onRecordFull?.();
+  }
+
+  // What has arrived so far, at once (for when the screen is left mid-recording).
+  takeRecording() {
+    const r = this.recording;
+    this.recording = null;
+    this.node?.port.postMessage({ type: 'record', on: false });
+    const out = new Float32Array(r ? r.samples : 0);
+    let pos = 0;
+    for (const c of r?.chunks || []) {
+      out.set(c, pos);
+      pos += c.length;
+    }
+    return out;
+  }
+
+  // Current spectrum, dB per analyser bin (weighted, calibrated). The array is reused between calls.
   spectrum() {
     this.analyser.getFloatFrequencyData(this.rawDb);
     return binLevels(this.rawDb, this.table, this.offset, this.levels);
@@ -195,6 +259,7 @@ export class Meter {
   stop() {
     this.stopped = true;
     this.onLevel = null;
+    if (this.recording) this.recording.done?.(this.takeRecording());
     if (this.node) this.node.port.onmessage = null;
     this.stream?.getTracks().forEach((t) => t.stop());
     if (this.ctx && this.ctx.state !== 'closed') this.ctx.close();

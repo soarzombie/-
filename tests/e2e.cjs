@@ -1,5 +1,6 @@
 // End-to-end check in real Chromium with a WAV file as the microphone.
-// A tone of known level goes in; the app's dB(A), verdict and frequency must come out right.
+// A tone of known level goes in; the app's dB(A) / dB(C) / dB(Z), peak frequency, cursor reading,
+// recording and file analysis must come out right.
 //
 //   NODE_PATH=$(npm root -g) node tests/e2e.cjs [screenshot-dir]
 //
@@ -129,7 +130,7 @@ function writeDemoFile(file, seconds = 20, rate = 48000) {
   fs.writeFileSync(file, buf);
 }
 
-const toneDb = (amp, aWeight = 0) => 20 * Math.log10(amp / Math.SQRT2) + OFFSET + aWeight;
+const toneDb = (amp, weight = 0) => 20 * Math.log10(amp / Math.SQRT2) + OFFSET + weight;
 
 async function launch(wav) {
   return chromium.launch({
@@ -184,6 +185,26 @@ async function tapFrequency(page, hz) {
 const num = async (page, sel) => parseFloat((await page.locator(sel).textContent()).replace(/[^\d.-]/g, ''));
 const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
 
+async function setMode(page, mode) {
+  await page.locator(`.mode[data-mode=${mode}]`).click();
+  assert.equal(await page.locator('.an-chart').getAttribute('data-view'), mode);
+  assert.equal(await page.locator(`.mode[data-mode=${mode}]`).getAttribute('aria-pressed'), 'true');
+}
+
+// Graph settings sheet: pick values by key, e.g. { style: 'line', fft: '8192' }.
+async function chartSettings(page, picks, shotName) {
+  await page.getByRole('button', { name: '그래프 설정' }).click();
+  const sheet = page.locator('dialog.sheet');
+  for (const [key, v] of Object.entries(picks)) {
+    const b = sheet.locator(`.seg[data-key=${key}] button[data-v="${v}"]`);
+    await b.click();
+    assert.equal(await b.getAttribute('aria-pressed'), 'true', `${key} = ${v}`);
+  }
+  if (shotName) await shot(page, shotName);
+  await sheet.getByRole('button', { name: '닫기' }).click();
+  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+}
+
 (async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'noise-e2e-'));
   if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
@@ -233,28 +254,33 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
   await page.locator('#a-cursor .cr-close').click();
   await page.waitForSelector('#a-cursor', { state: 'hidden' });
 
-  // view: spectrum -> time axis -> both -> spectrum; style: fill <-> line
-  await page.getByRole('button', { name: /보기/ }).click();
-  assert.equal(await page.locator('.an-chart').getAttribute('data-view'), 'gram');
+  // views: time axis, both, 1/3 octave, gauge, back to the spectrum; each shows its own drawing
+  await setMode(page, 'gram');
   await page.waitForTimeout(1500);
-  await page.getByRole('button', { name: /보기/ }).click();
-  assert.equal(await page.locator('.an-chart').getAttribute('data-view'), 'both');
-  await page.getByRole('button', { name: /보기/ }).click();
-  assert.equal(await page.locator('.an-chart').getAttribute('data-view'), 'spectrum');
-  await page.getByRole('button', { name: /모양/ }).click();
-  assert.match(await page.locator('[data-opt=style] b').textContent(), /선/);
-  await page.getByRole('button', { name: /모양/ }).click();
+  assert.ok(await page.locator('#a-gram canvas').isVisible() && !(await page.locator('#a-chart canvas').isVisible()));
+  await setMode(page, 'both');
+  assert.ok(await page.locator('#a-gram canvas').isVisible() && (await page.locator('#a-chart canvas').isVisible()));
+  await setMode(page, 'octave');
+  await page.waitForTimeout(1500);
+  assert.ok(await page.locator('#a-octave canvas').isVisible());
+  await shot(page, 'tone-octave');
+  await setMode(page, 'gauge');
+  assert.ok(await page.locator('#a-gauge svg').isVisible());
+  await setMode(page, 'spectrum');
+  assert.match(await page.locator('#a-mode-name').textContent(), /스펙트럼/);
 
-  // display options
-  await page.getByRole('button', { name: /FFT/ }).click();
-  assert.match(await page.locator('[data-opt=fft] b').textContent(), /8192/);
-  await page.getByRole('button', { name: /주파수 축/ }).click();
-  assert.match(await page.locator('[data-opt=scale] b').textContent(), /선형/);
+  // graph settings: style, max hold, FFT size, axis
+  await chartSettings(page, { style: 'line', hold: 'off', fft: '8192', scale: 'linear' });
   await page.waitForTimeout(800);
   await shot(page, 'tone-linear');
-  await page.getByRole('button', { name: /주파수 축/ }).click();
-  for (let i = 0; i < 3; i++) await page.getByRole('button', { name: /FFT/ }).click();
-  assert.match(await page.locator('[data-opt=fft] b').textContent(), /4096/);
+  await chartSettings(page, { style: 'fill', hold: 'on', fft: '4096', scale: 'log' });
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('noise-meter:settings:v1')));
+  assert.deepEqual([saved.style, saved.hold, saved.fftSize, saved.scale, saved.view], ['fill', true, 4096, 'log', 'spectrum']);
+
+  // help sheet
+  await page.getByRole('button', { name: '도움말' }).click();
+  await page.waitForSelector('dialog.sheet .help');
+  await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
 
   // save -> history -> saved analysis -> share card + CSV
   await page.waitForTimeout(1500);
@@ -329,6 +355,22 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
   const now1c = await num(page, '#a-now');
   console.log(`after +3 dB calibration: now ${now1c}`);
   assert.ok(Math.abs(now1c - (expected1 + 3)) < 0.5, 'calibrated level');
+
+  // record 3 s -> stop -> the file analysis screen analyses the recording (with the new calibration)
+  await page.getByRole('button', { name: '녹음 시작' }).click();
+  await page.waitForSelector('.analyzer[data-rec="on"]');
+  await page.waitForTimeout(3200);
+  assert.match(await page.locator('#a-state').textContent(), /녹음 중/);
+  assert.match(await page.locator('#a-time').textContent(), /00:0[34]/, 'clock shows the recording length');
+  await shot(page, 'recording');
+  await page.getByRole('button', { name: '녹음 정지' }).click();
+  await page.waitForSelector('#fa-result .stats-grid', { timeout: 20000 });
+  assert.match(await page.locator('.file-name').textContent(), /^녹음_\d{8}_\d{4}\.wav$/);
+  const recLen = await page.evaluate(() => document.querySelector('#fa-audio').duration);
+  const recLeq = await num(page, '#fa-result .stats-grid div:nth-child(1) b');
+  console.log(`recording: ${recLen.toFixed(2)} s, Leq ${recLeq}`);
+  assert.ok(recLen > 2.8 && recLen < 4, 'recording length');
+  assert.ok(Math.abs(recLeq - (expected1 + 3)) < 0.3, 'recording Leq');
   await browser.close();
 
   // Run 2: 100 Hz at -9 dBFS RMS; A-weighting takes off 19.1 dB -> 71.9 dB(A)
@@ -344,6 +386,19 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
   console.log(`100 Hz: now ${now2} dB(A), expected ${expected2.toFixed(1)}; peak ${peak2} Hz`);
   assert.ok(Math.abs(now2 - expected2) < 0.6, 'A-weighted level of 100 Hz tone');
   assert.ok(Math.abs(peak2 - 100) < 6, 'low-frequency peak');
+
+  // C and Z weighting: 100 Hz loses 0.3 dB with C and nothing with Z
+  for (const [w, weight] of [['C', -0.3], ['Z', 0], ['A', -19.1]]) {
+    await chartSettings(page, { weighting: w }, w === 'C' ? 'settings-sheet' : null);
+    assert.equal(await page.locator('#a-unit').textContent(), `dB(${w})`);
+    assert.equal(await page.locator('#a-weight').textContent(), `${w}특성`);
+    await page.waitForTimeout(1800);
+    const v = await num(page, '#a-now');
+    const leq = await num(page, '#a-leq');
+    console.log(`100 Hz ${w}: now ${v}, avg ${leq} dB(${w}), expected ${toneDb(0.5, weight).toFixed(1)}`);
+    assert.ok(Math.abs(v - toneDb(0.5, weight)) < 0.6, `${w}-weighted level`);
+    assert.ok(Math.abs(leq - toneDb(0.5, weight)) < 0.6, `${w}-weighted average starts again`);
+  }
 
   // attached file: 3 s of 1 kHz (77.0 dB(A)) then 3 s of 100 Hz (71.9 dB(A))
   // (passed as a buffer: Playwright here cannot attach files from non-ASCII paths, and the Korean name
@@ -400,20 +455,37 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
     page = await newPage(browser, base, errors, { viewport, seed: { vehicle: '12가 3456', recentVehicles: ['12가 3456', '34나 5678'] } });
     await running(page);
     await page.waitForTimeout(4000);
+    await tapFrequency(page, 1250);
+    await page.waitForTimeout(300);
     await shot(page, `main-${name}-live`);
-    await page.getByRole('button', { name: /보기/ }).click(); // time axis
+    await page.locator('#a-cursor .cr-close').click();
+    await setMode(page, 'gram');
     await page.waitForTimeout(3500);
     await shot(page, `main-${name}-gram`);
-    await page.getByRole('button', { name: /보기/ }).click(); // both
-    await page.getByRole('button', { name: /모양/ }).click(); // line
+    await setMode(page, 'both');
+    await chartSettings(page, { style: 'line' });
     await page.waitForTimeout(2500);
     await tapFrequency(page, 1250);
     await tapFrequency(page, 125);
     await page.waitForTimeout(300);
     await shot(page, `main-${name}-both`);
     await page.locator('#a-cursor .cr-close').click();
-    await page.getByRole('button', { name: /모양/ }).click(); // back to fill
-    await page.getByRole('button', { name: /보기/ }).click(); // back to spectrum
+    await chartSettings(page, { style: 'fill' });
+    await setMode(page, 'octave');
+    await page.waitForTimeout(2500);
+    await shot(page, `main-${name}-octave`);
+    await setMode(page, 'gauge');
+    await page.waitForTimeout(500);
+    await shot(page, `main-${name}-gauge`);
+    await setMode(page, 'spectrum');
+    await page.getByRole('button', { name: '그래프 설정' }).click();
+    await page.waitForTimeout(200);
+    await shot(page, `settings-sheet-${name}`);
+    await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
+    await page.getByRole('button', { name: '도움말' }).click();
+    await page.waitForTimeout(200);
+    await shot(page, `help-${name}`);
+    await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
     await page.getByRole('button', { name: '저장', exact: true }).first().click();
     await page.waitForSelector('dialog.sheet');
     await shot(page, `save-${name}`);

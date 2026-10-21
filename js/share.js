@@ -73,7 +73,7 @@ export function renderCard(rec, settings) {
 
 const CSV_HEAD = [
   '일시', '출처', '차량번호', '메모', '평균 Leq', '최대 Lmax', '최소 Lmin', '저장 순간', '단위', '측정·파일 길이(초)',
-  '피크1 Hz', '피크1 dB(A)', '피크2 Hz', '피크2 dB(A)', 'FFT', '마이크 보정', '과부하', '소리(초)',
+  '피크1 Hz', '피크1 dB', '피크2 Hz', '피크2 dB', 'FFT', '마이크 보정', '과부하', '소리(초)',
 ];
 
 export function recordsCsv(records) {

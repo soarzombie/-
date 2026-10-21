@@ -7,6 +7,11 @@ const F2 = 107.65265;
 const F3 = 737.86223;
 const F4 = 12194.217;
 const A1000 = 1.9997; // dB, makes the analytic curve 0 dB at 1 kHz
+const C1000 = 0.0619;
+
+// Frequency weightings: 'A' (default), 'C' (flatter, for loud and low sounds), 'Z' (none).
+export const WEIGHTINGS = ['A', 'C', 'Z'];
+export const unitOf = (w = 'A', digital = false) => `${digital ? 'dBFS' : 'dB'}(${w})`;
 
 // Mean of w[n]^2 for the Blackman window (alpha = 0.16) the Web Audio AnalyserNode applies.
 export const BLACKMAN_POWER = 0.42 ** 2 + 0.5 ** 2 / 2 + 0.08 ** 2 / 2;
@@ -22,6 +27,33 @@ export function aWeightDb(f) {
     (F4 ** 2 * f2 * f2) /
     ((f2 + F1 ** 2) * Math.sqrt((f2 + F2 ** 2) * (f2 + F3 ** 2)) * (f2 + F4 ** 2));
   return 20 * Math.log10(ra) + A1000;
+}
+
+export function cWeightDb(f) {
+  if (f <= 0) return -Infinity;
+  const f2 = f * f;
+  return 20 * Math.log10((F4 ** 2 * f2) / ((f2 + F1 ** 2) * (f2 + F4 ** 2))) + C1000;
+}
+
+export function weightDb(f, weighting = 'A') {
+  if (f <= 0) return -Infinity;
+  return weighting === 'C' ? cWeightDb(f) : weighting === 'Z' ? 0 : aWeightDb(f);
+}
+
+// Biquads for the chosen weighting ('Z' = no filter).
+export function designWeighting(fs, weighting = 'A') {
+  if (weighting === 'Z') return [];
+  if (weighting === 'A') return designAWeighting(fs);
+  const pole = (hz) => (2 * fs - 2 * Math.PI * hz) / (2 * fs + 2 * Math.PI * hz);
+  const p1 = pole(F1);
+  const p4 = pole(F4);
+  const sos = [
+    [1, -2, 1, -2 * p1, p1 * p1], // two zeros at DC, double pole at F1
+    [1, 2, 1, -2 * p4, p4 * p4], // two zeros at Nyquist, double pole at F4
+  ];
+  const g = 1 / sosMagnitude(sos, 1000, fs);
+  sos[1] = [sos[1][0] * g, sos[1][1] * g, sos[1][2] * g, sos[1][3], sos[1][4]];
+  return sos;
 }
 
 // Digital A-weighting filter as three biquads [b0, b1, b2, a1, a2] (a0 = 1),
@@ -68,12 +100,36 @@ export function toDb(meanSquare, offset = 0) {
   return meanSquare > 0 ? 10 * Math.log10(meanSquare) + offset : -Infinity;
 }
 
-// Per-bin dB to add to analyser output for an A-weighted, calibrated level per bin.
-export function binLevelTable(binCount, binHz) {
+// Per-bin dB to add to analyser output for a weighted, calibrated level per bin.
+export function binLevelTable(binCount, binHz, weighting = 'A') {
   const t = new Float32Array(binCount);
   t[0] = -Infinity; // DC is not sound
-  for (let k = 1; k < binCount; k++) t[k] = BIN_CORRECTION_DB + aWeightDb(k * binHz);
+  for (let k = 1; k < binCount; k++) t[k] = BIN_CORRECTION_DB + weightDb(k * binHz, weighting);
   return t;
+}
+
+// 1/3-octave bands 25 Hz – 20 kHz (base-2 centres 1000 * 2^(n/3)); `major` marks octave centres.
+const THIRD_LABELS = [
+  '25', '31.5', '40', '50', '63', '80', '100', '125', '160', '200', '250', '315', '400', '500', '630',
+  '800', '1k', '1.25k', '1.6k', '2k', '2.5k', '3.15k', '4k', '5k', '6.3k', '8k', '10k', '12.5k', '16k', '20k',
+];
+const OCTAVE_LABELS = new Set(['31.5', '63', '125', '250', '500', '1k', '2k', '4k', '8k', '16k']);
+export const BANDS = THIRD_LABELS.map((label, i) => {
+  const exact = 1000 * 2 ** ((i - 16) / 3);
+  return { exact, label, major: OCTAVE_LABELS.has(label), lo: exact * 2 ** (-1 / 6), hi: exact * 2 ** (1 / 6) };
+});
+
+// Band number for each frequency point (-1 outside the bands).
+export function bandIndex(freqs, bands = BANDS) {
+  return Int16Array.from(freqs, (f) => bands.findIndex((b) => f >= b.lo && f < b.hi));
+}
+
+// Energy sum of per-bin levels into bands; bands no bin falls into come out -Infinity.
+export function bandLevels(levels, idx, count = BANDS.length, out = new Float32Array(count)) {
+  const pow = new Float64Array(count);
+  for (let k = 0; k < levels.length; k++) if (idx[k] >= 0 && levels[k] > -300) pow[idx[k]] += 10 ** (levels[k] / 10);
+  for (let b = 0; b < count; b++) out[b] = toDb(pow[b]);
+  return out;
 }
 
 export function binLevels(dbBins, table, offset, out = new Float32Array(dbBins.length)) {
@@ -244,11 +300,11 @@ export function stft(samples, rate, fftSize = 2048, hop = fftSize / 2) {
   return { frames, binHz: rate / fftSize, hopSec: hop / rate };
 }
 
-// The meter's level chain run over a whole recording: A-weighting, Fast (125 ms) detector.
+// The meter's level chain run over a whole recording: frequency weighting, Fast (125 ms) detector.
 // Returns LAeq of the whole file, LAFmax / LAFmin after the first 0.5 s (as live), and the Fast
 // level every `step` seconds for a time-history graph.
-export function levelHistory(samples, rate, offset = 0, step = 0.1) {
-  const sos = designAWeighting(rate);
+export function levelHistory(samples, rate, offset = 0, step = 0.1, weighting = 'A') {
+  const sos = designWeighting(rate, weighting);
   const st = sos.map(() => [0, 0]);
   const kFast = 1 - Math.exp(-1 / (0.125 * rate));
   const warm = samples.length > rate ? Math.round(0.5 * rate) : 0;

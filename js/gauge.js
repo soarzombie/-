@@ -1,5 +1,5 @@
-// Needle gauge, 20–130 dB(A): ticks every 5 dB, the alert zone in orange,
-// the needle at the current level and marks at the minimum and maximum since reset.
+// Level displays. Gauge: needle 20–130 dB, ticks every 5 dB, the alert zone in orange, marks at the
+// minimum and maximum since reset. LevelBar: a row of LED segments, green / yellow / red.
 
 const LO = 20;
 const HI = 130;
@@ -67,5 +67,38 @@ export class Gauge {
     };
     place(this.minMark, min);
     place(this.maxMark, max);
+  }
+}
+
+const LED_LO = 30;
+const LED_STEP = 3; // dB per segment
+const LED_N = 30; // 30 – 120 dB
+
+export class LevelBar {
+  constructor(host, alertLevel) {
+    host.innerHTML = Array.from({ length: LED_N }, (_, i) => {
+      const v = LED_LO + i * LED_STEP;
+      const tone = v >= alertLevel ? 'r' : v >= alertLevel - 15 ? 'y' : 'g';
+      return `<i class="led-${tone}"></i>`;
+    }).join('');
+    this.segs = [...host.children];
+    this.lit = -1;
+    this.peak = -1;
+  }
+
+  // now: current level (lights the segments below it); max: held maximum (one bright segment).
+  set(now, max) {
+    const seg = (v) => (Number.isFinite(v) ? Math.min(LED_N - 1, Math.floor((v - LED_LO) / LED_STEP)) : -1);
+    const lit = seg(now);
+    const peak = seg(max);
+    if (lit !== this.lit) {
+      this.segs.forEach((el, i) => el.classList.toggle('on', i <= lit));
+      this.lit = lit;
+    }
+    if (peak !== this.peak) {
+      this.segs[this.peak]?.classList.remove('hold');
+      this.segs[peak]?.classList.add('hold');
+      this.peak = peak;
+    }
   }
 }

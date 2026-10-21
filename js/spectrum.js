@@ -1,7 +1,7 @@
-// Real-time FFT spectrum: x = frequency 20 Hz – 20 kHz (log) or 0 – 20 kHz (linear), y = dB(A) per FFT bin.
+// Real-time FFT spectrum: x = frequency 20 Hz – 20 kHz (log) or 0 – 20 kHz (linear), y = weighted dB per FFT bin.
 // Style 'fill': red area = current, grey area = maximum held since reset.
 // Style 'line': yellow line = current, pink line = maximum.
-// Labels mark the strongest tonal peaks; cursors A/B read exact values. drawSpectrum() is
+// Labels mark the strongest tonal peaks; cursors A/B are crosshairs that read exact values. drawSpectrum() is
 // also used for the share image, and the layout helpers keep the spectrogram aligned with it.
 
 import { rangeIndex, reduceRanges } from './dsp.js';
@@ -165,32 +165,57 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
     g.fillText(text, bx + 6 * k, by + 14.5 * k);
   });
 
-  // cursors
+  // cursors: a crosshair at the curve, with the frequency and level next to the point
   (opts.cursors || []).forEach((cur) => {
     const cx = Math.round(freqToX(cur.hz, box, scale)) + 0.5;
+    const col = Math.max(0, Math.min(cols.n - 1, Math.floor(cx - x0)));
+    const v = data.cur ? cols.cur[col] : NaN;
     g.strokeStyle = c.cursor;
-    g.lineWidth = 1.5 * k;
-    g.setLineDash([5 * k, 4 * k]);
+    g.lineWidth = 1.2 * k;
     g.beginPath();
     g.moveTo(cx, yTop);
     g.lineTo(cx, yBot);
     g.stroke();
-    g.setLineDash([]);
-    const col = Math.max(0, Math.min(cols.n - 1, Math.floor(cx - x0)));
-    if (data.cur) {
+    if (Number.isFinite(v) && v > lo) {
+      const cy = Math.round(y(v)) + 0.5;
+      g.globalAlpha = 0.75;
+      g.beginPath();
+      g.moveTo(x0, cy);
+      g.lineTo(x1, cy);
+      g.stroke();
+      g.globalAlpha = 1;
       g.fillStyle = c.cursor;
       g.beginPath();
-      g.arc(cx, y(cols.cur[col]), 4 * k, 0, Math.PI * 2);
+      g.arc(cx, cy, 4 * k, 0, Math.PI * 2);
       g.fill();
+      const hzText = `${Math.round(cur.hz).toLocaleString('ko-KR')} Hz`;
+      const dbText = `${v.toFixed(1)} ${opts.unit || 'dB(A)'}`;
+      g.font = font(13 * k, 700);
+      const tag = 16 * k; // the cursor's letter, left of the numbers
+      const tw = Math.max(g.measureText(hzText).width, g.measureText(dbText).width) + tag + 14 * k;
+      const th = 38 * k;
+      const gap = 8 * k;
+      const bx = cx + gap + tw <= x1 ? cx + gap : cx - gap - tw;
+      const by = cy + gap + th <= yBot ? cy + gap : Math.max(yTop + 20 * k, cy - gap - th);
+      g.fillStyle = c.labelBg;
+      g.beginPath();
+      g.roundRect ? g.roundRect(bx, by, tw, th, 6 * k) : g.rect(bx, by, tw, th);
+      g.fill();
+      g.fillStyle = c.cursor;
+      g.beginPath();
+      g.roundRect ? g.roundRect(bx + 5 * k, by + 5 * k, tag, tag, 4 * k) : g.rect(bx + 5 * k, by + 5 * k, tag, tag);
+      g.fill();
+      g.textAlign = 'center';
+      g.fillStyle = '#0b0d10';
+      g.font = font(12 * k, 800);
+      g.fillText(cur.name, bx + 5 * k + tag / 2, by + 17.5 * k);
+      g.textAlign = 'left';
+      g.font = font(13 * k, 700);
+      g.fillStyle = c.label;
+      g.fillText(hzText, bx + tag + 9 * k, by + 16 * k);
+      g.fillStyle = c.cursor;
+      g.fillText(dbText, bx + tag + 9 * k, by + 32 * k);
     }
-    g.font = font(12 * k, 800);
-    g.textAlign = 'center';
-    g.fillStyle = c.cursor;
-    g.beginPath();
-    g.roundRect ? g.roundRect(cx - 9 * k, yTop, 18 * k, 18 * k, 4 * k) : g.rect(cx - 9 * k, yTop, 18 * k, 18 * k);
-    g.fill();
-    g.fillStyle = '#0b0d10';
-    g.fillText(cur.name, cx, yTop + 13 * k);
   });
 
   return { box, cols };

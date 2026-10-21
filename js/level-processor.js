@@ -1,15 +1,16 @@
-// AudioWorklet: A-weights the microphone signal sample by sample and reports
+// AudioWorklet: frequency-weights the microphone signal sample by sample and reports
 // energy sums plus the Fast (125 ms) time-weighted level, so Leq, LAFmax and LAFmin
 // are computed from every sample rather than from sampled analyser frames.
-// It also keeps the last `ringSec` seconds of raw sound, so "save" can include what was just heard.
-// Filter coefficients come from dsp.js via processorOptions.
+// It also keeps the last `ringSec` seconds of raw sound, so "save" can include what was just heard,
+// and while recording it posts the raw sound in chunks.
+// Filter coefficients come from dsp.js via processorOptions, and again in a 'sos' message when
+// the weighting changes.
 
 class LevelProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     const opts = options.processorOptions || {};
-    this.sos = opts.sos;
-    this.state = this.sos.map(() => new Float64Array(2));
+    this.setSos(opts.sos);
     this.blockSize = opts.blockSize || Math.round(sampleRate * 0.05);
     this.kFast = 1 - Math.exp(-1 / (0.125 * sampleRate));
     this.fast = 0;
@@ -17,12 +18,39 @@ class LevelProcessor extends AudioWorkletProcessor {
     this.ringPos = 0;
     this.ringFilled = 0;
     this.paused = false;
+    this.rec = null; // chunk being filled while recording
+    this.recLen = Math.round(sampleRate * 0.5);
     this.port.onmessage = (e) => {
-      if (e.data.type === 'pause') this.paused = e.data.paused;
-      else if (e.data.type === 'dump') this.dump(e.data.id);
-      else if (e.data.type === 'clear') this.ringFilled = 0;
+      const m = e.data;
+      if (m.type === 'pause') this.paused = m.paused;
+      else if (m.type === 'dump') this.dump(m.id);
+      else if (m.type === 'clear') this.ringFilled = 0;
+      else if (m.type === 'sos') this.setSos(m.sos);
+      else if (m.type === 'record') this.record(m.on);
     };
     this.reset();
+  }
+
+  setSos(sos) {
+    this.sos = sos;
+    this.state = sos.map(() => new Float64Array(2));
+  }
+
+  // on: start collecting; off: post what is left with last = true.
+  record(on) {
+    if (on) {
+      this.rec = new Float32Array(this.recLen);
+      this.recPos = 0;
+    } else if (this.rec) {
+      this.flush(true);
+      this.rec = null;
+    }
+  }
+
+  flush(last = false) {
+    const out = this.rec.slice(0, this.recPos);
+    this.port.postMessage({ type: 'chunk', samples: out, last }, [out.buffer]);
+    this.recPos = 0;
   }
 
   // Posts the buffered sound, oldest sample first.
@@ -54,12 +82,17 @@ class LevelProcessor extends AudioWorkletProcessor {
     const sos = this.sos;
     const st = this.state;
     const ring = this.paused ? null : this.ring;
+    const rec = this.paused ? null : this.rec;
     for (let i = 0; i < ch.length; i++) {
       const x = ch[i];
       if (ring) {
         ring[this.ringPos] = x;
         if (++this.ringPos === ring.length) this.ringPos = 0;
         if (this.ringFilled < ring.length) this.ringFilled++;
+      }
+      if (rec) {
+        rec[this.recPos] = x;
+        if (++this.recPos === rec.length) this.flush();
       }
       let y = x;
       for (let s = 0; s < sos.length; s++) {

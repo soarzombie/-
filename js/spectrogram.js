@@ -1,5 +1,5 @@
 // Spectrogram (waterfall): x = the same 20 Hz – 20 kHz axis as the spectrum, y = time with the
-// newest sound at the top, colour = dB(A). Live it scrolls down as rows arrive; for a saved
+// newest sound at the top, colour = weighted dB. Live it scrolls down as rows arrive; for a saved
 // analysis it is built once from the recorded sound, with a playhead while it plays back.
 
 import { reduceRanges } from './dsp.js';
@@ -215,9 +215,14 @@ export class SpectrogramView {
       g.stroke();
     }
     if (this.top != null) {
+      // colour range, bottom right (the top right corner holds the chart buttons)
+      const text = `${Math.round(this.top - SPAN)}–${Math.round(this.top)} ${this.unit}`;
       g.textAlign = 'right';
-      g.fillStyle = 'rgba(255,255,255,0.8)';
-      g.fillText(`${Math.round(this.top - SPAN)}–${Math.round(this.top)} ${this.unit}`, box.x1 - 4 * k, box.yTop + 13 * k);
+      const tw = g.measureText(text).width;
+      g.fillStyle = 'rgba(6,6,14,0.7)';
+      g.fillRect(box.x1 - tw - 8 * k, box.yBot - 18 * k, tw + 8 * k, 18 * k);
+      g.fillStyle = 'rgba(255,255,255,0.85)';
+      g.fillText(text, box.x1 - 4 * k, box.yBot - 5 * k);
     }
   }
 

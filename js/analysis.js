@@ -8,11 +8,12 @@ import { binLevelTable, binLevels, frameSpectrum, levelHistory, findPeaks, logGr
 export const FRAME_GRID = logGrid(400, 20, 20000);
 
 // offset: dB added to dBFS (the phone's calibration, or 0 for plain digital level).
-export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFrames = 1500 } = {}) {
-  const levels = levelHistory(samples, rate, offset);
+// weighting: 'A' | 'C' | 'Z', for the levels and the spectra alike.
+export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFrames = 1500, weighting = 'A' } = {}) {
+  const levels = levelHistory(samples, rate, offset, 0.1, weighting);
   const bins = fftSize / 2;
   const binHz = rate / fftSize;
-  const table = binLevelTable(bins, binHz);
+  const table = binLevelTable(bins, binHz, weighting);
   const freqs = Float32Array.from({ length: bins }, (_, k) => k * binHz);
   const idx = rangeIndex(freqs, FRAME_GRID.edges);
   const span = Math.max(0, samples.length - fftSize);
@@ -38,6 +39,7 @@ export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFra
     duration: samples.length / rate,
     rate,
     offset,
+    weighting,
     leq: levels.leq,
     lmax: levels.lmax,
     lmin: levels.lmin,
