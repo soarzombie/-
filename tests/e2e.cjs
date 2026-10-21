@@ -192,6 +192,17 @@ async function tapFrequency(page, hz, fmin = 20, fmax = 20000) {
   await page.mouse.click(r.x + x, r.y + r.height * 0.75); // low enough to miss the floating level panel in landscape
 }
 
+// The same, with the analyzer turned sideways (the plot's x runs down the screen, its y to the left).
+async function tapSideways(page, hz, fmin = 20, fmax = 20000) {
+  const r = await page.locator('#a-chart').boundingBox();
+  const [w, h] = await page.evaluate(() => [document.querySelector('#a-chart').clientWidth, document.querySelector('#a-chart').clientHeight]);
+  const k = w < 360 ? 0.92 : 1;
+  const x0 = 30 * k;
+  const x1 = w - 6 * k;
+  const lx = x0 + (Math.log(hz / fmin) / Math.log(fmax / fmin)) * (x1 - x0);
+  await page.mouse.click(r.x + r.width - h * 0.75, r.y + lx);
+}
+
 const settingsOf = (page) => page.evaluate(() => JSON.parse(localStorage.getItem('noise-meter:settings:v1')));
 const num = async (page, sel) => parseFloat((await page.locator(sel).textContent()).replace(/[^\d.-]/g, ''));
 const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
@@ -323,6 +334,31 @@ async function cursorDb(page, hz) {
   assert.ok(await page.locator('#a-trace canvas').isVisible(), 'time-axis graph under the spectrum');
   assert.ok(traceBox.y > specBox.y + specBox.height - 1, 'below it');
   assert.ok(traceBox.height < specBox.height * 0.6, 'and smaller');
+
+  // 가로: where the screen cannot be locked (here, as on an iPhone) the page turns sideways into the
+  // landscape layout; a tap still reads the right frequency, the chart menu opens on screen; 세로 goes back
+  await page.getByRole('button', { name: '가로 화면으로' }).click();
+  await page.waitForFunction(() => document.documentElement.dataset.rotate === 'on' && document.documentElement.dataset.layout === 'landscape');
+  assert.ok(await page.locator('.tabbar').isHidden(), 'no tab bar in the landscape layout');
+  const turned = await page.evaluate(() => [document.querySelector('#a-chart').clientWidth, document.querySelector('#a-chart').clientHeight]);
+  assert.ok(turned[0] > turned[1] * 1.5, `a wide chart when turned: ${turned}`);
+  await page.waitForTimeout(800);
+  await tapSideways(page, 1000);
+  await page.waitForSelector('#a-cursor:not([hidden])');
+  const sideHz = Number((await page.locator('#a-cursor .cr-hz').textContent()).replace(/[^\d.]/g, ''));
+  console.log(`turned sideways: chart ${turned.join(' x ')}, cursor ${sideHz} Hz`);
+  assert.ok(Math.abs(sideHz - 1000) / 1000 < 0.04, 'the cursor reads the tapped frequency when turned');
+  await shot(page, 'sideways');
+  await page.locator('#a-cursor .cr-close').click();
+  await page.getByRole('button', { name: '그래프 설정' }).click();
+  await page.getByRole('menu').waitFor();
+  const mb = await page.getByRole('menu').boundingBox();
+  assert.ok(mb.x >= 0 && mb.y >= 0 && mb.x + mb.width <= 391 && mb.y + mb.height <= 845, `the menu stays on screen: ${JSON.stringify(mb)}`);
+  await shot(page, 'sideways-menu');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: '세로 화면으로' }).click();
+  await page.waitForFunction(() => document.documentElement.dataset.layout === 'portrait' && document.documentElement.dataset.rotate === 'off');
+  assert.ok(await page.locator('.tabbar').isVisible(), 'back to portrait');
 
   // other views: spectrogram and 1/3 octave each on their own, then back
   assert.equal(await page.locator('.mode').count(), 3, 'three views');

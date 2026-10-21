@@ -10,7 +10,7 @@ import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
 import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds } from './dsp.js';
 import * as store from './store.js';
 import { esc, fmtDb, fmtHz, fmtClock, fmtDate, fmtDay, fmtShortDate, fmtTime, fmtWhen, fileStamp, speedText } from './format.js';
-import { SpectrumView, curveLook, checkFreqRange, checkDbRange, setChartTheme, FMIN, FMAX } from './spectrum.js';
+import { SpectrumView, curveLook, checkFreqRange, checkDbRange, setChartTheme, sideways, FMIN, FMAX } from './spectrum.js';
 import { SpectrogramView } from './spectrogram.js';
 import { encodeWav, decodeAudioFile } from './audio.js';
 import { analyzeSound, frameAt } from './analysis.js';
@@ -36,6 +36,7 @@ const ICON = {
   info: svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><circle class="fill" cx="12" cy="7.8" r="1.2"/>'),
   chevron: svg('<path d="M7 10l5 5 5-5"/>'),
   axes: svg('<path d="M4 4v16h16"/><path d="M8 8h3M8 12h6M8 16h9"/>'),
+  rotate: svg('<rect x="2.5" y="8" width="13" height="9" rx="2"/><path d="M12.5 3.5a7 7 0 0 1 8 7.5"/><path d="M18.5 9.5l2 1.5 1.5-2"/>'),
   timer: svg('<circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4l2.6 2M9.5 3h5M12 3v2.5"/>'),
   sliders: svg('<path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17" r="2"/>'),
 };
@@ -113,10 +114,11 @@ function openMenu(anchor, html, onClose = null, className = '') {
   menu.setAttribute('role', 'menu');
   menu.innerHTML = html;
   document.body.append(layer, menu);
-  const a = anchor.getBoundingClientRect();
-  const m = menu.getBoundingClientRect();
-  menu.style.left = `${Math.max(8, Math.min(a.right - m.width, window.innerWidth - m.width - 8))}px`;
-  menu.style.top = `${Math.max(8, Math.min(a.bottom + 6, window.innerHeight - m.height - 8))}px`;
+  // in the page's own coordinates, which are not the screen's when the analyzer is turned sideways
+  const a = pageRect(anchor);
+  const [vw, vh] = sideways() ? [document.body.clientWidth, document.body.clientHeight] : [window.innerWidth, window.innerHeight];
+  menu.style.left = `${Math.max(8, Math.min(a.right - menu.offsetWidth, vw - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(a.bottom + 6, vh - menu.offsetHeight - 8))}px`;
   const onKey = (e) => e.key === 'Escape' && close();
   const close = () => {
     if (!menu.isConnected) return;
@@ -130,6 +132,69 @@ function openMenu(anchor, html, onClose = null, className = '') {
   layer.addEventListener('click', close); // the whole tap lands on the layer, not on what is under it
   anchor.setAttribute('aria-expanded', 'true');
   return { menu, close };
+}
+
+// An element's box in page coordinates. Turned sideways, the page is rotated a quarter turn clockwise
+// about the screen's top right, so a screen point (x, y) is the page point (y, screen width - x).
+function pageRect(el) {
+  const r = el.getBoundingClientRect();
+  if (!sideways()) return r;
+  const W = window.innerWidth;
+  return { left: r.top, right: r.bottom, top: W - r.right, bottom: W - r.left, width: r.height, height: r.width };
+}
+
+// Landscape layout (data-layout on <html>, used by the analyzer's CSS): a landscape screen, the screen
+// locked to landscape by the 가로 button (Android, in full screen: data-lock), or, where it cannot be
+// locked (iPhone), the analyzer page turned sideways in CSS (data-rotate).
+const html = document.documentElement;
+const LANDSCAPE = window.matchMedia?.('(orientation: landscape) and (min-width: 600px)');
+
+function updateLayout() {
+  const forced = html.dataset.rotate === 'on' || html.dataset.lock === 'on';
+  html.dataset.layout = LANDSCAPE?.matches || html.dataset.rotate === 'on' ? 'landscape' : 'portrait';
+  const btn = document.querySelector('[data-act=rotate]');
+  if (btn) {
+    btn.querySelector('span').textContent = forced ? '세로' : '가로';
+    btn.setAttribute('aria-label', forced ? '세로 화면으로' : '가로 화면으로');
+  }
+}
+
+LANDSCAPE?.addEventListener?.('change', () => {
+  if (LANDSCAPE.matches) html.dataset.rotate = 'off'; // the phone turned by itself: no need to turn the page
+  updateLayout();
+});
+document.addEventListener('fullscreenchange', () => {
+  if (document.fullscreenElement || html.dataset.lock !== 'on') return;
+  html.dataset.lock = 'off'; // full screen left (back button): the lock went with it
+  updateLayout();
+});
+
+async function toggleLandscape() {
+  if (html.dataset.rotate === 'on') {
+    html.dataset.rotate = 'off';
+    return updateLayout();
+  }
+  if (html.dataset.lock === 'on') {
+    html.dataset.lock = 'off';
+    window.screen.orientation?.unlock?.();
+    if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
+    return updateLayout();
+  }
+  try {
+    if (!window.screen.orientation?.lock || !html.requestFullscreen) throw new Error('no lock');
+    if (!document.fullscreenElement) await html.requestFullscreen({ navigationUI: 'hide' });
+    await window.screen.orientation.lock('landscape');
+    // a lock that does not turn the screen (some browsers and emulators) counts as no lock
+    for (let t = 0; t < 10 && window.innerWidth <= window.innerHeight; t++) await sleep(100);
+    if (window.innerWidth <= window.innerHeight) throw new Error('not turned');
+    html.dataset.lock = 'on';
+    return updateLayout();
+  } catch {
+    window.screen.orientation?.unlock?.();
+    if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
+  }
+  html.dataset.rotate = 'on';
+  updateLayout();
 }
 
 // 'dark' | 'light' (the bright screen for sunlight): page colours and chart colours.
@@ -344,6 +409,7 @@ function helpSheet() {
         <dt>⚙ 차트 메뉴</dt><dd>그래프 오른쪽 위 버튼. 차트 스타일(면 · 선 · 막대), <b>최대값 추적</b>·<b>최소값 추적</b>(최근 큰·작은 값을 따라가다 초당 12 dB씩 돌아오는 점선), <b>피크 홀드</b>(초기화 뒤 가장 큰 값), <b>미니멈 홀드</b>(초기화 뒤 가장 작은 값, 주황), 홀드 재설정(이 선들만 새로 시작), 축 범위, <b>측정 · 그래프 설정</b>(마이크, 가중치, Fast/Slow, 정해진 시간, 속도, 시간축 길이, FFT, 화면 밝기 — 햇빛 아래에서는 "밝게").</dd>
         <dt>축 범위</dt><dd>차트 메뉴의 "축 범위"에서 주파수 범위(전체 · 저음 · 중음 · 고음 또는 직접 입력)와 각 그래프의 dB 범위(자동 / 직접)를 정합니다. "처음대로"로 되돌립니다.</dd>
         <dt>시간축 그래프</dt><dd>아래쪽 작은 그래프. 가로는 측정 시간, 세로는 dB(큰 숫자와 같은 값), 점선은 평균입니다. 보이는 시간(30초 · 1분 · 5분)은 그래프 설정에서 바꿉니다.</dd>
+        <dt>가로 · 세로</dt><dd>보기 버튼 오른쪽 <b>가로</b>를 누르면 가로 화면이 됩니다(휴대폰 위쪽이 왼쪽으로 가게 돌려 잡으세요). 아이폰처럼 화면 방향을 고정할 수 없는 휴대폰에서는 화면을 돌려서 보여 줍니다. <b>세로</b>를 누르면 돌아옵니다. 휴대폰 자동 회전이 켜져 있으면 그냥 돌려도 됩니다.</dd>
         <dt>보기</dt><dd>${MODES.map((m) => m.label).join(' · ')}. 맨 위 버튼으로 바꿉니다.</dd>
         <dt>● 녹음</dt><dd>측정 버튼과 따로 움직입니다. 누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 그래프 위 빨간 시계가 녹음 길이), 측정을 일시정지해도 녹음은 계속됩니다. 정지해도 측정은 그대로 이어지고, 녹음은 파일 탭에 들어가 "분석 보기"로 바로 열 수 있습니다.</dd>
         <dt>▶ ⏸ 측정</dt><dd>측정 시작과 일시정지(화면과 값 고정). 녹음에는 영향을 주지 않습니다.</dd>
@@ -363,8 +429,11 @@ async function renderAnalyzer() {
   const s = getSettings();
   view.innerHTML = `
     <section class="analyzer" data-state="off" data-rec="off" data-timed="off">
-      <div class="an-modes" role="group" aria-label="보기">
-        ${MODES.map((m) => `<button type="button" class="mode" data-mode="${m.id}" aria-label="${m.label}" aria-pressed="${s.view === m.id}">${m.icon}</button>`).join('')}
+      <div class="an-top">
+        <div class="an-modes" role="group" aria-label="보기">
+          ${MODES.map((m) => `<button type="button" class="mode" data-mode="${m.id}" aria-label="${m.label}" aria-pressed="${s.view === m.id}">${m.icon}</button>`).join('')}
+        </div>
+        <button type="button" class="an-rotate" data-act="rotate" aria-label="가로 화면으로">${ICON.rotate}<span>가로</span></button>
       </div>
       <div class="an-sub">
         <button type="button" class="an-preset" id="a-preset" aria-haspopup="menu" aria-expanded="false" aria-label="측정 상황: ${presetOf(s.preset).name}"><span>${presetOf(s.preset).name}</span>${ICON.chevron}</button>
@@ -1227,6 +1296,8 @@ async function renderAnalyzer() {
     openSave(snapshot(), audio);
   };
   view.querySelector('[data-act=help]').onclick = helpSheet;
+  view.querySelector('[data-act=rotate]').onclick = toggleLandscape;
+  updateLayout();
   view.querySelector('[data-act=ref-off]').onclick = refOff;
   $('a-zoom').hidden = s.freqMin === FMIN && s.freqMax === FMAX;
   $('a-zoom').onclick = () => change({ freqMin: FMIN, freqMax: FMAX });
@@ -2094,6 +2165,7 @@ async function renderSettings() {
 /* ---------- boot ---------- */
 
 applyTheme(getSettings().theme);
+updateLayout();
 window.addEventListener('hashchange', route);
 route();
 

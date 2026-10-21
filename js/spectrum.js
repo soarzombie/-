@@ -402,6 +402,9 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
   return { box, cols, readings };
 }
 
+// The analyzer page turned a quarter turn clockwise in CSS (the 가로 button where the screen cannot be locked).
+export const sideways = () => document.documentElement.dataset.rotate === 'on' && document.body.dataset.view === 'home';
+
 // Canvas that follows its host's size and redraws on update(). With `cursor`, tapping the chart places
 // the cursor (or moves it there) and dragging moves it; two fingers pinch the axis (onZoom).
 export class SpectrumView {
@@ -429,7 +432,7 @@ export class SpectrumView {
   }
 
   resize() {
-    const r = this.host.getBoundingClientRect();
+    const r = { width: this.host.clientWidth, height: this.host.clientHeight }; // layout size, also when turned sideways
     this.dpr = Math.min(3, window.devicePixelRatio || 1);
     this.w = Math.max(1, Math.floor(r.width));
     this.h = Math.max(1, Math.floor(r.height));
@@ -467,7 +470,11 @@ export class SpectrumView {
     const fingers = new Map(); // pointerId -> x
     let pinch = null; // two fingers with onZoom: { ids, fa, fb } frequencies first under them
     const axis = () => freqAxis(this.opts.scale || 'log', this.opts.fmin ?? FMIN, this.opts.fmax ?? FMAX);
-    const xAt = (e) => e.clientX - this.host.getBoundingClientRect().left;
+    // x along the plot; on the analyzer turned sideways (app.js) the plot's x runs down the screen
+    const xAt = (e) => {
+      const r = this.host.getBoundingClientRect();
+      return sideways() ? e.clientY - r.top : e.clientX - r.left;
+    };
     this.host.addEventListener('pointerdown', (e) => {
       if (!this.box) return;
       const x = xAt(e);
