@@ -101,6 +101,7 @@ export function rangeIndex(freqs, edges) {
 
 // Collapses levels onto ranges: the loudest point inside each range, or, where a range is
 // narrower than the point spacing, the level interpolated at its centre frequency.
+// Ranges past the last point get -Infinity (nothing measured there, e.g. a 32 kHz mic above 16 kHz).
 export function reduceRanges(levels, freqs, idx, centres, out = new Float32Array(centres.length)) {
   for (let c = 0; c < centres.length; c++) {
     const lo = idx[c];
@@ -109,8 +110,10 @@ export function reduceRanges(levels, freqs, idx, centres, out = new Float32Array
       let m = -Infinity;
       for (let i = lo; i < hi; i++) if (levels[i] > m) m = levels[i];
       out[c] = m;
-    } else if (lo <= 0 || lo >= freqs.length) {
-      out[c] = levels[Math.min(Math.max(lo, 0), freqs.length - 1)];
+    } else if (lo >= freqs.length) {
+      out[c] = -Infinity;
+    } else if (lo <= 0) {
+      out[c] = levels[0];
     } else {
       const t = (centres[c] - freqs[lo - 1]) / (freqs[lo] - freqs[lo - 1]);
       out[c] = levels[lo - 1] + (levels[lo] - levels[lo - 1]) * t;
@@ -119,11 +122,12 @@ export function reduceRanges(levels, freqs, idx, centres, out = new Float32Array
   return out;
 }
 
-// n log-spaced frequencies from fmin to fmax, with their range edges (n + 1 values).
+// n log-spaced frequencies from fmin to fmax inclusive, and the n + 1 range edges halfway
+// (geometrically) between them, so a resampled spectrum still reaches both ends of the axis.
 export function logGrid(n, fmin, fmax) {
-  const r = Math.log(fmax / fmin);
-  const centres = Float32Array.from({ length: n }, (_, i) => fmin * Math.exp((r * (i + 0.5)) / n));
-  const edges = Float32Array.from({ length: n + 1 }, (_, i) => fmin * Math.exp((r * i) / n));
+  const step = Math.log(fmax / fmin) / (n - 1);
+  const centres = Float32Array.from({ length: n }, (_, i) => fmin * Math.exp(step * i));
+  const edges = Float32Array.from({ length: n + 1 }, (_, i) => fmin * Math.exp(step * (i - 0.5)));
   return { centres, edges };
 }
 

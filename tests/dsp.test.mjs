@@ -138,13 +138,17 @@ test('reduceRanges keeps the loudest point per range and interpolates where a ra
   const centres = Float32Array.from([22, 35.5, 50]);
   const out = reduceRanges(levels, freqs, rangeIndex(freqs, edges), centres);
   [5, 2 + (8 - 2) * 0.55, 8].forEach((v, i) => assert.ok(Math.abs(out[i] - v) < 1e-5, `range ${i}: ${out[i]}`));
+  // past the last point there is no data
+  const beyond = reduceRanges(levels, freqs, rangeIndex(freqs, Float32Array.from([70, 80, 90])), Float32Array.from([75, 85]));
+  assert.deepEqual(Array.from(beyond), [-Infinity, -Infinity]);
 });
 
-test('logGrid spans fmin to fmax with geometric centres', () => {
-  const { centres, edges } = logGrid(10, 20, 20000);
-  assert.equal(edges.length, 11);
-  assert.ok(Math.abs(edges[0] - 20) < 1e-3 && Math.abs(edges[10] - 20000) < 0.1);
-  assert.ok(Math.abs(centres[0] - Math.sqrt(edges[0] * edges[1])) < 1e-3);
+test('logGrid points run exactly from 20 Hz to 20 kHz with edges halfway between', () => {
+  const { centres, edges } = logGrid(241, 20, 20000);
+  assert.equal(centres.length, 241);
+  assert.equal(edges.length, 242);
+  assert.ok(Math.abs(centres[0] - 20) < 1e-3 && Math.abs(centres[240] - 20000) < 0.5);
+  for (const i of [1, 120, 240]) assert.ok(Math.abs(edges[i] - Math.sqrt(centres[i - 1] * centres[i])) / edges[i] < 1e-5);
 });
 
 test('worklet reports Leq and Fast max that match the input tone', () => {

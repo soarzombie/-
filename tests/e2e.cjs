@@ -185,6 +185,14 @@ const running = (page) => page.waitForSelector('.analyzer[data-state="run"]');
   await page.locator('.tabbar a[data-tab=history]').click();
   await page.waitForSelector('.record-row');
   assert.equal(await page.locator('.record-row').count(), 1);
+  const span = await page.evaluate(() => new Promise((resolve) => {
+    const req = indexedDB.open('noise-meter');
+    req.onsuccess = () => {
+      const all = req.result.transaction('records').objectStore('records').getAll();
+      all.onsuccess = () => resolve([all.result[0].spectrum.freqs[0], all.result[0].spectrum.freqs.at(-1)]);
+    };
+  }));
+  assert.deepEqual(span, [20, 20000], 'saved spectrum spans 20 Hz – 20 kHz');
   const [csv] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: /엑셀/ }).click()]);
   const csvText = fs.readFileSync(await csv.path(), 'utf8');
   assert.ok(csvText.startsWith('﻿일시,차량번호'), 'CSV header with BOM');

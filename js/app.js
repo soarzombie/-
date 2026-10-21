@@ -261,8 +261,7 @@ async function renderAnalyzer() {
 
   // Everything needed to look at this moment again later.
   function snapshot() {
-    const fmax = Math.min(20000, meter.freqs[meter.freqs.length - 1]);
-    const grid = logGrid(240, 20, fmax);
+    const grid = logGrid(241, 20, 20000);
     const idx = rangeIndex(meter.freqs, grid.edges);
     const keep = (arr) => Array.from(arr, (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : MISSING));
     const st = getSettings();

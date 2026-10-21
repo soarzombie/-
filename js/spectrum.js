@@ -1,4 +1,4 @@
-// Real-time FFT spectrum: x = frequency (log or linear), y = dB(A) per FFT bin.
+// Real-time FFT spectrum: x = frequency 20 Hz – 20 kHz (log) or 0 – 20 kHz (linear), y = dB(A) per FFT bin.
 // Grey area = maximum held since the last reset, red area = current spectrum,
 // labels mark the strongest tonal peaks. drawSpectrum() is also used for the share image.
 
@@ -43,7 +43,7 @@ export function drawSpectrum(g, w, h, data, opts = {}) {
   const [lo, hi] = opts.range || [-20, 100];
   const scale = opts.scale || 'log';
   const { freqs } = data;
-  const fmax = Math.min(FMAX, freqs[freqs.length - 1]);
+  const fmax = FMAX; // the axis always ends at 20 kHz, whatever the data covers
 
   const L = 30 * k;
   const R = 6 * k;
