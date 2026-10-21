@@ -179,7 +179,7 @@ async function tapFrequency(page, hz) {
   const x0 = 30 * k;
   const x1 = w - 6 * k;
   const x = x0 + (Math.log(hz / 20) / Math.log(1000)) * (x1 - x0);
-  await page.mouse.click(r.x + x, r.y + r.height / 2);
+  await page.mouse.click(r.x + x, r.y + r.height * 0.75); // low enough to miss the floating level panel in landscape
 }
 
 const num = async (page, sel) => parseFloat((await page.locator(sel).textContent()).replace(/[^\d.-]/g, ''));
@@ -254,31 +254,31 @@ async function chartSettings(page, picks, shotName) {
   await page.locator('#a-cursor .cr-close').click();
   await page.waitForSelector('#a-cursor', { state: 'hidden' });
 
-  // the spectrum has the level trace under it
-  assert.ok(await page.locator('#a-trace canvas').isVisible(), 'level trace under the spectrum');
-  const specH = (await page.locator('#a-chart').boundingBox()).height;
+  // the main view is two graphs: frequency dB on top, the smaller time-axis dB below
+  const specBox = await page.locator('#a-chart').boundingBox();
+  const traceBox = await page.locator('#a-trace').boundingBox();
+  assert.ok(await page.locator('#a-trace canvas').isVisible(), 'time-axis graph under the spectrum');
+  assert.ok(traceBox.y > specBox.y + specBox.height - 1, 'below it');
+  assert.ok(traceBox.height < specBox.height * 0.6, 'and smaller');
 
-  // views: time axis, both, 1/3 octave, back to the spectrum; each shows its own drawing
-  assert.equal(await page.locator('.mode').count(), 4, 'no gauge view');
+  // other views: spectrogram and 1/3 octave each on their own, then back
+  assert.equal(await page.locator('.mode').count(), 3, 'three views');
   await setMode(page, 'gram');
-  assert.ok(!(await page.locator('#a-trace canvas').isVisible()), 'trace only with the spectrum');
+  assert.ok(!(await page.locator('#a-trace canvas').isVisible()), 'time-axis graph only in the main view');
   await page.waitForTimeout(1500);
   assert.ok(await page.locator('#a-gram canvas').isVisible() && !(await page.locator('#a-chart canvas').isVisible()));
-  await setMode(page, 'both');
-  assert.ok(await page.locator('#a-gram canvas').isVisible() && (await page.locator('#a-chart canvas').isVisible()));
   await setMode(page, 'octave');
   await page.waitForTimeout(1500);
   assert.ok(await page.locator('#a-octave canvas').isVisible());
   await shot(page, 'tone-octave');
   await setMode(page, 'spectrum');
-  // the trace can be hidden (the spectrum takes the whole chart) and set to 30 s / 1 min / 5 min
-  await chartSettings(page, { trace: '0' });
-  assert.ok(!(await page.locator('#a-trace canvas').isVisible()));
-  assert.ok((await page.locator('#a-chart').boundingBox()).height > specH * 1.4, 'spectrum grows');
+  assert.ok(await page.locator('#a-chart canvas').isVisible() && (await page.locator('#a-trace canvas').isVisible()));
+  // the time-axis graph shows the last 30 s, 1 min or 5 min
+  assert.equal(await page.locator('dialog .seg[data-key=trace] button').count(), 0);
   await chartSettings(page, { trace: '60' });
-  assert.ok(await page.locator('#a-trace canvas').isVisible());
+  assert.equal((await page.evaluate(() => JSON.parse(localStorage.getItem('noise-meter:settings:v1')))).traceSec, 60);
   await chartSettings(page, { trace: '30' });
-  assert.match(await page.locator('#a-mode-name').textContent(), /스펙트럼/);
+  assert.match(await page.locator('#a-mode-name').textContent(), /주파수 \+ 시간축/);
 
   // graph settings: style, max hold, FFT size, axis
   await chartSettings(page, { style: 'line', hold: 'off', fft: '8192', scale: 'linear' });
@@ -490,13 +490,13 @@ async function chartSettings(page, picks, shotName) {
     await setMode(page, 'gram');
     await page.waitForTimeout(3500);
     await shot(page, `main-${name}-gram`);
-    await setMode(page, 'both');
+    await setMode(page, 'spectrum');
     await chartSettings(page, { style: 'line' });
     await page.waitForTimeout(2500);
     await tapFrequency(page, 1250);
     await tapFrequency(page, 125);
     await page.waitForTimeout(300);
-    await shot(page, `main-${name}-both`);
+    await shot(page, `main-${name}-line`);
     await page.locator('#a-cursor .cr-close').click();
     await chartSettings(page, { style: 'fill' });
     await setMode(page, 'octave');

@@ -183,9 +183,8 @@ function saveSheet({ title, rec, timeLabel, extra = '' }, beforeSave) {
 /* ---------- real-time analyzer ---------- */
 
 const MODES = [
-  { id: 'spectrum', name: '스펙트럼', label: '스펙트럼 (아래에 시간별 소음도)', icon: svg('<path d="M2.5 12h3.5l2-5 3.5 11 3-14 2 8h5"/>') },
-  { id: 'gram', name: '시간축', label: '시간축 (스펙트로그램)', icon: svg('<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M7 9h2.5M12 9h5M7 12h6M15.5 12h1.5M7 15h1.5M11 15h6"/>') },
-  { id: 'both', name: '함께 보기', label: '스펙트럼과 시간축 함께', icon: svg('<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M3.5 12h17M6.5 10l2.5-2.5 2 1.5 2.5-3 2 2 2-1M7 15.8h3M12.5 15.8h4.5"/>') },
+  { id: 'spectrum', name: '주파수 + 시간축', label: '주파수 그래프와 시간축 그래프', icon: svg('<path d="M2.5 12h3.5l2-5 3.5 11 3-14 2 8h5"/>') },
+  { id: 'gram', name: '스펙트로그램', label: '스펙트로그램 (주파수별 시간 변화)', icon: svg('<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M7 9h2.5M12 9h5M7 12h6M15.5 12h1.5M7 15h1.5M11 15h6"/>') },
   { id: 'octave', name: '1/3 옥타브', label: '1/3 옥타브 막대', icon: svg('<path stroke-width="2.6" d="M5.5 19v-5M9.5 19v-9M13.5 19v-13M17.5 19v-7"/>') },
 ];
 const OCTAVE_FFT = 16384; // 2.9 Hz bins, so even the 25 Hz band has some
@@ -223,8 +222,8 @@ function helpSheet() {
         <dt>큰 숫자</dt><dd>지금 소음 크기입니다 (0.125초 Fast). 색 막대는 초록 → 노랑 → 빨강, 빨강은 경고 기준 ${s.alertLevel} dB 이상입니다. 밝은 칸 하나는 최대값입니다.</dd>
         <dt>최소·평균·최대</dt><dd>측정을 시작하거나 ↻ 초기화를 누른 뒤의 값입니다. 평균은 에너지 평균(Leq)입니다.</dd>
         <dt>A · C · Z</dt><dd>주파수 가중치. <b>A</b> 보통 소음(사람 귀에 가깝게) · <b>C</b> 엔진·부밍음처럼 저음이 큰 소리 · <b>Z</b> 거르지 않은 소리. 그래프 오른쪽 위 설정 버튼에서 바꿉니다.</dd>
-        <dt>그래프</dt><dd>가로는 주파수(20 Hz – 20 kHz), 세로는 소리 크기입니다. 누르면 십자선 커서가 그 주파수의 값을 보여 주고, 한 번 더 누르면 커서 B로 두 곳을 비교합니다. 끌어서 옮기고 × 로 지웁니다.</dd>
-        <dt>시간별 소음도</dt><dd>스펙트럼 아래 그래프입니다. 가로는 측정 시간, 세로는 소음 크기(큰 숫자와 같은 값), 점선은 평균입니다. 보이는 시간(30초 · 1분 · 5분)이나 숨김은 그래프 설정에서 바꿉니다.</dd>
+        <dt>주파수 그래프</dt><dd>위쪽 큰 그래프. 가로는 주파수(20 Hz – 20 kHz), 세로는 dB입니다. 누르면 십자선 커서가 그 주파수의 값을 보여 주고, 한 번 더 누르면 커서 B로 두 곳을 비교합니다. 끌어서 옮기고 × 로 지웁니다.</dd>
+        <dt>시간축 그래프</dt><dd>아래쪽 작은 그래프. 가로는 측정 시간, 세로는 dB(큰 숫자와 같은 값), 점선은 평균입니다. 보이는 시간(30초 · 1분 · 5분)은 그래프 설정에서 바꿉니다.</dd>
         <dt>보기</dt><dd>${MODES.map((m) => m.label).join(' · ')}. 맨 위 버튼으로 바꿉니다.</dd>
         <dt>● 녹음</dt><dd>측정 버튼과 따로 움직입니다. 누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 그래프 위 빨간 시계가 녹음 길이), 측정을 일시정지해도 녹음은 계속됩니다. 정지해도 측정은 그대로 이어지고, 녹음은 파일 탭에 들어가 "분석 보기"로 바로 열 수 있습니다.</dd>
         <dt>▶ ⏸ 측정</dt><dd>측정 시작과 일시정지(화면과 값 고정). 녹음에는 영향을 주지 않습니다.</dd>
@@ -236,7 +235,7 @@ function helpSheet() {
 }
 
 async function renderAnalyzer() {
-  if (!MODES.some((m) => m.id === getSettings().view)) saveSettings({ view: 'spectrum' }); // e.g. the old gauge view
+  if (!MODES.some((m) => m.id === getSettings().view)) saveSettings({ view: 'spectrum' }); // e.g. the old gauge or "both" view
   const s = getSettings();
   view.innerHTML = `
     <section class="analyzer" data-state="off" data-rec="off">
@@ -255,7 +254,7 @@ async function renderAnalyzer() {
         <button type="button" class="round-btn lv-reset" data-act="reset" aria-label="초기화">${ICON.reset}</button>
         <p class="lv-stats"><span>최소 <b id="a-min">–</b></span><span>평균 <b id="a-leq">–</b></span><span>최대 <b id="a-max">–</b></span></p>
       </div>
-      <div class="an-chart" data-view="${s.view}" data-trace="${s.traceSec ? 'on' : 'off'}">
+      <div class="an-chart" data-view="${s.view}">
         <div class="chart-plot" id="a-chart"></div>
         <div class="gram-plot" id="a-gram"></div>
         <div class="octave-plot" id="a-octave"></div>
@@ -296,10 +295,10 @@ async function renderAnalyzer() {
   chart.onCursor = bindCursorReadout($('a-cursor'));
   $('a-cursor').querySelector('.cr-close').onclick = () => chart.clearCursors();
   const gram = new SpectrogramView($('a-gram'));
-  gram.configure({ scale: s.scale, xLabels: s.view === 'gram' });
+  gram.configure({ scale: s.scale });
   gram.unit = unitOf(s.weighting);
   const octave = new OctaveView($('a-octave'));
-  const trace = new LiveTimelineView($('a-trace'), { windowSec: s.traceSec || 30 });
+  const trace = new LiveTimelineView($('a-trace'), { windowSec: s.traceSec || 30 }); // 0 was "hidden" before
   trace.configure({ unit: unitOf(s.weighting) });
   let traced = 0; // measured samples already in the trace
   const led = new LevelBar($('a-led'), s.alertLevel);
@@ -424,7 +423,7 @@ async function renderAnalyzer() {
       traced = meter.stats.n;
       trace.push(db);
       trace.configure({ leq: meter.leq, unit: unit() });
-      if (mode() === 'spectrum' && getSettings().traceSec) trace.draw();
+      if (mode() === 'spectrum') trace.draw();
     }
   }
 
@@ -571,7 +570,6 @@ async function renderAnalyzer() {
     chartBox.dataset.view = id;
     view.querySelectorAll('.mode').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === id)));
     $('a-mode-name').textContent = MODES.find((m) => m.id === id).name;
-    gram.configure({ xLabels: id === 'gram' });
     applyFft();
     if (meter?.paused && hold) draw(meter.levels);
   }
@@ -583,7 +581,7 @@ async function renderAnalyzer() {
         <h2>그래프 설정</h2>
         ${segRow('weighting', '주파수 가중치', WEIGHTINGS.map((w) => [w, `${w}특성`]), st.weighting, `<span id="f-weight-note">${WEIGHT_NOTE[st.weighting]}</span> 바꾸면 최소·평균·최대가 새로 시작합니다.`)}
         ${segRow('style', '그래프 모양', [['fill', '면'], ['line', '선']], st.style)}
-        ${segRow('trace', '스펙트럼 아래 시간별 소음도', [[0, '숨김'], [30, '30초'], [60, '1분'], [300, '5분']], st.traceSec)}
+        ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
         ${segRow('hold', '최대값', [['on', '표시'], ['off', '숨김']], st.hold ? 'on' : 'off')}
         ${segRow('fft', 'FFT 크기', FFT_SIZES.map((n) => [n, n]), st.fftSize, '클수록 주파수를 잘게 나누지만 반응이 느려집니다. 1/3 옥타브 보기는 늘 16384로 계산합니다.')}
         ${segRow('scale', '주파수 축', [['log', '로그'], ['linear', '선형']], st.scale)}
@@ -600,10 +598,8 @@ async function renderAnalyzer() {
         clearReadings();
       } else if (key === 'style') saveSettings({ style: v });
       else if (key === 'trace') {
-        const sec = Number(v);
-        saveSettings({ traceSec: sec });
-        chartBox.dataset.trace = sec ? 'on' : 'off';
-        if (sec) trace.configure({ windowSec: sec });
+        saveSettings({ traceSec: Number(v) });
+        trace.configure({ windowSec: Number(v) });
         trace.draw();
       }
       else if (key === 'hold') saveSettings({ hold: v === 'on' });
@@ -764,11 +760,11 @@ async function renderFile() {
           <div><span>최소</span><b>${fmtDb(a.lmin)}</b><small>${unit}</small></div>
         </section>
         <section class="card">
-          <h2>시간축 <small>누르면 그 시점부터 재생</small></h2>
+          <h2>스펙트로그램 <small>누르면 그 시점부터 재생</small></h2>
           <div class="gram-box-rec"><div class="gram-plot" id="fa-gram"></div></div>
         </section>
         <section class="card">
-          <h2>시간별 소음도 <small>누르면 그 시점으로 이동</small></h2>
+          <h2>시간축 그래프 <small>누르면 그 시점으로 이동</small></h2>
           <div class="timeline-box"><div class="gram-plot" id="fa-time"></div></div>
         </section>
         <section class="card">
@@ -1001,7 +997,7 @@ async function renderRecord(id) {
               <audio controls preload="metadata" id="rec-audio"></audio>
               <div class="gram-box-rec"><div class="gram-plot" id="rec-gram"></div><p class="gram-wait" id="rec-gram-wait">소리 분석 중…</p></div>
               <div class="timeline-box"><div class="gram-plot" id="rec-time"></div></div>
-              <p class="fine">${fromFile ? '시간축 그래프는 아래가 처음, 위가 끝입니다.' : '시간축 그래프: 맨 위가 저장한 순간, 아래로 갈수록 그 전 소리입니다.'} 그래프를 누르면 그 시점부터 들을 수 있습니다.</p>
+              <p class="fine">${fromFile ? '스펙트로그램은 아래가 처음, 위가 끝입니다.' : '스펙트로그램: 맨 위가 저장한 순간, 아래로 갈수록 그 전 소리입니다.'} 아래 시간축 그래프는 시간별 dB입니다. 그래프를 누르면 그 시점부터 들을 수 있습니다.</p>
               <button type="button" class="btn btn-wide" data-act="share-audio">소리 파일 보내기</button>
             </section>`
           : ''}

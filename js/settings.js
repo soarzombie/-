@@ -1,6 +1,6 @@
 // Per-device settings (kept in localStorage).
 
-export const APP_VERSION = '0.7.0';
+export const APP_VERSION = '0.7.1';
 
 const KEY = 'noise-meter:settings:v1';
 
@@ -9,8 +9,8 @@ const DEFAULTS = {
   vehicle: '',
   recentVehicles: [],
   // analyzer display
-  view: 'spectrum', // 'spectrum' (with the level trace below) | 'gram' (spectrogram) | 'both' | 'octave' (1/3-octave bars)
-  traceSec: 30, // seconds of level history under the spectrum; 0 = hidden
+  view: 'spectrum', // 'spectrum' (frequency graph + time-axis graph below) | 'gram' (spectrogram) | 'octave' (1/3-octave bars)
+  traceSec: 30, // seconds shown in the time-axis graph: 30 | 60 | 300
   weighting: 'A', // frequency weighting 'A' | 'C' | 'Z', for levels and spectrum alike
   style: 'fill', // 'fill' | 'line'
   fftSize: 4096,

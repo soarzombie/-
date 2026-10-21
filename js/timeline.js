@@ -1,6 +1,6 @@
 // Level over time. TimelineView: a whole recording, the Fast level every 0.1 s, its Leq as a dashed
-// line and the playback position; tap or drag to seek. LiveTimelineView: the live Fast level over the
-// last 30 s – 5 min of measuring, newest at the right, under the spectrum.
+// line and the playback position; tap or drag to seek. LiveTimelineView: the analyzer's time-axis graph,
+// the live Fast level over the last 30 s – 5 min of measuring, newest at the right, under the spectrum.
 
 import { SPECTRUM_COLORS } from './spectrum.js';
 import { fmtClock } from './format.js';
@@ -172,7 +172,7 @@ export class LiveTimelineView {
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'spectrum-canvas';
     this.canvas.setAttribute('role', 'img');
-    this.canvas.setAttribute('aria-label', '시간별 소음도 그래프 (가로: 측정 시간, 세로: dB)');
+    this.canvas.setAttribute('aria-label', '시간축 그래프 (가로: 측정 시간, 세로: dB)');
     host.prepend(this.canvas);
     this.g = this.canvas.getContext('2d');
     this.ro = new ResizeObserver(() => this.resize());
@@ -267,7 +267,7 @@ export class LiveTimelineView {
     }
     g.textAlign = 'left';
     g.fillStyle = c.axis;
-    g.fillText(`시간별 소음도 · ${this.windowSec < 60 ? `${this.windowSec}초` : `${this.windowSec / 60}분`}`, box.x0 + 6 * k, box.yTop + 12 * k);
+    g.fillText(`시간축 ${this.stats.unit} · 최근 ${this.windowSec < 60 ? `${this.windowSec}초` : `${this.windowSec / 60}분`}`, box.x0 + 6 * k, box.yTop + 12 * k);
 
     if (to - from >= 2) {
       const t0 = (this.first + from + 1) * step;
