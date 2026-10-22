@@ -30,9 +30,12 @@ import {
   WindowedSpectrum,
   windowPower,
 } from '../js/dsp.js';
-import { analyzeSound, frameAt } from '../js/analysis.js';
+import { analyzeSound, frameAt, bandHistory } from '../js/analysis.js';
+import { crc32 as zlibCrc32 } from 'node:zlib';
+import { xlsxBlob, crc32, colName, excelDate } from '../js/xlsx.js';
+import { rawDataSheets, soundStart } from '../js/export.js';
 import { encodeWav, decodeWav } from '../js/audio.js';
-import { columnRange } from '../js/timeline.js';
+import { columnRange, clockTicks } from '../js/timeline.js';
 import { freqAxis, freqTicks, freqToX, xToFreq, checkFreqRange, checkDbRange, pinchRange } from '../js/spectrum.js';
 import { PRESETS, PRESET_KEYS, choosePreset, customize, presetOf } from '../js/presets.js';
 import { micProfile, saveMicProfile, parseCalFile, calCorrection, calStability } from '../js/mics.js';
@@ -701,9 +704,10 @@ test('pinch zoom on the frequency axis keeps the frequencies under the fingers',
 
 test('backup file: records and their sound go in one file and come back; another phone adds only new ones', async () => {
   const sound = new Blob([new Uint8Array([1, 2, 3, 4, 5, 250])], { type: 'audio/wav' });
+  const film = new Blob([new Uint8Array([7, 7, 7, 1])], { type: 'video/mp4' });
   const sp = { freqs: [20, 20000], cur: [40, 30], max: [50, 40] };
   const records = [
-    { id: 'a', ts: 1, leq: 70.1, vehicle: '12가 3456', memo: '한글 메모 "따옴표"', spectrum: sp, audio: sound, device: '정비팀 1호' },
+    { id: 'a', ts: 1, leq: 70.1, vehicle: '12가 3456', memo: '한글 메모 "따옴표"', spectrum: sp, audio: sound, video: film, device: '정비팀 1호' },
     { id: 'b', ts: 2, leq: 65, spectrum: sp },
     { id: 'c', ts: 3, leq: 60, spectrum: sp, audio: new Blob([new Uint8Array([9, 8, 7])], { type: 'audio/wav' }) },
   ];
@@ -714,7 +718,10 @@ test('backup file: records and their sound go in one file and come back; another
   assert.equal(back.records[0].memo, '한글 메모 "따옴표"');
   assert.deepEqual([...new Uint8Array(await back.records[0].audio.arrayBuffer())], [1, 2, 3, 4, 5, 250]);
   assert.equal(back.records[0].audio.type, 'audio/wav');
+  assert.deepEqual([...new Uint8Array(await back.records[0].video.arrayBuffer())], [7, 7, 7, 1], 'the video of a recording travels too');
+  assert.equal(back.records[0].video.type, 'video/mp4');
   assert.equal(back.records[1].audio, undefined);
+  assert.equal(back.records[1].video, undefined);
   assert.deepEqual([...new Uint8Array(await back.records[2].audio.arrayBuffer())], [9, 8, 7]);
   // the other phone already has 'b'; 'c' has no phone name of its own and takes the backup's
   const plan = importPlan(['b', 'x'], back, 99);
@@ -772,4 +779,155 @@ test('FFT windows: with each window the bins still add up to the true level, and
   // the windows differ: Hamming lets a loud tone leak far away, Blackman least
   const at = (w, hz) => frameSpectrum(sine(1000, 0.5, fs, N), 0, N, undefined, w)[Math.round(hz / (fs / N))];
   assert.ok(at('hamming', 3000) > at('blackman', 3000) + 40, `leakage at 3 kHz: hamming ${at('hamming', 3000).toFixed(1)}, blackman ${at('blackman', 3000).toFixed(1)}`);
+});
+
+// Reads back a stored (not compressed) zip: name -> text, checking each file's CRC.
+async function unzip(blob) {
+  const b = new Uint8Array(await blob.arrayBuffer());
+  const dv = new DataView(b.buffer);
+  const out = {};
+  for (let p = 0; dv.getUint32(p, true) === 0x04034b50; ) {
+    assert.equal(dv.getUint16(p + 8, true), 0, 'stored');
+    const crc = dv.getUint32(p + 14, true);
+    const size = dv.getUint32(p + 18, true);
+    const nameLen = dv.getUint16(p + 26, true);
+    const name = new TextDecoder().decode(b.subarray(p + 30, p + 30 + nameLen));
+    const data = b.subarray(p + 30 + nameLen, p + 30 + nameLen + size);
+    assert.equal(crc, zlibCrc32(data), `CRC of ${name}`);
+    out[name] = new TextDecoder().decode(data);
+    p += 30 + nameLen + size;
+  }
+  return out;
+}
+
+test('xlsx: a zip of the workbook parts; numbers, text (escaped, never a formula), dates and bold headers', async () => {
+  assert.equal(crc32(new TextEncoder().encode('123456789')), 0xcbf43926);
+  assert.deepEqual([0, 25, 26, 27, 701, 702].map(colName), ['A', 'Z', 'AA', 'AB', 'ZZ', 'AAA']);
+  const ms = Date.UTC(2026, 9, 22, 5, 3, 5, 125);
+  assert.ok(Math.abs(excelDate(ms) - (ms - new Date(ms).getTimezoneOffset() * 60000) / 86400000 - 25569) < 1e-9);
+  const blob = xlsxBlob([
+    { name: '요약', rows: [['항목', '값'], ['차량', '12가 <3456> & "x"'], ['수식', '=1+1'], ['일시', { date: ms }], ['빈칸', null], ['NaN', NaN]] },
+    { name: 'a/b:c*d?[e]', rows: [['Hz', 'dB'], [20, 41.5], [25, -3]] },
+    { name: '요약', rows: [['x']] },
+  ]);
+  assert.equal(blob.type, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  const files = await unzip(blob);
+  assert.deepEqual(Object.keys(files).sort(), ['[Content_Types].xml', '_rels/.rels', 'xl/_rels/workbook.xml.rels', 'xl/styles.xml', 'xl/workbook.xml', 'xl/worksheets/sheet1.xml', 'xl/worksheets/sheet2.xml', 'xl/worksheets/sheet3.xml']);
+  const wb = files['xl/workbook.xml'];
+  assert.match(wb, /<sheet name="요약" sheetId="1"/);
+  assert.match(wb, /<sheet name="a b c d  e " sheetId="2"/, 'characters Excel does not allow in sheet names are replaced');
+  assert.match(wb, /<sheet name="요약 2" sheetId="3"/, 'and names stay unique');
+  const s1 = files['xl/worksheets/sheet1.xml'];
+  assert.match(s1, /<c r="A1" t="inlineStr" s="1"><is><t xml:space="preserve">항목<\/t>/, 'bold header');
+  assert.match(s1, /12가 &lt;3456&gt; &amp; &quot;x&quot;/);
+  assert.match(s1, /<c r="B3" t="inlineStr"><is><t xml:space="preserve">=1\+1<\/t>/, 'text, not a formula');
+  assert.doesNotMatch(s1, /<f>/);
+  assert.match(s1, new RegExp(`<c r="B4" s="2"><v>${excelDate(ms)}</v>`), 'a date-time cell');
+  assert.match(s1, /<row r="5"><c r="A5" t="inlineStr"><is><t xml:space="preserve">빈칸<\/t><\/is><\/c><\/row>/, 'empty cells are left out');
+  assert.match(s1, /<pane ySplit="1"/, 'the header row stays in view');
+  assert.match(files['xl/worksheets/sheet2.xml'], /<c r="A2"><v>20<\/v><\/c><c r="B2"><v>41.5<\/v><\/c>/);
+  assert.match(files['xl/styles.xml'], /formatCode="yyyy-mm-dd hh:mm:ss.000"/);
+});
+
+test('levelHistory detail: per-step Leq, max and min of the time-weighted level', () => {
+  const fs = 48000;
+  // 1 s at 0.1, then 1 s at 0.3 amplitude (+9.5 dB)
+  const x = new Float32Array(2 * fs);
+  x.set(sine(1000, 0.1, fs, fs), 0);
+  x.set(sine(1000, 0.3, fs, fs), fs);
+  const r = levelHistory(x, fs, 100, 0.125, 'Z', 0.125, { detail: true });
+  assert.equal(r.stepLeq.length, 16);
+  const lo = toDb(0.005, 100);
+  const hi = toDb(0.045, 100);
+  assert.ok(Math.abs(r.stepLeq[6] - lo) < 0.05 && Math.abs(r.stepLeq[12] - hi) < 0.05, `${r.stepLeq[6]} ${r.stepLeq[12]}`);
+  assert.ok(Number.isNaN(r.stepMax[0]) && Number.isNaN(r.stepMin[2]), 'no max / min while warming up (the first 0.5 s)');
+  assert.ok(Math.abs(r.stepMax[6] - lo) < 0.3 && Math.abs(r.stepMin[6] - lo) < 0.3);
+  // the first step after the jump: its Leq is the new level at once, while the Fast level only rises
+  // through it (min from before the jump, max nearly the new level)
+  assert.ok(Math.abs(r.stepLeq[8] - hi) < 0.1 && r.stepMin[8] < lo + 1 && r.stepMax[8] > hi - 2, `${r.stepLeq[8]} ${r.stepMin[8]} ${r.stepMax[8]}`);
+  // the steps' Leq average back to the whole Leq
+  const mean = 10 * Math.log10(r.stepLeq.reduce((s, v) => s + 10 ** (v / 10), 0) / r.stepLeq.length);
+  assert.ok(Math.abs(mean - r.leq) < 0.01);
+  assert.equal(levelHistory(x, fs, 100, 0.125).stepLeq, undefined, 'only when asked for');
+});
+
+test('bandHistory: a 1 kHz tone sits in the 1 kHz band at its level, a 100 Hz tone that follows in the 100 Hz band', () => {
+  const fs = 48000;
+  const x = new Float32Array(2 * fs);
+  x.set(sine(1000, 0.2, fs, fs), 0);
+  x.set(sine(100, 0.2, fs, fs), fs);
+  const h = bandHistory(x, fs, 100, { step: 0.5, weighting: 'Z' });
+  assert.equal(h.rows.length, 4);
+  const b1k = BANDS.findIndex((b) => b.label === '1k');
+  const b100 = BANDS.findIndex((b) => b.label === '100');
+  const level = toDb(0.02, 100);
+  assert.ok(Math.abs(h.rows[0][b1k] - level) < 0.5, `1 kHz band ${h.rows[0][b1k]}`);
+  assert.ok(h.rows[0][b100] < level - 40);
+  assert.ok(Math.abs(h.rows[3][b100] - level) < 0.5, `100 Hz band ${h.rows[3][b100]}`);
+  assert.ok(Number.isNaN(h.rows[0][0]), 'the 10 Hz band has no FFT bin at 8192 points');
+});
+
+test('raw data sheets: from a recording\'s sound (levels, FFT bins, bands) and from a snapshot\'s own trace and bins', async () => {
+  const fs = 48000;
+  const x = sine(1000, 0.2, fs, 2 * fs);
+  const file = { id: 'f', source: 'file', fileName: '녹음.wav', ts: 1e12, startedAt: 1e12 - 2000, leq: 90, lmax: 90, lmin: 90, unit: 'dB(A)', weighting: 'A', timeWeighting: 'F', fftSize: 8192, window: 'hann', offset: 100, sampleRate: fs, spectrum: { freqs: [20], cur: [1], max: [1] } };
+  const sheets = rawDataSheets(file, { sound: { samples: x, rate: fs }, step: 0.125 });
+  assert.deepEqual(sheets.map((s) => s.name), ['요약', '시간별 레벨', '주파수', '1／3 옥타브 시간별', '1／3 옥타브']);
+  const level = toDb(0.02, 100);
+  const time = sheets[1].rows;
+  assert.deepEqual(time[0], ['시각', '경과(초)', 'LAF dB(A)', 'LAeq,0.125s dB(A)', 'LAFmax dB(A)', 'LAFmin dB(A)']);
+  assert.equal(time.length, 1 + 16);
+  assert.equal(time[8][1], 1);
+  assert.equal(time[8][0].date, 1e12 - 2000 + 1000, 'clock time from the recording\'s start');
+  assert.ok(Math.abs(time[10][3] - level) < 0.1 && Math.abs(time[10][2] - level) < 0.2);
+  const fft = sheets[2].rows;
+  assert.equal(fft.length, 1 + 4095, 'one row per FFT bin at the record\'s FFT size, DC left out');
+  assert.equal(fft[1][0], 5.859);
+  const k1k = Math.round(1000 / (fs / 8192));
+  assert.ok(fft[k1k][1] > level - 3, `the 1 kHz bin ${fft[k1k][1]}`);
+  const bands = sheets[3].rows;
+  assert.ok(!bands[0].includes('10 Hz') && bands[0].includes('1k Hz'), 'band columns without data are left out');
+  const col = bands[0].indexOf('1k Hz');
+  assert.ok(Math.abs(bands[8][col] - level) < 0.5);
+  const oct = sheets[4].rows.find((r) => r[0] === '1k');
+  assert.ok(Math.abs(oct[1] - level) < 0.5 && Math.abs(oct[2] - level) < 0.5);
+  const sum = new Map(sheets[0].rows);
+  assert.equal(sum.get('창 함수'), 'Hanning');
+  assert.equal(sum.get('주의'), '스마트폰 측정 참고값 (정밀 소음계를 대신하지 않음)');
+  // the workbook opens: every sheet is there
+  const files = await unzip(xlsxBlob(sheets));
+  assert.equal(Object.keys(files).filter((n) => n.startsWith('xl/worksheets/')).length, 5);
+
+  // a snapshot without sound: its trace (50 ms values with times, a pause in between) and its own bins
+  const snap = {
+    id: 's', ts: 2e12, leq: 70, unit: 'dB(C)', weighting: 'C', timeWeighting: 'S', fftSize: 8, offset: 100,
+    trace: { at: 2e12 - 10000, step: 0.05, t: [0, 50, 100, 150, 5200, 5250, 5300, 5350], v: [60, 60, 70, 70, 80, 80, null, 80] },
+    spectrum: { freqs: [20], cur: [1], max: [1], bins: { hz: 6000, cur: [-999, 50, 60, 40], avg: [-999, 50, 60, 40], max: [-999, 55, 65, 45] } },
+  };
+  const ss = rawDataSheets(snap, { step: 0.1 });
+  assert.deepEqual(ss.map((s) => s.name), ['요약', '시간별 레벨', '주파수', '1／3 옥타브']);
+  const rows = ss[1].rows;
+  assert.deepEqual(rows[0], ['시각', '경과(초)', 'LCS dB(C)', 'LCeq,0.1s dB(C)', 'LCSmax dB(C)', 'LCSmin dB(C)']);
+  assert.deepEqual(rows.slice(1).map((r) => [r[0].date - snap.trace.at, r[1], r[2], r[4], r[5]]), [
+    [50, 0.1, 60, 60, 60],
+    [150, 0.2, 70, 70, 70],
+    [5250, 0.3, 80, 80, 80],
+    [5350, 0.4, 80, 80, 80],
+  ], 'grouped per 0.1 s of measuring, the time of each group\'s last value (the pause shows in the clock)');
+  assert.ok(Math.abs(ss[1].rows[1][3] - 60) < 1e-9);
+  assert.deepEqual(ss[2].rows, [['주파수(Hz)', '저장 순간 dB(C)', '측정 평균 dB(C)', '측정 중 최대 dB(C)'], [6000, 50, 50, 55], [12000, 60, 60, 65], [18000, 40, 40, 45]]);
+  assert.equal(soundStart({ ts: 5000 }, 2), 3000, 'a snapshot\'s sound ends when it was saved');
+  assert.equal(soundStart({ source: 'file', ts: 5000 }, 2), null, 'an attached file\'s start is not known');
+});
+
+test('clock ticks: where the measurement passes a round clock time; a pause shows once', () => {
+  const t0 = Date.UTC(2026, 9, 22, 5, 3, 3, 0);
+  // 50 ms values from 05:03:03 to 05:03:12, then a pause to 05:03:31.5 and two more seconds
+  const times = [];
+  for (let ms = 0; ms <= 9000; ms += 50) times.push(t0 + ms);
+  for (let ms = 28500; ms <= 30500; ms += 50) times.push(t0 + ms);
+  const ticks = clockTicks(times, 0, times.length, 5000);
+  assert.deepEqual(ticks.map(([, ms]) => new Date(ms).toISOString().slice(11, 19)), ['05:03:05', '05:03:10', '05:03:30']);
+  assert.equal(times[ticks[0][0]], t0 + 2000, 'at the first value on or past the round time');
+  assert.deepEqual(clockTicks(times, 0, 1, 5000), [], 'one value: no tick');
 });

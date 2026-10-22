@@ -1,4 +1,5 @@
-// Getting saved analyses off the phone: text for messengers, a PNG card, CSV for Excel.
+// Getting saved analyses off the phone: text for messengers, a PNG card, CSV for Excel (the raw data
+// workbook is export.js + xlsx.js).
 
 import { fmtDb, fmtHz, fmtDate, fmtClock, speedText } from './format.js';
 import { drawSpectrum, DARK_COLORS } from './spectrum.js';
@@ -98,11 +99,15 @@ function csvCell(v) {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-// Opens the phone's share sheet (KakaoTalk, mail, ...) with the file, or downloads it.
-// Resolves 'shared' | 'downloaded' | 'cancelled'.
+// Phones and tablets send files through their share sheet (KakaoTalk, mail, ...); a PC saves them.
+const PHONE = typeof navigator !== 'undefined' && (/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent)));
+export const canShareFiles = () => PHONE && !!navigator.canShare;
+
+// Opens the phone's share sheet with the file, or downloads it (a PC, or a file type the phone's
+// browser will not share). Resolves 'shared' | 'downloaded' | 'cancelled'.
 export async function deliverFile(blob, filename, { title, text } = {}) {
   const file = new File([blob], filename, { type: blob.type });
-  if (navigator.canShare?.({ files: [file] })) {
+  if (PHONE && navigator.canShare?.({ files: [file] })) {
     try {
       await navigator.share({ files: [file], title, text });
       return 'shared';

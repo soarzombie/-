@@ -45,6 +45,12 @@ export function fmtTime(ts) {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// "14:03:05" (or "14:03" without seconds): the clock time on time-axis graphs
+export function fmtTimeOfDay(ts, seconds = true) {
+  const d = new Date(ts);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}${seconds ? `:${pad(d.getSeconds())}` : ''}`;
+}
+
 export function fileStamp(ts) {
   const d = new Date(ts);
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;

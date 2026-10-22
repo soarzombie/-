@@ -2,7 +2,7 @@
 // time, average and maximum spectrum, peaks, and a compact spectrum per frame (for the
 // spectrogram and for "the spectrum at the playback position"). Pure functions, runs under Node.
 
-import { tauOf, binLevelTable, binLevels, frameSpectrum, levelHistory, findPeaks, logGrid, rangeIndex, reduceRanges } from './dsp.js';
+import { tauOf, binLevelTable, binLevels, frameSpectrum, levelHistory, findPeaks, logGrid, rangeIndex, reduceRanges, bandIndex, bandLevels, BANDS } from './dsp.js';
 
 // Frequency points the per-frame spectra are kept at: 400 log-spaced, 20 Hz – 20 kHz.
 export const FRAME_GRID = logGrid(400, 20, 20000);
@@ -10,8 +10,9 @@ export const FRAME_GRID = logGrid(400, 20, 20000);
 // offset: dB added to dBFS (the phone's calibration, or 0 for plain digital level).
 // weighting: 'A' | 'C' | 'Z', for the levels and the spectra alike; timeWeighting: 'F' | 'S';
 // correction: the microphone's frequency-response correction for the spectra (mics.js calCorrection).
-// window: the FFT window (dsp.js FFT_WINDOWS), as chosen for the live view.
-export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFrames = 1500, weighting = 'A', timeWeighting = 'F', correction = null, window = 'blackman' } = {}) {
+// window: the FFT window (dsp.js FFT_WINDOWS), as chosen for the live view. bins: also return the
+// average / max / min per FFT bin (binAvg, binMax, binMin every binHz), for the raw data export.
+export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFrames = 1500, weighting = 'A', timeWeighting = 'F', correction = null, window = 'blackman', bins: keepBins = false } = {}) {
   const levels = levelHistory(samples, rate, offset, 0.1, weighting, tauOf(timeWeighting));
   const bins = fftSize / 2;
   const binHz = rate / fftSize;
@@ -60,10 +61,42 @@ export function analyzeSound(samples, rate, offset = 0, { fftSize = 4096, maxFra
     avg: reduceRanges(avg, freqs, idx, FRAME_GRID.centres),
     max: reduceRanges(max, freqs, idx, FRAME_GRID.centres),
     min: reduceRanges(min, freqs, idx, FRAME_GRID.centres), // quietest frame per point (minimum hold)
+    ...(keepBins ? { fftSize, binHz, binAvg: avg, binMax: max, binMin: min } : {}),
   };
 }
 
 export function frameAt(analysis, t) {
   const i = Math.round((t - analysis.frameStart) / analysis.frameStep);
   return analysis.frames[Math.max(0, Math.min(analysis.frames.length - 1, i))];
+}
+
+// 1/3-octave band levels over time: the Leq of each band in every `step` seconds (the frames whose
+// centre falls in it, energy-averaged; NaN where none does or the band has no FFT bin).
+export function bandHistory(samples, rate, offset = 0, { step = 1, fftSize = 8192, weighting = 'A', window = 'blackman', correction = null } = {}) {
+  const bins = fftSize / 2;
+  const binHz = rate / fftSize;
+  const table = binLevelTable(bins, binHz, weighting, correction, window);
+  const idx = bandIndex(Float32Array.from({ length: bins }, (_, k) => k * binHz));
+  const every = Math.max(1, Math.round(step * rate));
+  const steps = Math.floor(samples.length / every);
+  const hop = Math.min(fftSize / 2, every); // at least one frame in every step
+  const pow = Array.from({ length: steps }, () => new Float64Array(BANDS.length));
+  const count = new Uint16Array(steps);
+  const raw = new Float32Array(bins);
+  const lv = new Float32Array(bins);
+  const band = new Float32Array(BANDS.length);
+  for (let start = 0; start + fftSize <= samples.length; start += hop) {
+    const n = Math.floor((start + fftSize / 2) / every);
+    if (n >= steps) break;
+    frameSpectrum(samples, start, fftSize, raw, window);
+    binLevels(raw, table, offset, lv);
+    bandLevels(lv, idx, BANDS.length, band);
+    for (let b = 0; b < BANDS.length; b++) pow[n][b] += Number.isFinite(band[b]) ? 10 ** (band[b] / 10) : 0;
+    count[n]++;
+  }
+  return {
+    step: every / rate,
+    bands: BANDS,
+    rows: pow.map((p, n) => Float32Array.from(p, (v) => (count[n] && v > 0 ? 10 * Math.log10(v / count[n]) : NaN))),
+  };
 }

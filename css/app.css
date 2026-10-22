@@ -675,6 +675,16 @@ body[data-view="home"] .toast { bottom: calc(var(--tabbar-h) + 112px + env(safe-
 .legend .fine { font-size: 12px; }
 
 .audio-card audio { width: 100%; height: 44px; }
+/* a recording's video, moving with its sound (tap to play or pause) */
+.rec-video { display: block; width: 100%; max-height: 46vh; border-radius: 12px; background: #000; object-fit: contain; cursor: pointer; }
+/* 결과 보내기: one row per kind of file */
+.export-list { display: grid; gap: 10px; }
+.export-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 12px; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); }
+.export-text { display: grid; gap: 2px; min-width: 0; }
+.export-text small { color: var(--ink-2); font-size: 13px; line-height: 1.4; }
+.export-item .seg-field { grid-column: 1 / -1; grid-row: 2; }
+.export-item .seg-field + .btn { grid-column: 2; grid-row: 1; }
+.export-item .btn { min-width: 88px; }
 .gram-box-rec { position: relative; height: clamp(180px, 48vw, 260px); background: var(--bg); border-radius: 10px; }
 .gram-box-rec .gram-plot { inset: 4px; }
 .gram-wait { position: absolute; inset: 0; display: grid; place-items: center; color: var(--ink-3); font-size: 14px; }

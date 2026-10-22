@@ -6,8 +6,10 @@ import { PRESETS, CUSTOM, presetOf, choosePreset, customize } from './presets.js
 import { micProfile, saveMicProfile, parseCalFile, calCorrection, calStability } from './mics.js';
 import { trackSpeed, STALE_SEC } from './gps.js';
 import { backupBlob, readBackup, importPlan } from './backup.js';
-import { ScreenVideo, videoType, videoExt, MAX_VIDEO_SEC } from './video.js';
+import { ScreenVideo, videoType, videoExt } from './video.js';
 import { CameraWindow, cameraSupported } from './camera.js';
+import { xlsxBlob } from './xlsx.js';
+import { rawDataSheets, EXPORT_STEPS, defaultStep, soundStart } from './export.js';
 import { Meter, FFT_SIZES, MAX_RECORD_SEC } from './meter.js';
 import { findPeaks, logGrid, rangeIndex, reduceRanges, unitOf, WEIGHTINGS, BANDS, bandIndex, bandLevels, newHolds, updateHolds, FFT_WINDOWS } from './dsp.js';
 import * as store from './store.js';
@@ -19,7 +21,7 @@ import { analyzeSound, frameAt } from './analysis.js';
 import { TimelineView, LiveTimelineView } from './timeline.js';
 import { LevelBar } from './levelbar.js';
 import { OctaveView } from './octave.js';
-import { summaryText, renderCard, recordsCsv, deliverFile } from './share.js';
+import { summaryText, renderCard, recordsCsv, deliverFile, canShareFiles } from './share.js';
 
 const view = document.getElementById('view');
 let cleanup = null; // runs before the next screen renders
@@ -309,6 +311,8 @@ const cursorBox = (id) =>
   `<div class="cursor-readout" id="${id}" hidden><div class="cr-lines"></div><button type="button" class="cr-close" aria-label="커서 지우기">×</button></div>`;
 
 const round1 = (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : null);
+// per-bin levels kept with a record: 0.1 dB steps, null where there is no value
+const binArray = (arr) => Array.from(arr, round1);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const MISSING = -999; // stored for empty spectrum points (JSON has no -Infinity)
 
@@ -412,18 +416,19 @@ function helpSheet() {
         <dt>주파수 그래프</dt><dd>위쪽 큰 그래프. 가로는 주파수(20 Hz – 20 kHz), 세로는 dB입니다. 누르면 커서가 그 주파수의 <b>지금 값</b>(파란 선)과 <b>최대값</b>(빨간 선)을 함께 보여 줍니다. 다른 곳을 누르거나 끌어서 옮기고 × 로 지웁니다. 두 손가락으로 벌리거나 좁히면 주파수 범위가 바뀌고, "전체 보기"로 돌아갑니다.</dd>
         <dt>⚙ 차트 메뉴</dt><dd>그래프 오른쪽 위 버튼. 차트 스타일(면 · 선 · 막대), <b>최대값 추적</b>·<b>최소값 추적</b>(최근 큰·작은 값을 따라가다 초당 12 dB씩 돌아오는 점선), <b>피크 홀드</b>(초기화 뒤 가장 큰 값), <b>미니멈 홀드</b>(초기화 뒤 가장 작은 값, 주황), 홀드 재설정(이 선들만 새로 시작), 축 범위, <b>측정 · 그래프 설정</b>(마이크, 가중치, Fast/Slow, 정해진 시간, 속도, 시간축 길이, FFT, 화면 밝기 — 햇빛 아래에서는 "밝게").</dd>
         <dt>축 범위</dt><dd>차트 메뉴의 "축 범위"에서 주파수 범위(전체 · 저음 · 중음 · 고음 또는 직접 입력)와 각 그래프의 dB 범위(자동 / 직접)를 정합니다. "처음대로"로 되돌립니다.</dd>
-        <dt>시간축 그래프</dt><dd>아래쪽 작은 그래프. 가로는 측정 시간, 세로는 dB(큰 숫자와 같은 값), 점선은 평균입니다. 보이는 시간(30초 · 1분 · 5분)은 그래프 설정에서 바꿉니다.</dd>
+        <dt>시간축 그래프</dt><dd>아래쪽 작은 그래프. 가로는 측정 시간, 세로는 dB(큰 숫자와 같은 값), 점선은 평균입니다. 보이는 시간(30초 · 1분 · 5분)과 <b>시간축 표시</b>(측정 시간 / 현재 시각 14:03:05)는 그래프 설정에서 바꿉니다.</dd>
         <dt>가로 · 세로</dt><dd>보기 버튼 오른쪽 <b>가로</b>를 누르면 가로 화면이 됩니다(휴대폰 위쪽이 왼쪽으로 가게 돌려 잡으세요). 아이폰처럼 화면 방향을 고정할 수 없는 휴대폰에서는 화면을 돌려서 보여 줍니다. <b>세로</b>를 누르면 돌아옵니다. 휴대폰 자동 회전이 켜져 있으면 그냥 돌려도 됩니다.</dd>
         <dt>보기</dt><dd>${MODES.map((m) => m.label).join(' · ')}. 맨 위 버튼으로 바꿉니다.</dd>
-        <dt>● 녹음</dt><dd>측정 버튼과 따로 움직입니다. 누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 그래프 위 빨간 시계가 녹음 길이), 측정을 일시정지해도 녹음은 계속됩니다. 정지해도 측정은 그대로 이어지고, 녹음은 파일 탭에 들어가 "분석 보기"로 바로 열 수 있습니다. 카메라 창(🎥 영상)이 떠 있는 동안에는 영상 녹화 버튼이 됩니다.</dd>
+        <dt>● 녹음</dt><dd>측정 버튼과 따로 움직입니다. 누른 때부터 정지할 때까지 녹음하고(최대 ${MAX_RECORD_SEC / 60}분, 그래프 위 빨간 시계가 녹음 길이), 측정을 일시정지해도 녹음은 계속됩니다. 정지해도 측정은 그대로 이어지고, 녹음은 파일 탭에 들어가 "분석 보기"로 바로 열 수 있습니다. 카메라 창(🎥 영상)이 떠 있으면 영상도 함께 녹화되어(버튼 글자 "녹화") 분석 화면에서 소리와 맞춰 볼 수 있습니다.</dd>
         <dt>▶ ⏸ 측정</dt><dd>측정 시작과 일시정지(화면과 값 고정). 녹음에는 영향을 주지 않습니다.</dd>
         <dt>마이크</dt><dd>평소에는 휴대폰 마이크로 잽니다. 외부 측정 마이크(iMM-6C 등)는 꽂은 뒤 그래프 설정의 "마이크"에서 고르면 되고, 쓰는 동안 이름이 화면 위에 보입니다. 외부 마이크는 설정 → 마이크 보정에서 따로 보정하고, 함께 받은 보정 파일을 넣으면 저음·고음 오차도 바로잡습니다.</dd>
-        <dt>🎥 영상</dt><dd>녹음 버튼 옆 <b>영상</b>을 누르면 그래프 위에 카메라 창이 뜹니다. 창은 손가락으로 끌어서 원하는 곳에 두고(다음에도 그 자리), ↻로 앞뒤 카메라를 바꿉니다. 창이 떠 있는 동안 빨간 버튼은 <b>녹화</b>가 되어, 누르면 화면의 값·그래프·카메라 화면을 소리와 함께 영상 파일로 녹화하고(최대 ${MAX_VIDEO_SEC / 60}분) 한 번 더 누르면 멈춘 뒤 "보내기"로 카톡·메일에 보냅니다. <b>영상 끄기</b>를 누르면 카메라 창이 닫히고 빨간 버튼은 다시 녹음이 됩니다. 카메라를 허용하지 않으면 그래프만 녹화합니다.</dd>
+        <dt>🎥 영상</dt><dd>녹음 버튼 옆 <b>영상</b>을 누르면 그래프 위에 카메라 창이 뜹니다. 창은 손가락으로 끌어서 원하는 곳에 두고(다음에도 그 자리), ↻로 앞뒤 카메라를 바꿉니다. 창이 떠 있는 동안 빨간 버튼(<b>녹화</b>)을 누르면 소리와 함께 화면의 값·그래프·카메라 화면이 영상으로 녹화되고, 멈추면 둘 다 파일 분석으로 갑니다(분석 화면에서 영상이 소리에 맞춰 움직이고, "영상 보내기"로 카톡·메일에 보냄). <b>영상 끄기</b>를 누르면 카메라 창이 닫힙니다. 카메라를 허용하지 않으면 그래프만 영상에 담깁니다.</dd>
         <dt>오디오 세부정보</dt><dd>차트 메뉴 맨 아래. 쓰는 마이크, 보정값, 샘플링 레이트, 지연, 브라우저가 소리 처리(에코·잡음 제거, 자동 음량)를 껐는지 보여 줍니다. 값이 이상할 때 먼저 보세요.</dd>
         <dt>⏱ 정해진 시간 측정</dt><dd>누르면 처음부터 ${s.timedSec}초(그래프 설정에서 5초 · 10초 · 30초 · 1분)만큼 재고 저절로 멈춘 뒤 저장 창을 엽니다. 버튼 둘레가 차오르고, 다시 누르거나 일시정지하면 취소됩니다.</dd>
         <dt>속도 (GPS)</dt><dd>그래프 설정에서 켜면 차 속도가 시간축 그래프에 노란 선으로 나오고, 저장 기록에 평균·최고 속도가 남습니다. 위치 자체는 저장하지 않습니다.</dd>
         <dt>전후 비교</dt><dd>기록 화면의 "실시간과 비교"를 누르면 그 기록의 평균 스펙트럼이 보라 점선(기준)으로 실시간 그래프에 겹쳐지고, 평균 차이가 함께 나옵니다. "다른 기록과 비교"는 기록끼리 겹쳐 봅니다.</dd>
         <dt>⬇ 저장</dt><dd>지금 그래프와 값, 방금 들린 소리를 차량번호·메모와 함께 기록에 남깁니다.</dd>
+        <dt>결과 보내기 · PC</dt><dd>기록 화면의 <b>결과 보내기</b>: 결과 이미지, <b>엑셀 데이터</b>(시간별 레벨 · 주파수 FFT 칸마다 · 1/3 옥타브, 시간 간격 0.1 / 0.125 / 1초), <b>기록 파일</b>(소리·영상 포함), 소리, 영상. 기록 파일을 받은 사람은 PC의 크롬·엣지에서 이 앱 주소를 열고 기록 → "기록·백업 파일 넣기"로 넣으면, PC에서 그래프를 보고 소리·영상을 재생하고 엑셀 데이터를 뽑을 수 있습니다.</dd>
       </dl>
       <p class="fine">스마트폰 측정값은 참고값이며 정밀 소음계를 대신하지 않습니다.</p>
       <button type="button" class="btn btn-wide" data-close>닫기</button>
@@ -461,8 +466,7 @@ async function renderAnalyzer() {
         <div class="trace-plot" id="a-trace"></div>
         <div class="cam-win" id="a-cam" hidden><video muted playsinline autoplay></video><button type="button" class="cam-flip" aria-label="앞뒤 카메라 바꾸기" hidden>${ICON.flip}</button></div>
         <div class="chart-tools">
-          <p class="rec-badge" id="a-rec-badge" hidden><i></i>녹음 <b id="a-rec-time">00:00</b></p>
-          <p class="rec-badge video-badge" id="a-video-badge" hidden><i></i>영상 <b id="a-video-time">00:00</b></p>
+          <p class="rec-badge" id="a-rec-badge" hidden><i></i><span id="a-rec-kind">녹음</span> <b id="a-rec-time">00:00</b></p>
           <button type="button" class="zoom-chip" data-act="zoom-reset" id="a-zoom" hidden>전체 보기</button>
           <p class="speed-badge" id="a-speed" hidden>– km/h</p>
           <p class="ref-chip" id="a-ref" hidden><i aria-hidden="true"></i><span id="a-ref-name"></span><b id="a-ref-diff"></b><button type="button" class="ref-close" data-act="ref-off" aria-label="기준 비교 끄기">×</button></p>
@@ -505,8 +509,8 @@ async function renderAnalyzer() {
   const cam = new CameraWindow($('a-cam'), { pos: s.camPos, onMove: (pos) => saveSettings({ camPos: pos }) });
   let camMode = false; // the camera window is open: the red button records a video (see toggleCamera)
   let camOpening = false;
-  let video = null;
-  let videoTimer = 0;
+  let video = null; // ScreenVideo recording with the sound
+  let recStartedAt = 0; // clock time the recording started
   $('a-cursor').querySelector('.cr-close').onclick = () => chart.clearCursors();
   // two fingers pinch the frequency axis; "전체 보기" goes back to 20 Hz – 20 kHz
   let pinchAxis = null;
@@ -519,7 +523,7 @@ async function renderAnalyzer() {
   gram.unit = unitOf(s.weighting);
   const octave = new OctaveView($('a-octave'));
   const trace = new LiveTimelineView($('a-trace'), { windowSec: s.traceSec || 30 }); // 0 was "hidden" before
-  trace.configure({ unit: unitOf(s.weighting), yRange: s.traceDb, speed: s.gps });
+  trace.configure({ unit: unitOf(s.weighting), yRange: s.traceDb, speed: s.gps, clock: s.timeAxis === 'clock' });
   let traced = 0; // measured samples already in the trace
   const led = new LevelBar($('a-led'), s.alertLevel);
   let meter = null;
@@ -746,7 +750,7 @@ async function renderAnalyzer() {
         spd.n++;
         spd.max = Math.max(spd.max, v);
       }
-      trace.push(db, v ?? NaN);
+      trace.push(db, v ?? NaN, Date.now());
       trace.configure({ leq: meter.leq, unit: unit() });
       if (mode() === 'spectrum') trace.draw();
     }
@@ -831,12 +835,17 @@ async function renderAnalyzer() {
   navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
 
   // Recorded sound -> a WAV file in the file tab. Measuring goes on; the message offers to open it.
-  function keepRecording(samples, rate, leaving = false) {
+  // The recording goes to the file analysis, with its start time (for clock-time graphs and the raw
+  // data) and, when the camera window was open, the video recorded with it (film: Promise<Blob|null>).
+  function keepRecording(samples, rate, leaving = false, film = null) {
     showRecording(false);
     if (samples.length < rate * 0.5) return toast('녹음이 너무 짧습니다');
     const ts = Date.now();
-    openedFile = new File([encodeWav(samples, rate)], `녹음_${fileStamp(ts)}.wav`, { type: 'audio/wav', lastModified: ts });
-    const len = fmtClock(samples.length / rate);
+    const file = new File([encodeWav(samples, rate)], `녹음_${fileStamp(ts)}.wav`, { type: 'audio/wav', lastModified: ts });
+    file.startedAt = recStartedAt || ts - (samples.length / rate) * 1000;
+    file.video = film;
+    openedFile = file;
+    const len = `${fmtClock(samples.length / rate)}${film ? ' · 영상 포함' : ''}`;
     if (leaving) toast(`녹음을 멈췄습니다 (${len}). 녹음한 소리는 파일 탭에 있습니다.`);
     else toast(`녹음 완료 ${len}`, { label: '분석 보기', run: () => (location.hash = '#/file') });
   }
@@ -847,17 +856,18 @@ async function renderAnalyzer() {
     root.dataset.rec = on ? 'on' : 'off';
     showRecButton();
     $('a-rec-badge').hidden = !on;
+    $('a-rec-kind').textContent = video ? '녹화' : '녹음';
     clearInterval(recTimer);
     if (!on) return;
     $('a-rec-time').textContent = '00:00';
     recTimer = setInterval(() => meter?.recording && ($('a-rec-time').textContent = fmtClock(meter.recordedSec)), 250);
   }
 
-  // The red button: 녹음 (sound alone), or 녹화 (a video) while the camera window is open; a sound
-  // recording already going on is stopped first.
+  // The red button always records the sound for the file analysis; while the camera window is open it
+  // records the video with it (녹화).
   function showRecButton() {
-    const [label, cap] =
-      root.dataset.rec === 'on' ? ['녹음 정지', '녹음 정지'] : video ? ['영상 녹화 정지', '녹화 정지'] : camMode ? ['영상 녹화 시작', '녹화'] : ['녹음 시작', '녹음'];
+    const rec = root.dataset.rec === 'on';
+    const [label, cap] = rec ? (video ? ['영상 녹화 정지', '녹화 정지'] : ['녹음 정지', '녹음 정지']) : camMode ? ['영상 녹화 시작', '녹화'] : ['녹음 시작', '녹음'];
     recBtn.setAttribute('aria-label', label);
     $('a-rec-cap').textContent = cap;
   }
@@ -868,22 +878,24 @@ async function renderAnalyzer() {
     stopping = true;
     const rate = meter.sampleRate;
     recBtn.disabled = true;
+    const film = takeVideo();
     const samples = await meter.stopRecording();
     recBtn.disabled = false;
     stopping = false;
-    keepRecording(samples, rate);
+    keepRecording(samples, rate, false, film);
   }
 
   function stopMic() {
     cancelAnimationFrame(raf);
     showTimed(0);
     stopGps();
-    closeCamera();
     if (meter?.recording) {
       // leaving mid-recording keeps what was recorded, ready in the file tab
       const rate = meter.sampleRate;
-      keepRecording(meter.takeRecording(), rate, true);
+      keepRecording(meter.takeRecording(), rate, true, takeVideo());
     }
+    takeVideo();
+    closeCamera();
     meter?.stop();
     meter = null;
     wake?.release?.().catch(() => {});
@@ -963,9 +975,9 @@ async function renderAnalyzer() {
   }
 
   // 영상, as in the reference app: the 영상 button opens the camera window over the graph (dragged where
-  // it should sit) and closes it again; while it is open the red button records a video of the readings,
-  // the graphs and the camera window with the sound, instead of the sound alone. Without a camera (or
-  // not allowed) the video has the graphs only.
+  // it should sit) and closes it again. While it is open, a recording (red button) also records a video
+  // of the readings, the graphs and the camera window; both go to the file analysis together. Without a
+  // camera (or not allowed) the video has the graphs only.
   async function toggleCamera() {
     if (camMode) return closeCamera();
     if (camOpening) return;
@@ -976,15 +988,16 @@ async function renderAnalyzer() {
       if (!meter?.running) return cam.close(); // stopped while the camera was asked for
       camMode = true;
       showVideo();
-      if (!camera) toast('카메라를 쓸 수 없습니다. 녹화 버튼을 누르면 그래프만 영상으로 녹화합니다');
-      else if (!getSettings().camPos) toast('카메라 창은 끌어서 옮기고, 빨간 녹화 버튼으로 영상 녹화를 시작합니다');
+      if (meter.recording && !video) toast('영상은 다음 녹음부터 소리와 함께 녹화됩니다');
+      else if (!camera) toast('카메라를 쓸 수 없습니다. 녹화하면 그래프만 영상에 담깁니다');
+      else if (!getSettings().camPos) toast('카메라 창은 끌어서 옮기고, 빨간 녹화 버튼으로 소리와 영상을 함께 녹화합니다');
     } finally {
       camOpening = false;
     }
   }
 
+  // The camera window closes; a video being recorded goes on with the graphs only.
   function closeCamera() {
-    if (video) stopVideo();
     camMode = false;
     cam.close();
     showVideo();
@@ -1018,60 +1031,27 @@ async function renderAnalyzer() {
       video.start();
     } catch {
       video = null;
-      return toast('이 브라우저에서는 영상을 녹화할 수 없습니다');
+      toast('이 브라우저에서는 영상을 녹화할 수 없어 소리만 녹음합니다');
     }
-    video.withCamera = cam.on;
     showVideo();
   }
 
-  // the 영상 button (camera window open or not), the red button (녹음 or 녹화) and the video's clock
+  // Stops the video recorded with the sound, if any: Promise<Blob | null>.
+  function takeVideo() {
+    const v = video;
+    video = null;
+    showVideo();
+    if (!v) return null;
+    return v.stop().then((b) => (b.size ? b : null), () => null);
+  }
+
+  // the 영상 button (camera window open or not) and the red button
   function showVideo() {
     root.dataset.video = video ? 'rec' : camMode ? 'on' : 'off';
     const btn = view.querySelector('[data-act=video]');
     btn?.setAttribute('aria-label', camMode ? '카메라 창 닫기' : '카메라 창 열기');
     if ($('a-video-cap')) $('a-video-cap').textContent = camMode ? '영상 끄기' : '영상';
     showRecButton();
-    const wasOn = !$('a-video-badge').hidden;
-    $('a-video-badge').hidden = !video;
-    if (!video) return clearInterval(videoTimer);
-    if (wasOn) return;
-    $('a-video-time').textContent = '00:00';
-    clearInterval(videoTimer);
-    videoTimer = setInterval(() => {
-      if (!video) return;
-      $('a-video-time').textContent = fmtClock(video.seconds);
-      if (video.seconds >= MAX_VIDEO_SEC) {
-        toast(`영상은 최대 ${MAX_VIDEO_SEC / 60}분입니다`);
-        stopVideo();
-      }
-    }, 250);
-  }
-
-  async function stopVideo() {
-    const v = video;
-    video = null;
-    showVideo();
-    if (!v) return;
-    const sec = v.seconds;
-    const blob = await v.stop();
-    if (!blob.size) return toast('영상이 녹화되지 않았습니다');
-    const st = getSettings();
-    const name = `소음영상_${fileStamp(Date.now())}.${videoExt(blob.type)}`;
-    const { dlg, close } = openSheet(`
-      <div class="sheet-form">
-        <h2>영상 녹화 끝</h2>
-        <p>영상 ${fmtClock(sec)} · ${(blob.size / 1048576).toFixed(1)} MB · ${videoExt(blob.type).toUpperCase()}</p>
-        <p class="fine">${v.withCamera ? '그래프와 카메라 화면, 소리가' : '그래프와 소리가'} 함께 담겼습니다. 이 창을 닫으면 영상은 남지 않으니, 필요하면 지금 보내거나 저장하세요.</p>
-        <div class="sheet-actions">
-          <button type="button" class="btn btn-quiet" data-close>닫기</button>
-          <button type="button" class="btn btn-primary" data-act="video-send">보내기</button>
-        </div>
-      </div>`);
-    dlg.querySelector('[data-act=video-send]').onclick = async () => {
-      const result = await deliverFile(blob, name, { title: '실시간 소음 분석 영상', text: `[실시간 소음 분석 영상] ${st.company}\n※ 스마트폰 측정 참고값` });
-      if (result === 'downloaded') toast('영상을 저장했습니다');
-      if (result !== 'cancelled') close();
-    };
   }
 
   // Everything needed to look at this moment again later.
@@ -1097,7 +1077,16 @@ async function renderAnalyzer() {
         ...(powN ? { avg: keep(reduceRanges(Float32Array.from(powSum, (p) => 10 * Math.log10(p / powN)), meter.freqs, idx, grid.centres)) } : {}),
         ...(st.minHold ? { min: keep(reduceRanges(holds.min, meter.freqs, idx, grid.centres)) } : {}),
         range: [...(st.specDb || range)],
+        // every FFT bin as measured, for the raw data export (null = no value)
+        bins: {
+          hz: meter.sampleRate / meter.analyser.fftSize,
+          cur: binArray(meter.levels),
+          max: binArray(holds.max),
+          ...(powN ? { avg: binArray(Float32Array.from(powSum, (p) => 10 * Math.log10(p / powN))) } : {}),
+          ...(st.minHold ? { min: binArray(holds.min) } : {}),
+        },
       },
+      trace: trace.snapshot(), // the level every 50 ms since reset, with its clock times
       fftSize: meter.analyser.fftSize,
       sampleRate: meter.sampleRate,
       offset: meter.offset,
@@ -1178,6 +1167,7 @@ async function renderAnalyzer() {
         ${segRow('gps', '속도 (GPS)', [['off', '끔'], ['on', '켬']], st.gps ? 'on' : 'off', '켜면 위치 권한을 묻고, 차 속도를 시간축 그래프(노란 선)와 저장 기록에 함께 남깁니다. 위치는 저장하지 않습니다.')}
         <h3 class="sheet-sub">그래프</h3>
         ${segRow('trace', '시간축 그래프 길이', [[30, '30초'], [60, '1분'], [300, '5분']], st.traceSec || 30)}
+        ${segRow('timeAxis', '시간축 표시', [['elapsed', '측정 시간'], ['clock', '현재 시각']], st.timeAxis, '현재 시각은 그래프 아래에 14:03:05처럼 시계 시각을 씁니다(기록·파일 분석의 시간축 그래프도 같음).')}
         ${segRow('fft', 'FFT 크기', FFT_SIZES.map((n) => [n, n]), st.fftSize, '클수록 주파수를 잘게 나누지만 반응이 느려집니다. 1/3 옥타브 보기는 늘 32768로 계산합니다.')}
         ${segRow('scale', '주파수 축', [['log', '로그'], ['linear', '선형']], st.scale, '주파수 그래프를 두 손가락으로 벌리거나 좁혀도 범위가 바뀝니다.')}
         ${segRow('window', '창 함수', Object.entries(FFT_WINDOWS).map(([k, w]) => [k, w.name]), st.window, 'Blackman(기본): 새어 나가는 성분이 가장 적어 큰 소리 옆의 작은 성분까지 보입니다(봉우리는 조금 넓음). Hanning: 봉우리가 좁아 가까운 두 주파수를 가르기 좋은 일반 분석용. Hamming: 봉우리 바로 옆은 깨끗하지만 멀리까지 조금씩 새어 바닥이 높아 보일 수 있습니다. 큰 숫자(전체 dB)는 바뀌지 않습니다.')}
@@ -1299,8 +1289,8 @@ async function renderAnalyzer() {
     }
     if (ref) showRef();
     gram.configure({ scale: st.scale, fmin: st.freqMin, fmax: st.freqMax, colorRange: st.gramDb });
-    if (st.traceSec !== prev.traceSec || st.traceDb !== prev.traceDb) {
-      trace.configure({ windowSec: st.traceSec || 30, yRange: st.traceDb });
+    if (st.traceSec !== prev.traceSec || st.traceDb !== prev.traceDb || st.timeAxis !== prev.timeAxis) {
+      trace.configure({ windowSec: st.traceSec || 30, yRange: st.traceDb, clock: st.timeAxis === 'clock' });
       trace.draw();
     }
     $('a-zoom').hidden = st.freqMin === FMIN && st.freqMax === FMAX;
@@ -1496,10 +1486,10 @@ async function renderAnalyzer() {
   // With the camera window open it records a video instead.
   recBtn.onclick = async () => {
     if (meter?.recording) return stopRecording();
-    if (video) return stopVideo();
-    if (camMode) return startVideo();
     if (!(await startMic())) return;
     meter.startRecording();
+    recStartedAt = Date.now();
+    if (camMode) startVideo();
     showRecording(true);
   };
   view.querySelector('[data-act=reset]').onclick = () => {
@@ -1557,6 +1547,112 @@ function forRecord(levels, freqs) {
   };
 }
 
+// A recording's video (muted) kept in step with the sound player beside it: it plays, pauses and jumps
+// with it; tapping it plays or pauses. A MediaRecorder WebM has no length until it is read through, so
+// it is read to the end once (otherwise it cannot jump).
+function followPlayer(player, screen) {
+  screen.addEventListener('loadedmetadata', () => {
+    if (screen.duration !== Infinity) return;
+    screen.addEventListener('durationchange', () => (screen.currentTime = player.currentTime), { once: true });
+    screen.currentTime = 1e101;
+  }, { once: true });
+  const sync = (force) => {
+    const t = player.currentTime;
+    if (!force && Math.abs(screen.currentTime - t) < 0.3) return;
+    try {
+      screen.currentTime = Number.isFinite(screen.duration) ? Math.min(t, screen.duration) : t;
+    } catch {
+      // not ready yet: the next event puts it in place
+    }
+  };
+  player.addEventListener('play', () => {
+    sync(true);
+    screen.play().catch(() => {});
+  });
+  player.addEventListener('pause', () => {
+    screen.pause();
+    sync(true);
+  });
+  player.addEventListener('seeked', () => sync(true));
+  player.addEventListener('timeupdate', () => sync(false));
+  screen.addEventListener('click', () => (player.paused ? player.play().catch(() => {}) : player.pause()));
+}
+
+const KEEP_VIDEO_BYTES = 120 * 1048576; // a recording's video is kept with its record up to this size
+
+const savedText = (name) => `${name}을(를) 저장했습니다${/Android/i.test(navigator.userAgent) ? ' (다운로드 폴더). 카톡의 파일 보내기로 보낼 수 있습니다' : ''}`;
+
+// "결과 보내기": a record (or the file being analysed) as an image, Excel raw data, a record file for a
+// PC or another phone, its sound and its video. The Excel file takes a moment to make, so on a phone it
+// is made first and sent with a second tap (the share sheet only opens straight from a tap).
+// getSound(): Promise<{ samples, rate } | null>; card: Promise<Blob> of the result image.
+function exportSheet(rec, { getSound = null, card = null, recordFile = false, film = null } = {}) {
+  const s = getSettings();
+  const name = (rec.vehicle || (rec.source === 'file' ? String(rec.fileName || '').replace(/\.[^.]+$/, '') : '') || '기록').replace(/[\s\\/:*?"<>|]+/g, '');
+  const base = `소음분석_${name}_${fileStamp(rec.ts)}`;
+  const text = summaryText(rec, s);
+  const item = (key, title, note, extra = '') => `<section class="export-item"><div class="export-text"><b>${title}</b><small>${note}</small></div>${extra}<button type="button" class="btn" data-x="${key}">${key === 'xlsx' ? '만들기' : '보내기'}</button></section>`;
+  const { dlg } = openSheet(`
+    <div class="sheet-form export-sheet">
+      <h2>결과 보내기</h2>
+      <div class="export-list">
+        ${card ? item('image', '결과 이미지 (PNG)', '그래프와 값을 한 장으로 · 요약 글도 함께') : ''}
+        ${item('xlsx', '엑셀 데이터 (.xlsx)', '시간별 레벨 · 주파수(FFT 칸마다) · 1/3 옥타브를 시트별로', segRow('step', '시간 간격', EXPORT_STEPS.map((v) => [v, v === 0.125 ? '0.125초 (Fast)' : v === 1 ? '1초 (Slow)' : `${v}초`]), defaultStep(rec)))}
+        ${recordFile ? item('nmb', '기록 파일 (.nmb)', 'PC나 다른 휴대폰에서 이 앱(기록 → 기록·백업 파일 넣기)으로 열어 그래프를 보고 엑셀 데이터를 뽑습니다 · 소리·영상 포함') : ''}
+        ${rec.audio ? item('wav', `소리 파일 (${rec.source === 'file' && rec.fileName ? esc(rec.fileName.split('.').pop().toUpperCase()) : 'WAV'})`, '저장된 소리') : ''}
+        ${film ? item('video', `영상 파일 (${videoExt(film.type).toUpperCase()})`, '녹음과 함께 찍은 영상') : ''}
+      </div>
+      <p class="fine">스마트폰 측정값은 참고값입니다.</p>
+      <button type="button" class="btn btn-wide" data-close>닫기</button>
+    </div>`);
+  let step = defaultStep(rec);
+  let xlsx = null;
+  const xBtn = dlg.querySelector('[data-x=xlsx]');
+  const send = async (blob, file, what) => {
+    const result = await deliverFile(blob, file, { title: '실시간 소음 분석', text });
+    if (result === 'downloaded') toast(savedText(what));
+    return result;
+  };
+  bindSegs(dlg, (key, v) => {
+    if (key !== 'step') return;
+    step = Number(v);
+    xlsx = null;
+    xBtn.textContent = '만들기';
+  });
+  dlg.querySelector('.export-list').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-x]');
+    if (!b || b.disabled) return;
+    const key = b.dataset.x;
+    if (key === 'image') {
+      const result = await send(await card, `${base}.png`, '이미지');
+      if (result === 'downloaded') await navigator.clipboard?.writeText(text).catch(() => {});
+    } else if (key === 'xlsx') {
+      if (!xlsx) {
+        b.disabled = true;
+        b.textContent = '만드는 중…';
+        await sleep(30); // let it paint before the number crunching
+        try {
+          const sound = getSound ? await getSound() : null;
+          const correction = rec.micCal ? calCorrection(micProfile(s, rec.mic).cal) : null;
+          xlsx = xlsxBlob(rawDataSheets(rec, { sound, step, correction }));
+        } catch {
+          toast('엑셀 데이터를 만들지 못했습니다');
+        }
+        b.disabled = false;
+        b.textContent = xlsx ? '보내기' : '만들기';
+        if (!xlsx || canShareFiles()) return; // a phone: send with the next tap
+      }
+      await send(xlsx, `${base}_rawdata.xlsx`, '엑셀 파일');
+    } else if (key === 'nmb') {
+      await send(backupBlob([rec], { device: s.device, app: APP_VERSION }), `${base}.nmb`, '기록 파일');
+    } else if (key === 'wav') {
+      await send(rec.audio, rec.source === 'file' && rec.fileName ? rec.fileName : `${base}.wav`, '소리 파일');
+    } else if (key === 'video') {
+      await send(film, `${base}.${videoExt(film.type)}`, '영상 파일');
+    }
+  });
+}
+
 async function renderFile() {
   view.innerHTML = `
     <div class="page file-page">
@@ -1612,12 +1708,21 @@ async function renderFile() {
     const range = rangeFor(a.max);
     const loudestAt = a.history.length ? a.history.indexOf(Math.max(...a.history)) * a.historyStep + a.historyStep : 0;
     const url = URL.createObjectURL(file);
+    // a recording made with the camera window open brings its video; a video file is its own
+    let film = null;
+    if (file.video) film = await Promise.race([Promise.resolve(file.video), sleep(5000).then(() => null)]);
+    else if (/^video\//.test(file.type)) film = file;
+    if (film && film !== file) file.video = film;
+    const filmUrl = film && film !== file ? URL.createObjectURL(film) : url;
+    const started = Number.isFinite(file.startedAt) ? file.startedAt : null;
     result.innerHTML = `
       <div class="file-layout">
       <section class="card file-head">
         <h2 class="file-name">${esc(file.name)}</h2>
         <p class="fine">${fmtClock(decoded.duration)} · ${decoded.rate / 1000} kHz · ${decoded.channels === 1 ? '모노' : `${decoded.channels}채널 → 모노로 분석`} · ${(file.size / 1048576).toFixed(1)} MB${decoded.capped ? ` · 처음 ${MAX_SEC / 60}분만 분석` : ''}</p>
+        ${film ? `<video class="rec-video" id="fa-video" muted playsinline preload="auto" src="${filmUrl}" aria-label="녹음과 함께 찍은 영상 (소리에 맞춰 움직임)"></video>` : ''}
         <audio controls preload="auto" id="fa-audio" src="${url}"></audio>
+        <button type="button" class="btn btn-wide" data-act="fa-export">엑셀 데이터${film && film !== file ? ' · 영상' : ''} 보내기</button>
       </section>
         <section class="card chart-card fa-chart">
           <div class="chart-box-rec"><div class="chart-plot" id="fa-chart"></div></div>
@@ -1659,6 +1764,7 @@ async function renderFile() {
       </div>`;
 
     const player = $('fa-audio');
+    if (film) followPlayer(player, $('fa-video'));
     const chart = new SpectrumView($('fa-chart'), { cursor: true });
     chart.onCursor = bindCursorReadout($('fa-cursor'));
     $('fa-cursor').querySelector('.cr-close').onclick = () => chart.clearCursors();
@@ -1673,7 +1779,7 @@ async function renderFile() {
     gram.configure({ scale: st.scale, fmin: st.freqMin, fmax: st.freqMax, colorRange: st.gramDb });
     gram.setStatic(a.frames, a.freqs, a.duration, { labels: 'absolute', unit });
     const timeline = new TimelineView($('fa-time'), { onSeek: seek });
-    timeline.set(a.history, a.historyStep, a.leq, unit);
+    timeline.set(a.history, a.historyStep, a.leq, unit, { start: started, clock: st.timeAxis === 'clock' });
 
     function show() {
       const st2 = getSettings();
@@ -1738,9 +1844,10 @@ async function renderFile() {
         show();
       }),
     );
-    result.querySelector('[data-act=fa-save]').onclick = () => {
+    // what is stored as a record (and exported): the analysis, without the sound
+    const fileRecord = () => {
       const avg = forRecord(a.avg, a.freqs);
-      const rec = {
+      return {
         id: store.newId(),
         ts: Date.now(),
         source: 'file',
@@ -1759,7 +1866,7 @@ async function renderFile() {
           ...(getSettings().minHold ? { min: forRecord(a.min, a.freqs).values } : {}),
           range,
         },
-        fftSize: 4096,
+        fftSize: st.fftSize, // the setting (the raw data export works the spectrum out at this size)
         window: a.window,
         sampleRate: decoded.rate,
         offset: a.offset,
@@ -1769,10 +1876,16 @@ async function renderFile() {
         mic: calibrated ? st.lastMic : '',
         micCal: calibrated && prof.cal ? prof.calName : '',
         device: st.device || '',
+        ...(started != null ? { startedAt: started } : {}),
         vehicle: '',
         memo: '',
         app: APP_VERSION,
       };
+    };
+    result.querySelector('[data-act=fa-export]').onclick = () =>
+      exportSheet(fileRecord(), { getSound: async () => ({ samples: decoded.samples, rate: decoded.rate }), film: film && film !== file ? film : null });
+    result.querySelector('[data-act=fa-save]').onclick = () => {
+      const rec = fileRecord();
       const keep = file.size <= KEEP_AUDIO_BYTES;
       saveSheet(
         { title: '파일 분석 저장', rec, timeLabel: '길이', extra: keep ? '' : '<p class="fine">파일이 커서(30MB 초과) 분석 결과만 저장합니다.</p>' },
@@ -1780,6 +1893,7 @@ async function renderFile() {
           if (keep) {
             rec.audio = file;
             rec.audioSec = round1(a.duration);
+            if (film && film !== file && film.size <= KEEP_VIDEO_BYTES) rec.video = film;
           }
         },
       );
@@ -1792,6 +1906,7 @@ async function renderFile() {
       gram.destroy();
       timeline.destroy();
       URL.revokeObjectURL(url);
+      if (filmUrl !== url) URL.revokeObjectURL(filmUrl);
     };
   }
 
@@ -1824,10 +1939,10 @@ async function renderHistory() {
         <button class="btn" data-act="backup">기록 백업 보내기</button>
       </div>
       <section class="card backup-card">
-        <h2>다른 휴대폰의 기록 넣기</h2>
-        <p class="fine">다른 휴대폰에서 "기록 백업 보내기"로 받은 파일을 넣으면, 이 휴대폰에 없는 기록만 소리와 함께 더합니다. 사무실 휴대폰 한 대에 모아 볼 때 씁니다.</p>
-        <label class="btn btn-wide" for="f-backup">백업 파일 넣기</label>
-        <input type="file" id="f-backup" hidden>
+        <h2>받은 기록 넣기</h2>
+        <p class="fine">다른 휴대폰에서 받은 기록 파일(기록 화면 → 결과 보내기 → 기록 파일)이나 "기록 백업 보내기" 파일을 넣으면, 여기에 없는 기록만 소리·영상과 함께 더합니다. PC의 크롬·엣지에서 이 앱 주소를 열어 넣으면 PC에서 그래프를 보고 엑셀 데이터를 뽑을 수 있습니다. 여러 파일을 한 번에 골라도 됩니다.</p>
+        <label class="btn btn-wide" for="f-backup">기록·백업 파일 넣기</label>
+        <input type="file" id="f-backup" multiple hidden>
       </section>
     </div>`;
   let current = all;
@@ -1854,23 +1969,36 @@ async function renderHistory() {
   };
   view.querySelector('[data-act=backup]').onclick = () => backupSheet(all);
   view.querySelector('#f-backup').onchange = async (e) => {
-    const file = e.target.files[0];
+    const files = [...e.target.files];
     e.target.value = '';
-    if (!file) return;
-    try {
-      const backup = await readBackup(file);
-      const { add, skipped } = importPlan(all.map((r) => r.id), backup);
-      for (const r of add) {
-        // read each sound out of the file now: the picked file may not stay readable
-        if (r.audio) r.audio = new Blob([await r.audio.arrayBuffer()], { type: r.audio.type || 'audio/wav' });
-        await store.putRecord(r);
+    if (!files.length) return;
+    const have = all.map((r) => r.id);
+    let added = 0;
+    let skipped = 0;
+    const from = new Set();
+    const bad = [];
+    for (const file of files) {
+      try {
+        const backup = await readBackup(file);
+        const plan = importPlan(have, backup);
+        for (const r of plan.add) {
+          // read each sound and video out of the file now: the picked file may not stay readable
+          if (r.audio) r.audio = new Blob([await r.audio.arrayBuffer()], { type: r.audio.type || 'audio/wav' });
+          if (r.video) r.video = new Blob([await r.video.arrayBuffer()], { type: r.video.type || 'video/mp4' });
+          await store.putRecord(r);
+          have.push(r.id);
+        }
+        added += plan.add.length;
+        skipped += plan.skipped;
+        if (backup.device) from.add(backup.device);
+      } catch (err) {
+        bad.push(`${file.name}: ${err.message || '읽지 못함'}`);
       }
-      const from = backup.device ? `${backup.device}의 ` : '';
-      toast(add.length ? `${from}기록 ${add.length}건을 넣었습니다${skipped ? ` (이미 있는 ${skipped}건은 건너뜀)` : ''}` : `새 기록이 없습니다 (${skipped}건 모두 이미 있음)`);
-      if (add.length) route();
-    } catch (err) {
-      toast(err.message || '백업 파일을 읽지 못했습니다');
     }
+    const who = from.size ? `${[...from].join(', ')}의 ` : '';
+    if (bad.length && !added && !skipped) toast(files.length === 1 ? bad[0].replace(/^[^:]+: /, '') : `파일을 읽지 못했습니다 (${bad.length}개)`);
+    else toast(added ? `${who}기록 ${added}건을 넣었습니다${skipped ? ` (이미 있는 ${skipped}건은 건너뜀)` : ''}${bad.length ? ` · 읽지 못한 파일 ${bad.length}개` : ''}` : `새 기록이 없습니다 (${skipped}건 모두 이미 있음)`);
+    if (added) route();
   };
 }
 
@@ -1926,6 +2054,15 @@ async function renderRecord(id) {
   const s = getSettings();
   const fromFile = rec.source === 'file';
   const unit = rec.unit || 'dB(A)';
+  // the video recorded with the sound (camera window open), or a video file kept as the sound
+  const film = rec.video || (/^video\//.test(rec.audio?.type || '') ? rec.audio : null);
+  const traced = !rec.audio && rec.trace?.v?.length > 1;
+  const savedLegend = legendHtml(s.style, [
+    ['cur', fromFile ? '전체 평균' : '저장 순간'],
+    ['max', fromFile ? '전체 최대' : '측정 중 최대'],
+    ...(rec.spectrum.avg ? [['avg', '측정 평균']] : []),
+    ...(rec.spectrum.min ? [['min', fromFile ? '전체 최소' : '측정 중 최소']] : []),
+  ]);
   view.innerHTML = `
     <div class="page">
       <a class="back" href="#/history">← 기록 목록</a>
@@ -1937,12 +2074,8 @@ async function renderRecord(id) {
         <section class="card chart-card">
           <div class="chart-box-rec"><div class="chart-plot" id="rec-chart"></div></div>
           ${cursorBox('rec-cursor')}
-          <p class="legend">${legendHtml(s.style, [
-            ['cur', fromFile ? '전체 평균' : '저장 순간'],
-            ['max', fromFile ? '전체 최대' : '측정 중 최대'],
-            ...(rec.spectrum.avg ? [['avg', '측정 평균']] : []),
-            ...(rec.spectrum.min ? [['min', fromFile ? '전체 최소' : '측정 중 최소']] : []),
-          ])}<span id="rec-ref-legend"></span> <span class="fine">· 그래프를 누르면 커서</span></p>
+          <p class="legend"><span id="rec-legend">${savedLegend}</span><span id="rec-ref-legend"></span> <span class="fine">· 그래프를 누르면 커서</span>
+            <button type="button" class="link" id="rec-saved" hidden>저장된 그래프 보기</button></p>
           <div class="ref-line" id="rec-ref" hidden><p id="rec-ref-text"></p><button type="button" class="ref-close" data-act="ref-clear" aria-label="비교 끄기">×</button></div>
           <div class="inline-actions compare-actions">
             <button type="button" class="btn" data-act="ref-pick">다른 기록과 비교</button>
@@ -1957,12 +2090,18 @@ async function renderRecord(id) {
         ${rec.clipped ? `<p class="alert">${fromFile ? '소리가 파일의 최대 크기(0 dBFS)에 닿은 곳이 있어 실제보다 작게 나왔을 수 있습니다.' : '소리가 휴대폰 마이크의 측정 한계를 넘은 순간이 있었습니다. 실제 최대값은 더 클 수 있습니다.'}</p>` : ''}
         ${rec.audio
           ? `<section class="card audio-card">
-              <h2>${fromFile ? '파일 소리' : '저장된 소리'} <small>${fmtClock(rec.audioSec)}</small></h2>
+              <h2>${fromFile ? '파일 소리' : '저장된 소리'} <small>${fmtClock(rec.audioSec)}${film ? ' · 영상' : ''}</small></h2>
+              ${film ? '<video class="rec-video" id="rec-video" muted playsinline preload="metadata" aria-label="녹음과 함께 찍은 영상 (소리에 맞춰 움직임)"></video>' : ''}
               <audio controls preload="metadata" id="rec-audio"></audio>
               <div class="gram-box-rec"><div class="gram-plot" id="rec-gram"></div><p class="gram-wait" id="rec-gram-wait">소리 분석 중…</p></div>
               <div class="timeline-box"><div class="gram-plot" id="rec-time"></div></div>
-              <p class="fine">${fromFile ? '스펙트로그램은 아래가 처음, 위가 끝입니다.' : '스펙트로그램: 맨 위가 저장한 순간, 아래로 갈수록 그 전 소리입니다.'} 아래 시간축 그래프는 시간별 dB입니다. 그래프를 누르면 그 시점부터 들을 수 있습니다.</p>
-              <button type="button" class="btn btn-wide" data-act="share-audio">소리 파일 보내기</button>
+              <p class="fine">${fromFile ? '스펙트로그램은 아래가 처음, 위가 끝입니다.' : '스펙트로그램: 맨 위가 저장한 순간, 아래로 갈수록 그 전 소리입니다.'} 아래 시간축 그래프는 시간별 dB입니다. 그래프를 누르면 그 시점부터 들을 수 있고, 재생하는 동안 위 주파수 그래프가 그 순간의 스펙트럼을 보여 줍니다.</p>
+            </section>`
+          : ''}
+        ${traced
+          ? `<section class="card">
+              <h2>측정 중 시간별 dB <small>${fmtClock(rec.trace.v.length * (rec.trace.step || 0.05))}</small></h2>
+              <div class="timeline-box"><div class="gram-plot" id="rec-trace"></div></div>
             </section>`
           : ''}
         <section class="card">
@@ -1996,12 +2135,35 @@ async function renderRecord(id) {
     peaks: rec.peaks,
   };
   const recOpts = { scale: 'log', style: s.style, range: sp.range, unit, cursorLabels: { cur: fromFile ? '평균' : '저장 순간', max: '최대' } };
+  let refData = null;
   chart.update(recData, recOpts);
+  // while the sound plays (or after a jump), the spectrum at the playback position over the sound's
+  // maximum; "저장된 그래프 보기" goes back
+  let ana = null;
+  let atPosition = false;
+  const showSaved = () => {
+    atPosition = false;
+    chart.update({ ...recData, ref: refData }, recOpts);
+    view.querySelector('#rec-legend').innerHTML = savedLegend;
+    view.querySelector('#rec-saved').hidden = true;
+  };
+  const showPosition = (t) => {
+    if (!ana) return;
+    atPosition = true;
+    chart.update({ freqs: ana.freqs, cur: frameAt(ana, t), max: ana.max, peaks: [] }, { ...recOpts, cursorLabels: { cur: '재생 위치', max: '소리 최대' } });
+    view.querySelector('#rec-legend').innerHTML = legendHtml(s.style, [['cur', `재생 위치 ${fmtClock(t)}`], ['max', `${fromFile ? '파일' : '저장된'} 소리 최대`]]);
+    view.querySelector('#rec-saved').hidden = false;
+  };
+  view.querySelector('#rec-saved').onclick = () => {
+    view.querySelector('#rec-audio')?.pause();
+    showSaved();
+  };
 
   // Comparison with another record: its average spectrum dashed over this one, and the two averages.
   const compareWith = (other) => {
     const r = refCurve(other);
-    chart.update({ ...recData, ref: r }, recOpts);
+    refData = r;
+    showSaved();
     view.querySelector('#rec-ref').hidden = !r;
     view.querySelector('#rec-ref-legend').innerHTML = r ? legendHtml(s.style, [['ref', `비교: ${esc(r.name)}`]]) : '';
     if (!r) return;
@@ -2034,74 +2196,85 @@ async function renderRecord(id) {
   let gram = null;
   let timeline = null;
   let audioUrl = null;
+  let filmUrl = null;
   let raf = 0;
+  let soundReady = null; // Promise<{ samples, rate } | null>: the stored sound, decoded once
+  const clock = s.timeAxis === 'clock';
   cleanup = () => {
     chart.destroy();
     gram?.destroy();
     timeline?.destroy();
     cancelAnimationFrame(raf);
     if (audioUrl) URL.revokeObjectURL(audioUrl);
+    if (filmUrl && filmUrl !== audioUrl) URL.revokeObjectURL(filmUrl);
   };
+
+  if (traced) {
+    // no sound kept: the level measured every 50 ms, with its clock times
+    timeline = new TimelineView(view.querySelector('#rec-trace'));
+    const tr = rec.trace;
+    timeline.set(Float32Array.from(tr.v, (v) => (v == null ? -Infinity : v)), tr.step || 0.05, rec.leq, unit, { times: tr.t.map((ms) => tr.at + ms), clock });
+  }
 
   if (rec.audio) {
     const player = view.querySelector('#rec-audio');
     audioUrl = URL.createObjectURL(rec.audio);
     player.src = audioUrl;
+    if (film) {
+      const screen = view.querySelector('#rec-video');
+      filmUrl = film === rec.audio ? audioUrl : URL.createObjectURL(film);
+      screen.src = filmUrl;
+      followPlayer(player, screen);
+    }
     const seek = (t) => {
       player.currentTime = t;
+      showPosition(t);
       follow();
     };
     gram = new SpectrogramView(view.querySelector('#rec-gram'), { onSeek: seek });
     timeline = new TimelineView(view.querySelector('#rec-time'), { onSeek: seek });
+    soundReady = decodeAudioFile(rec.audio).then(({ samples, rate }) => ({ samples, rate })).catch(() => null);
     // the time-axis views are worked out from the stored sound itself
     setTimeout(async () => {
-      try {
-        const { samples, rate } = await decodeAudioFile(rec.audio);
-        const a = analyzeSound(samples, rate, rec.offset ?? s.offset, {
-          weighting: rec.weighting || 'A',
-          timeWeighting: rec.timeWeighting || 'F',
-          window: rec.window || 'blackman',
-          correction: rec.micCal ? calCorrection(micProfile(s, rec.mic).cal) : null,
-        });
-        gram?.setStatic(a.frames, a.freqs, a.duration, { labels: fromFile ? 'absolute' : 'relative', unit });
-        timeline?.set(a.history, a.historyStep, a.leq, unit);
-        view.querySelector('#rec-gram-wait')?.remove();
-      } catch {
+      const sound = await soundReady;
+      if (!sound) {
         const wait = view.querySelector('#rec-gram-wait');
         if (wait) wait.textContent = '이 소리는 분석할 수 없습니다';
+        return;
       }
+      ana = analyzeSound(sound.samples, sound.rate, rec.offset ?? s.offset, {
+        weighting: rec.weighting || 'A',
+        timeWeighting: rec.timeWeighting || 'F',
+        window: rec.window || 'blackman',
+        correction: rec.micCal ? calCorrection(micProfile(s, rec.mic).cal) : null,
+      });
+      gram?.setStatic(ana.frames, ana.freqs, ana.duration, { labels: fromFile ? 'absolute' : 'relative', unit });
+      timeline?.set(ana.history, ana.historyStep, ana.leq, unit, { start: soundStart(rec, ana.duration), clock });
+      view.querySelector('#rec-gram-wait')?.remove();
+      if (!player.paused) showPosition(player.currentTime);
     }, 30);
     function follow() {
       gram?.setPlayhead(player.currentTime);
       timeline?.setPlayhead(player.currentTime);
+      if (atPosition) showPosition(player.currentTime);
       cancelAnimationFrame(raf);
       if (!player.paused) raf = requestAnimationFrame(follow);
     }
-    player.addEventListener('play', follow);
+    player.addEventListener('play', () => {
+      showPosition(player.currentTime);
+      follow();
+    });
     player.addEventListener('seeked', follow);
     player.addEventListener('ended', () => {
       gram?.setPlayhead(null);
       timeline?.setPlayhead(null);
+      showSaved();
     });
-    const audioName = fromFile && rec.fileName ? rec.fileName : `소음분석_${(rec.vehicle || '기록').replace(/\s/g, '')}_${fileStamp(rec.ts)}.wav`;
-    view.querySelector('[data-act=share-audio]').onclick = async () => {
-      const result = await deliverFile(rec.audio, audioName, { title: '저장된 소리', text: summaryText(rec, s) });
-      if (result === 'downloaded') toast('소리 파일을 저장했습니다');
-    };
   }
 
   // Render the card now so the share sheet opens straight from the tap (iOS needs that).
   const card = renderCard(rec, s);
-  view.querySelector('[data-act=share]').onclick = async () => {
-    const result = await deliverFile(await card, `소음분석_${(rec.vehicle || '기록').replace(/\s/g, '')}_${fileStamp(rec.ts)}.png`, {
-      title: '실시간 소음 분석',
-      text: summaryText(rec, s),
-    });
-    if (result === 'downloaded') {
-      await navigator.clipboard?.writeText(summaryText(rec, s)).catch(() => {});
-      toast('이미지를 저장했습니다. 내용은 복사되어 붙여넣기 할 수 있습니다.');
-    }
-  };
+  view.querySelector('[data-act=share]').onclick = () => exportSheet(rec, { getSound: () => soundReady || Promise.resolve(null), card, recordFile: true, film });
   view.querySelector('[data-act=note]').onclick = () => {
     const { dlg, close } = openSheet(`
       <form class="sheet-form">
