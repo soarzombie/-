@@ -430,7 +430,7 @@ function helpSheet() {
         <dt>⬇ 저장</dt><dd>지금 그래프와 값, 방금 들린 소리를 차량번호·메모와 함께 기록에 남깁니다.</dd>
         <dt>결과 보내기 · PC</dt><dd>기록 화면의 <b>결과 보내기</b>: 결과 이미지, <b>엑셀 데이터</b>(시간별 레벨 · 주파수 FFT 칸마다 · 1/3 옥타브, 시간 간격 0.1 / 0.125 / 1초), <b>기록 파일</b>(소리·영상 포함), 소리, 영상. 기록 파일을 받은 사람은 PC의 크롬·엣지에서 이 앱 주소를 열고 기록 → "기록·백업 파일 넣기"로 넣으면, PC에서 그래프를 보고 소리·영상을 재생하고 엑셀 데이터를 뽑을 수 있습니다.</dd>
       </dl>
-      <p class="fine">스마트폰 측정값은 참고값이며 정밀 소음계를 대신하지 않습니다.</p>
+      <p class="fine">스마트폰 측정값은 참고값이며 정밀 소음계를 대신하지 않습니다. · 버전 v${APP_VERSION}</p>
       <button type="button" class="btn btn-wide" data-close>닫기</button>
     </div>`);
 }
@@ -2320,6 +2320,7 @@ async function renderSettings() {
           <p class="alert" id="pin-error" hidden>비밀번호가 맞지 않습니다.</p>
           <button class="btn btn-primary btn-wide" type="submit">확인</button>
         </form>
+        <p class="fine about">실시간 소음 분석 v${APP_VERSION}</p>
       </div>`;
     view.querySelector('#pin-form').onsubmit = (e) => {
       e.preventDefault();
@@ -2613,6 +2614,19 @@ updateLayout();
 window.addEventListener('hashchange', route);
 route();
 
+// Offline copy (sw.js). A new version is looked for at every start and whenever the app comes back to
+// the front; when it has taken over, a page opened moments ago reloads into it at once (nothing to lose
+// yet), otherwise a message offers to switch (a measurement or recording may be going on).
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  const openedAt = performance.now();
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker
+    .register('sw.js')
+    .then((reg) => document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && reg.update().catch(() => {})))
+    .catch(() => {});
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) return; // the first install: the page already is the newest
+    if (performance.now() - openedAt < 15000) location.reload();
+    else toast('새 버전이 준비됐습니다', { label: '지금 적용', run: () => location.reload() });
+  });
 }
