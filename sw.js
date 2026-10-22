@@ -1,6 +1,6 @@
 // Offline support: the app shell is cached so measuring works without signal.
 // Bump VERSION whenever any cached file changes so phones pick up the update.
-const VERSION = 'v0.14.0';
+const VERSION = 'v0.14.1';
 const CACHE = `noise-meter-${VERSION}`;
 const FILES = [
   './',
@@ -35,8 +35,10 @@ const FILES = [
   'icons/apple-touch-icon.png',
 ];
 
+// Each file is fetched fresh from the server (not from the browser's own cache, which GitHub Pages lets
+// keep files for 10 minutes), so a new version never mixes in files of the old one.
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
+  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES.map((f) => new Request(f, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {

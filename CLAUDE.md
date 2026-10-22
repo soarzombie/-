@@ -37,6 +37,7 @@ js/share.js                 Share card (canvas PNG), summary text, CSV, share/do
 js/format.js                Korean labels and number/date formatting
 sw.js, manifest.webmanifest, icons/   Offline cache and install
 tests/dsp.test.mjs          Unit tests (node:test), including the worklet run in a vm sandbox
+tests/sw-update.cjs         Service worker update check (served like GitHub Pages, new version deployed, app reopened)
 tests/e2e.cjs               Playwright run with a WAV file as fake microphone (also a second fake input, Chromium's fake camera and a portrait canvas camera, fake geolocation, CDP touch for pinch); screenshots both orientations and the bright theme; checks video frames with ffmpeg when installed
 .github/workflows/pages.yml Tests, then deploys to GitHub Pages from the default branch
 ```
@@ -47,9 +48,10 @@ tests/e2e.cjs               Playwright run with a WAV file as fake microphone (a
 npm start                                   # serve on http://localhost:8080 (mic works on localhost)
 npm test                                    # unit tests
 NODE_PATH=$(npm root -g) node tests/e2e.cjs [screenshot-dir]   # e2e; writes screenshots if a dir is given
+NODE_PATH=$(npm root -g) node tests/sw-update.cjs                # offline copy picks up a new version by itself
 ```
 
-No build step. After changing any cached file, bump `VERSION` in `sw.js` (and add new files to its `FILES` list).
+No build step. After changing any cached file, bump `VERSION` in `sw.js` (and add new files to its `FILES` list). The service worker fetches its files with `cache: 'reload'` (GitHub Pages lets browsers keep files 10 minutes, which once left a new cache holding old files); the app looks for a new version at start and on returning to the front, reloads into it at once when it takes over within 15 s of opening, and otherwise offers "지금 적용". The version shows at the bottom of 설정 (also before the PIN) and of the help sheet.
 
 ## Conventions
 
