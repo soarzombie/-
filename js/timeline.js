@@ -1,11 +1,45 @@
 // Level over time. TimelineView: a whole recording, the Fast level every 0.1 s, its Leq as a dashed
 // line and the playback position; tap or drag to seek. LiveTimelineView: the analyzer's time-axis graph,
 // the live Fast level over the last 30 s – 5 min of measuring, newest at the right, under the spectrum.
+// Both label the time axis with the measuring time, or with the clock time where it is known (시간축
+// 표시: 현재 시각).
 
 import { SPECTRUM_COLORS } from './spectrum.js';
-import { fmtClock } from './format.js';
+import { fmtClock, fmtTimeOfDay } from './format.js';
 
 const TICKS = [1, 2, 5, 10, 15, 30, 60, 120, 300];
+
+// Where a run of clock times (ms, rising) passes a multiple of tickMs: [[index, that time]]. A pause
+// in between shows as one tick at the time measuring went on.
+export function clockTicks(times, from, to, tickMs) {
+  const out = [];
+  for (let i = Math.max(from, 1); i < to; i++) {
+    const a = Math.floor(times[i - 1] / tickMs);
+    const b = Math.floor(times[i] / tickMs);
+    if (b > a) out.push([i, b * tickMs]);
+  }
+  return out;
+}
+
+// Time labels along the bottom, kept from running into each other.
+function drawTimeLabels(g, labels, box, h, k, grid) {
+  let last = -Infinity;
+  for (const [xx, text] of labels) {
+    const w = g.measureText(text).width;
+    const align = xx < box.x0 + w / 2 ? 'left' : xx > box.x1 - w / 2 ? 'right' : 'center';
+    const left = align === 'left' ? xx : align === 'right' ? xx - w : xx - w / 2;
+    if (left < last + 6 * k) continue;
+    last = left + w;
+    if (grid) {
+      g.beginPath();
+      g.moveTo(Math.round(xx) + 0.5, box.yTop);
+      g.lineTo(Math.round(xx) + 0.5, box.yBot);
+      g.stroke();
+    }
+    g.textAlign = align;
+    g.fillText(text, xx, h - 6 * k);
+  }
+}
 
 export class TimelineView {
   constructor(host, { onSeek = null } = {}) {
@@ -50,9 +84,17 @@ export class TimelineView {
     this.draw();
   }
 
-  // history: level every `step` seconds; leq drawn as a reference line.
-  set(history, step, leq, unit = 'dB(A)') {
-    this.data = { history, step, leq, unit, duration: history.length * step };
+  // history: level every `step` seconds; leq drawn as a reference line. For clock-time labels: start
+  // (ms at time 0) or times (ms of each value, for a measurement with pauses), and clock: true.
+  set(history, step, leq, unit = 'dB(A)', { start = null, times = null, clock = false } = {}) {
+    this.data = { history, step, leq, unit, duration: history.length * step, start, times };
+    this.clock = clock;
+    this.draw();
+  }
+
+  // 시간축 표시 changed: clock time (where known) or measuring time
+  setClock(clock) {
+    this.clock = clock;
     this.draw();
   }
 
@@ -92,15 +134,16 @@ export class TimelineView {
       g.fillText(String(v), 2 * k, yy + 4 * k);
     }
     const tick = TICKS.find((s) => data.duration / s <= 6) || 600;
-    for (let t = 0; t <= data.duration + 1e-6; t += tick) {
-      const xx = Math.round(x(t)) + 0.5;
-      g.beginPath();
-      g.moveTo(xx, box.yTop);
-      g.lineTo(xx, box.yBot);
-      g.stroke();
-      g.textAlign = t === 0 ? 'left' : 'center';
-      g.fillText(fmtClock(t), Math.min(box.x1 - 14 * k, xx), this.h - 6 * k);
+    const labels = [];
+    if (this.clock && data.times?.length) {
+      for (const [i, ms] of clockTicks(data.times, 0, data.times.length, tick * 1000)) labels.push([x((i + 1) * data.step), fmtTimeOfDay(ms, tick < 60)]);
+    } else if (this.clock && Number.isFinite(data.start)) {
+      const tickMs = tick * 1000;
+      for (let ms = Math.ceil(data.start / tickMs) * tickMs; ms <= data.start + data.duration * 1000 + 1; ms += tickMs) labels.push([x((ms - data.start) / 1000), fmtTimeOfDay(ms, tick < 60)]);
+    } else {
+      for (let t = 0; t <= data.duration + 1e-6; t += tick) labels.push([x(t), fmtClock(t)]);
     }
+    drawTimeLabels(g, labels, box, this.h, k, true);
 
     g.beginPath();
     data.history.forEach((v, i) => g[i ? 'lineTo' : 'moveTo'](x((i + 1) * data.step), y(v)));
@@ -166,6 +209,7 @@ export class LiveTimelineView {
     this.cap = Math.ceil(maxSec / step);
     this.values = new Float32Array(this.cap * 2);
     this.speeds = new Float32Array(this.cap * 2); // km/h with each value (NaN = not known)
+    this.times = new Float64Array(this.cap * 2); // clock time of each value, ms
     this.len = 0; // values held
     this.first = 0; // sample number of values[0]
     this.stats = { leq: NaN, unit: 'dB(A)' };
@@ -192,16 +236,31 @@ export class LiveTimelineView {
     this.draw();
   }
 
-  push(db, kmh = NaN) {
+  push(db, kmh = NaN, at = Date.now()) {
     if (this.len === this.values.length) {
       // drop the older half; only the last maxSec are ever shown
       this.values.copyWithin(0, this.cap);
       this.speeds.copyWithin(0, this.cap);
+      this.times.copyWithin(0, this.cap);
       this.len -= this.cap;
       this.first += this.cap;
     }
     this.speeds[this.len] = kmh ?? NaN;
+    this.times[this.len] = at;
     this.values[this.len++] = Number.isFinite(db) ? db : -Infinity;
+  }
+
+  // What is held (up to the last 10 minutes of measuring), for keeping with a saved record:
+  // { at: clock time of the first value, step, t: ms after it, v: dB (null = no sound) }.
+  snapshot() {
+    if (!this.len) return null;
+    const at = this.times[0];
+    return {
+      at,
+      step: this.step,
+      t: Array.from(this.times.subarray(0, this.len), (ms) => Math.round(ms - at)),
+      v: Array.from(this.values.subarray(0, this.len), (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : null)),
+    };
   }
 
   clear() {
@@ -211,8 +270,10 @@ export class LiveTimelineView {
   }
 
   // speed: also draw the speed (km/h, own scale on the right) when values carry one
-  configure({ windowSec = this.windowSec, leq = this.stats.leq, unit = this.stats.unit, yRange = this.yRange, speed = this.speed } = {}) {
+  // clock: label the time axis with the clock time instead of the measuring time
+  configure({ windowSec = this.windowSec, leq = this.stats.leq, unit = this.stats.unit, yRange = this.yRange, speed = this.speed, clock = this.clock } = {}) {
     this.windowSec = windowSec;
+    this.clock = clock;
     this.stats = { leq, unit };
     this.yRange = yRange;
     this.speed = speed;
@@ -264,18 +325,24 @@ export class LiveTimelineView {
       g.fillText(String(v), 2 * k, yy + 4 * k);
     }
     const tick = TICKS.find((s) => this.windowSec / s <= 6) || 600;
-    for (let t = Math.ceil(tStart / tick) * tick; t <= tEnd + 1e-6; t += tick) {
-      const xx = Math.round(x(t)) + 0.5;
-      g.beginPath();
-      g.moveTo(xx, box.yTop);
-      g.lineTo(xx, box.yBot);
-      g.stroke();
-      g.textAlign = xx < box.x0 + 16 * k ? 'left' : xx > box.x1 - 16 * k ? 'right' : 'center';
-      g.fillText(fmtClock(t), xx, this.h - 6 * k);
+    const labels = [];
+    if (this.clock) {
+      if (to > from) {
+        const tickMs = tick * 1000;
+        for (const [i, ms] of clockTicks(this.times, from, to, tickMs)) labels.push([x((this.first + i + 1) * step), fmtTimeOfDay(ms, tick < 60)]);
+        // right of the newest value the clock runs on, as the measuring time does
+        const tLast = (this.first + to) * step;
+        const cLast = this.times[to - 1];
+        for (let ms = (Math.floor(cLast / tickMs) + 1) * tickMs; ms <= cLast + (tEnd - tLast) * 1000 + 1; ms += tickMs) labels.push([x(tLast + (ms - cLast) / 1000), fmtTimeOfDay(ms, tick < 60)]);
+      }
+    } else {
+      for (let t = Math.ceil(tStart / tick) * tick; t <= tEnd + 1e-6; t += tick) labels.push([x(t), fmtClock(t)]);
     }
+    drawTimeLabels(g, labels, box, this.h, k, true);
     g.textAlign = 'left';
     g.fillStyle = c.axis;
-    const title = `시간축 ${this.stats.unit} · 최근 ${this.windowSec < 60 ? `${this.windowSec}초` : `${this.windowSec / 60}분`}`;
+    const day = this.clock && to > from ? new Date(this.times[to - 1]) : null;
+    const title = `시간축 ${this.stats.unit} · 최근 ${this.windowSec < 60 ? `${this.windowSec}초` : `${this.windowSec / 60}분`}${day ? ` · ${day.getMonth() + 1}월 ${day.getDate()}일` : ''}`;
     g.fillText(title, box.x0 + 6 * k, box.yTop + 12 * k);
     this.titleEnd = box.x0 + 6 * k + g.measureText(title).width;
 

@@ -1,6 +1,6 @@
 // Per-device settings (kept in localStorage).
 
-export const APP_VERSION = '0.13.4';
+export const APP_VERSION = '0.14.0';
 
 const KEY = 'noise-meter:settings:v1';
 
@@ -11,6 +11,7 @@ const DEFAULTS = {
   // analyzer display
   view: 'spectrum', // 'spectrum' (frequency graph + time-axis graph below) | 'gram' (spectrogram) | 'octave' (1/3-octave bars)
   traceSec: 30, // seconds shown in the time-axis graph: 30 | 60 | 300
+  timeAxis: 'elapsed', // 시간축 표시: 'elapsed' (measuring time) | 'clock' (the clock time)
   timedSec: 10, // "N초 측정" button: 5 | 10 | 30 | 60
   gps: false, // 속도 (GPS): show and keep the vehicle speed with the measurement
   autoSave: false, // a timed measurement saves at once (last vehicle number) instead of opening the save sheet

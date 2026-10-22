@@ -381,19 +381,27 @@ export class WindowedSpectrum {
 
 // The meter's level chain run over a whole recording: frequency weighting, Fast (or Slow) detector.
 // Returns Leq of the whole file, max / min after the first 0.5 s (as live), and the time-weighted
-// level every `step` seconds for a time-history graph.
-export function levelHistory(samples, rate, offset = 0, step = 0.1, weighting = 'A', tau = 0.125) {
+// level every `step` seconds for a time-history graph. With `detail`, also per step: its Leq and the
+// highest and lowest time-weighted level in it (NaN while warming up), for the raw data export.
+export function levelHistory(samples, rate, offset = 0, step = 0.1, weighting = 'A', tau = 0.125, { detail = false } = {}) {
   const sos = designWeighting(rate, weighting);
   const st = sos.map(() => [0, 0]);
   const kFast = 1 - Math.exp(-1 / (tau * rate));
   const warm = samples.length > rate ? Math.round(0.5 * rate) : 0;
   const every = Math.max(1, Math.round(step * rate));
-  const history = new Float32Array(Math.floor(samples.length / every));
+  const steps = Math.floor(samples.length / every);
+  const history = new Float32Array(steps);
+  const stepLeq = detail ? new Float32Array(steps) : null;
+  const stepMax = detail ? new Float32Array(steps) : null;
+  const stepMin = detail ? new Float32Array(steps) : null;
   let fast = 0;
   let sum = 0;
   let max = 0;
   let min = Infinity;
   let peak = 0;
+  let sSum = 0;
+  let sMax = -Infinity;
+  let sMin = Infinity;
   for (let i = 0; i < samples.length; i++) {
     const x = samples[i];
     let y = x;
@@ -414,7 +422,25 @@ export function levelHistory(samples, rate, offset = 0, step = 0.1, weighting = 
     }
     const ax = x < 0 ? -x : x;
     if (ax > peak) peak = ax;
-    if ((i + 1) % every === 0) history[(i + 1) / every - 1] = toDb(fast, offset);
+    if (detail) {
+      sSum += y2;
+      if (i >= warm) {
+        if (fast > sMax) sMax = fast;
+        if (fast < sMin) sMin = fast;
+      }
+    }
+    if ((i + 1) % every === 0) {
+      const n = (i + 1) / every - 1;
+      history[n] = toDb(fast, offset);
+      if (detail) {
+        stepLeq[n] = toDb(sSum / every, offset);
+        stepMax[n] = Number.isFinite(sMax) ? toDb(sMax, offset) : NaN;
+        stepMin[n] = Number.isFinite(sMin) ? toDb(sMin, offset) : NaN;
+        sSum = 0;
+        sMax = -Infinity;
+        sMin = Infinity;
+      }
+    }
   }
   return {
     leq: toDb(sum / Math.max(1, samples.length), offset),
@@ -423,5 +449,6 @@ export function levelHistory(samples, rate, offset = 0, step = 0.1, weighting = 
     history,
     step: every / rate,
     peak,
+    ...(detail ? { stepLeq, stepMax, stepMin } : {}),
   };
 }

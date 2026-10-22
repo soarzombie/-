@@ -5,7 +5,6 @@
 // H.264 MP4 plays everywhere (messengers, iPhone); without it WebM, and a plain MP4 last (some browsers
 // put VP9 in it, which phones may not play)
 const TYPES = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'];
-export const MAX_VIDEO_SEC = 120;
 const HEAD = 64; // px (before scaling) for the readings above the graphs
 const FONT = '-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif';
 
@@ -48,7 +47,7 @@ export class ScreenVideo {
     this.frame();
     const stream = this.canvas.captureStream(30);
     if (audioTrack) stream.addTrack(audioTrack);
-    this.recorder = new MediaRecorder(stream, { ...(this.type ? { mimeType: this.type } : {}), videoBitsPerSecond: 2_500_000, audioBitsPerSecond: 128_000 });
+    this.recorder = new MediaRecorder(stream, { ...(this.type ? { mimeType: this.type } : {}), videoBitsPerSecond: 2_000_000, audioBitsPerSecond: 128_000 });
     this.chunks = [];
     this.recorder.ondataavailable = (e) => e.data.size && this.chunks.push(e.data);
   }

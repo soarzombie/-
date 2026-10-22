@@ -140,6 +140,44 @@ function colourAt(file, crop) {
   assert.ok(out.stdout?.length >= 3, `ffmpeg read ${file}: ${out.stderr}`);
   return [...out.stdout.subarray(-3)];
 }
+// The sheets of an .xlsx written by the app (stored zip): { name: [[cell, ...], ...] }, numbers as numbers.
+function readXlsx(buf) {
+  const files = {};
+  for (let p = 0; buf.readUInt32LE(p) === 0x04034b50; ) {
+    const size = buf.readUInt32LE(p + 18);
+    const nameLen = buf.readUInt16LE(p + 26);
+    files[buf.toString('utf8', p + 30, p + 30 + nameLen)] = buf.toString('utf8', p + 30 + nameLen, p + 30 + nameLen + size);
+    p += 30 + nameLen + size;
+  }
+  const unxml = (t) => t.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+  const names = [...files['xl/workbook.xml'].matchAll(/<sheet name="([^"]*)"/g)].map((m) => unxml(m[1]));
+  const out = {};
+  names.forEach((name, i) => {
+    const rows = [];
+    for (const [, r, body] of files[`xl/worksheets/sheet${i + 1}.xml`].matchAll(/<row r="(\d+)">(.*?)<\/row>/g)) {
+      const row = [];
+      for (const [, col, attrs, inner] of body.matchAll(/<c r="([A-Z]+)\d+"([^>]*)>(.*?)<\/c>/g)) {
+        const c = [...col].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+        row[c] = /inlineStr/.test(attrs) ? unxml(inner.match(/<t[^>]*>(.*?)<\/t>/)[1]) : Number(inner.match(/<v>(.*?)<\/v>/)[1]);
+      }
+      rows[Number(r) - 1] = row;
+    }
+    out[name] = rows;
+  });
+  return out;
+}
+
+// Opens 결과 보내기 (or the file screen's export) and downloads one kind of file: Buffer.
+async function exportFile(page, opener, kind) {
+  await opener.click();
+  await page.waitForSelector('dialog.sheet .export-list');
+  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), page.locator(`dialog.sheet [data-x=${kind}]`).click()]);
+  const buf = fs.readFileSync(await dl.path());
+  await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
+  await page.waitForSelector('dialog.sheet', { state: 'detached' });
+  return buf;
+}
+
 const near = (rgb, want) => rgb.every((v, i) => Math.abs(v - want[i]) < 60);
 
 const toneDb = (amp, weight = 0) => 20 * Math.log10(amp / Math.SQRT2) + OFFSET + weight;
@@ -155,12 +193,12 @@ async function launch(wav) {
   });
 }
 
-async function newPage(browser, base, errors, { viewport = { width: 390, height: 844 }, mic = true, seed = {}, geo = null } = {}) {
+async function newPage(browser, base, errors, { viewport = { width: 390, height: 844 }, mic = true, seed = {}, geo = null, desktop = false } = {}) {
   const context = await browser.newContext({
     viewport,
-    deviceScaleFactor: 2,
-    isMobile: true,
-    hasTouch: true,
+    deviceScaleFactor: desktop ? 1 : 2,
+    isMobile: !desktop,
+    hasTouch: !desktop,
     locale: 'ko-KR',
     timezoneId: 'Asia/Seoul',
     permissions: [...(mic ? ['microphone', 'camera'] : []), ...(geo ? ['geolocation'] : [])],
@@ -423,7 +461,7 @@ async function cursorDb(page, hz) {
   await page.getByRole('button', { name: '카메라 창 열기' }).click();
   await page.waitForSelector('#a-cam:not([hidden])');
   await page.getByRole('button', { name: '영상 녹화 시작' }).click();
-  await page.waitForSelector('#a-video-badge:not([hidden])');
+  await page.waitForSelector('#a-rec-badge:not([hidden])');
   const tc = await page.locator('#a-cam').evaluate((e) => ({ cw: e.parentElement.clientWidth, x: e.offsetLeft, y: e.offsetTop, w: e.offsetWidth, h: e.offsetHeight, t: e.querySelector('video').style.transform }));
   assert.ok(tc.w > tc.h && /rotate\(-90deg\)/.test(tc.t), `a portrait camera is shown turned, as a wide window: ${JSON.stringify(tc)}`);
   await page.waitForTimeout(1500);
@@ -435,20 +473,25 @@ async function cursorDb(page, hz) {
     console.log(`turned camera on screen: top ${top}, bottom ${bottom}`);
     assert.ok(near(top, [255, 0, 0]) && near(bottom, [0, 0, 255]), 'upright on screen');
   }
+  // the recording goes to the file analysis with its video; the video is sent from there
   await page.getByRole('button', { name: '영상 녹화 정지' }).click();
-  await page.waitForSelector('dialog.sheet h2:has-text("영상 녹화 끝")');
-  const [tv] = await Promise.all([page.waitForEvent('download'), page.locator('dialog.sheet').getByRole('button', { name: '보내기' }).click()]);
+  await page.waitForSelector('#toast:has-text("영상 포함")');
+  await page.locator('#toast .toast-action').click();
+  await page.waitForSelector('#fa-video');
+  const tvPath = path.join(tmp, 'turned.webm');
+  fs.writeFileSync(tvPath, await exportFile(page, page.locator('[data-act=fa-export]'), 'video'));
   if (HAVE_FFMPEG) {
     const k = Math.min(2, 1280 / tc.cw);
     const crop = (x, y, w, h) => [w, h, x, 64 + y].map((v) => Math.round(v * k)).join(':');
-    const left = colourAt(await tv.path(), crop(tc.x + tc.w * 0.1, tc.y + tc.h * 0.2, tc.w * 0.25, tc.h * 0.6));
-    const right = colourAt(await tv.path(), crop(tc.x + tc.w * 0.65, tc.y + tc.h * 0.2, tc.w * 0.25, tc.h * 0.6));
+    const left = colourAt(tvPath, crop(tc.x + tc.w * 0.1, tc.y + tc.h * 0.2, tc.w * 0.25, tc.h * 0.6));
+    const right = colourAt(tvPath, crop(tc.x + tc.w * 0.65, tc.y + tc.h * 0.2, tc.w * 0.25, tc.h * 0.6));
     console.log(`turned camera in the video: left ${left}, right ${right}`);
     assert.ok(near(left, [255, 0, 0]) && near(right, [0, 0, 255]), 'upright in the video');
   }
-  await page.waitForSelector('dialog.sheet', { state: 'detached' });
-  await page.getByRole('button', { name: '카메라 창 닫기' }).click();
   await page.evaluate(() => (navigator.mediaDevices.getUserMedia = window.e2eRealGum));
+  await page.evaluate(() => (location.hash = '#/'));
+  await running(page);
+  assert.ok(await page.locator('#a-cam').isHidden(), 'the camera window closed when leaving the analyzer');
   await page.getByRole('button', { name: '세로 화면으로' }).click();
   await page.waitForFunction(() => document.documentElement.dataset.layout === 'portrait' && document.documentElement.dataset.rotate === 'off');
   assert.ok(await page.locator('.tabbar').isVisible(), 'back to portrait');
@@ -686,10 +729,37 @@ async function cursorDb(page, hz) {
   await page.locator('.record-row').click();
   await page.waitForSelector('.stats-grid');
   assert.ok(Math.abs((await num(page, '.stats-grid div:first-child b')) - expected1) < 0.3);
-  const [card] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '결과 보내기' }).click()]);
+  // 결과 보내기: the image, the Excel raw data, the record file, the sound
+  const shareBtn = page.getByRole('button', { name: '결과 보내기' });
+  await shareBtn.click();
+  await page.waitForSelector('dialog.sheet .export-list');
+  assert.deepEqual(await page.locator('dialog.sheet [data-x]').evaluateAll((bs) => bs.map((b) => b.dataset.x)), ['image', 'xlsx', 'nmb', 'wav']);
+  await shot(page, 'export-sheet');
+  await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
+  const cardBytes = await exportFile(page, shareBtn, 'image');
   const cardPath = path.join(SHOTS || tmp, 'share-card.png');
-  await card.saveAs(cardPath);
-  assert.ok(fs.statSync(cardPath).size > 20000, 'share card PNG');
+  fs.writeFileSync(cardPath, cardBytes);
+  assert.ok(cardBytes.length > 20000 && cardBytes.subarray(1, 4).toString() === 'PNG', 'share card PNG');
+  // the raw data: the level every 0.125 s of the measurement, every FFT bin as measured, 1/3 octave
+  const book = readXlsx(await exportFile(page, shareBtn, 'xlsx'));
+  console.log(`raw data: ${Object.entries(book).map(([n, rows]) => `${n} ${rows.length - 1}`).join(', ')}`);
+  assert.deepEqual(Object.keys(book), ['요약', '시간별 레벨', '주파수', '1／3 옥타브 시간별', '1／3 옥타브']);
+  const lv = book['시간별 레벨'];
+  assert.equal(lv[0][2], 'LAF dB(A)');
+  const lafs = lv.slice(1).map((r) => r[2]).filter(Number.isFinite).sort((a, b) => a - b);
+  assert.ok(lafs.length > 8 * 3 && Math.abs(lafs[lafs.length >> 1] - expected1) < 0.3, `time history: ${lafs.length} rows, median ${lafs[lafs.length >> 1]}`);
+  assert.ok(lv[1][0] > 40000 && lv[2][1] === 0.25, 'clock time (Excel date) and measuring time per row');
+  const fftRows = book['주파수'];
+  assert.deepEqual(fftRows[0].slice(0, 3), ['주파수(Hz)', '저장 순간 dB(A)', '측정 평균 dB(A)']);
+  assert.equal(fftRows.length - 1, 4096 / 2 - 1, 'every bin at the measuring FFT size');
+  const k1k = Math.round(1000 / fftRows[1][0]); // (row k is bin k: the sample rate's FFT spacing)
+  assert.ok(Math.abs(fftRows[k1k][0] - 1000) < fftRows[1][0] && fftRows[k1k][2] > expected1 - 4, `1 kHz bin: ${fftRows[k1k]}`);
+  const band1k = book['1／3 옥타브'].find((r) => r[0] === '1k');
+  assert.ok(Math.abs(band1k[1] - expected1) < 0.5, `1 kHz band ${band1k[1]}`);
+  assert.equal(new Map(book['요약'].map((r) => [r[0], r[1]])).get('주의'), '스마트폰 측정 참고값 (정밀 소음계를 대신하지 않음)');
+  const recordFile = await exportFile(page, shareBtn, 'nmb');
+  assert.equal(recordFile.toString('latin1', 0, 8), 'NOISEBK1', 'a record file (one record, with its sound)');
+  fs.writeFileSync(path.join(tmp, 'one-record.nmb'), recordFile);
 
   // the saved sound: playable, analysed into a spectrogram, shareable as WAV
   await page.waitForSelector('#rec-audio');
@@ -703,13 +773,18 @@ async function cursorDb(page, hz) {
   );
   console.log(`saved sound: ${duration.toFixed(1)} s`);
   assert.ok(duration > 2 && duration <= 10.05, 'sound length');
-  const [wav] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '소리 파일 보내기' }).click()]);
-  const wavBytes = fs.readFileSync(await wav.path());
+  const wavBytes = await exportFile(page, shareBtn, 'wav');
   assert.equal(wavBytes.toString('latin1', 0, 4), 'RIFF');
   assert.ok(wavBytes.length > 48000, 'WAV has sound in it');
+  // playing it: the frequency graph shows the spectrum at the playback position
+  assert.ok(await page.locator('#rec-saved').isHidden());
   await page.evaluate(() => document.querySelector('#rec-audio').play());
   await page.waitForTimeout(1200);
+  assert.match(await page.locator('#rec-legend').textContent(), /재생 위치 00:0[12]/);
+  assert.ok(await page.locator('#rec-saved').isVisible(), 'and offers the saved graph back');
   await shot(page, 'record-tone-playing', true);
+  await page.locator('#rec-saved').click();
+  assert.match(await page.locator('#rec-legend').textContent(), /저장 순간/);
 
   // calibration: tell the app a reference meter read 3 dB more -> readings go up by 3 dB
   await page.locator('.tabbar a[data-tab=settings]').click();
@@ -958,13 +1033,20 @@ async function cursorDb(page, hz) {
   await chartSettings(page, { autoSave: 'off' });
   await page.evaluate(async () => (await import('./js/settings.js')).saveSettings({ vehicle: '' }));
 
+  // 시간축 표시 → 현재 시각: the time-axis graph is labelled with the clock time (and the date)
+  await chartSettings(page, { timeAxis: 'clock' });
+  assert.equal((await settingsOf(page)).timeAxis, 'clock');
+  await page.waitForTimeout(1500);
+  await shot(page, 'clock-axis');
+  await chartSettings(page, { timeAxis: 'elapsed' });
+
   // 영상, as in the reference app: the button opens the camera window (Chromium's fake camera here),
   // which is dragged to another place; while it is open the red button records the readings, graphs and
   // the camera window with the sound as one video file, offered to send when it stops
   await page.getByRole('button', { name: '카메라 창 열기' }).click();
   await page.waitForSelector('#a-cam:not([hidden])');
   assert.ok(await page.locator('#a-cam video').evaluate((v) => v.videoWidth > 0 && !v.paused), 'the camera shows');
-  assert.ok(await page.locator('#a-video-badge').isHidden(), 'not recording yet');
+  assert.ok(await page.locator('#a-rec-badge').isHidden(), 'not recording yet');
   assert.equal(await page.locator('#a-rec-cap').textContent(), '녹화', 'the red button records a video now');
   const camBox = await page.locator('#a-cam').boundingBox();
   const chartArea = await page.locator('.an-chart').boundingBox();
@@ -980,10 +1062,11 @@ async function cursorDb(page, hz) {
   assert.ok(camPos && camPos[0] === 1 && camPos[1] > 0, `camera place remembered (${camPos})`);
   await shot(page, 'camera-open');
   await page.getByRole('button', { name: '영상 녹화 시작' }).click();
-  await page.waitForSelector('#a-video-badge:not([hidden])');
-  assert.equal(await page.locator('.analyzer').getAttribute('data-rec'), 'off', 'a video, not a sound recording');
-  await page.waitForTimeout(2600);
-  assert.match(await page.locator('#a-video-time').textContent(), /00:0[2-4]/);
+  await page.waitForSelector('#a-rec-badge:not([hidden])');
+  assert.equal(await page.locator('#a-rec-kind').textContent(), '녹화', 'sound and video together');
+  assert.deepEqual(await page.locator('.analyzer').evaluate((e) => [e.dataset.rec, e.dataset.video]), ['on', 'rec']);
+  await page.waitForTimeout(3200);
+  assert.match(await page.locator('#a-rec-time').textContent(), /00:0[3-4]/);
   await shot(page, 'video');
   // where the camera window sits in the graph box (layout pixels), to find it in the video
   const camIn = await page.evaluate(() => {
@@ -992,14 +1075,37 @@ async function cursorDb(page, hz) {
     return { cw: c.clientWidth, x: e.offsetLeft, y: e.offsetTop, w: e.offsetWidth, h: e.offsetHeight };
   });
   await page.getByRole('button', { name: '영상 녹화 정지' }).click();
-  await page.waitForSelector('dialog.sheet h2:has-text("영상 녹화 끝")');
-  const vText = await page.locator('dialog.sheet p').first().textContent();
-  assert.match(await page.locator('dialog.sheet .fine').textContent(), /카메라 화면/);
-  const [vid] = await Promise.all([page.waitForEvent('download'), page.locator('dialog.sheet').getByRole('button', { name: '보내기' }).click()]);
-  const vBytes = fs.readFileSync(await vid.path());
+  await page.waitForSelector('#toast:has-text("영상 포함")');
+  assert.ok(await page.locator('#a-cam').isVisible(), 'the camera window stays open for the next recording');
+  assert.equal(await page.locator('#a-rec-cap').textContent(), '녹화');
+  await page.getByRole('button', { name: '카메라 창 닫기' }).click();
+  await page.waitForSelector('#a-cam', { state: 'hidden' });
+  assert.equal(await page.locator('#a-cam video').evaluate((v) => v.srcObject), null, 'the camera is off');
+  assert.equal(await page.locator('#a-rec-cap').textContent(), '녹음', 'and the red button records sound only again');
+
+  // the recording in the file analysis: its sound analysed, its video moving with it
+  await page.locator('.tabbar a[data-tab=file]').click();
+  await page.waitForSelector('#fa-result .stats-grid', { timeout: 20000 });
+  await page.waitForSelector('#fa-video');
+  const sync = () => page.evaluate(() => [document.querySelector('#fa-audio').currentTime, document.querySelector('#fa-video').currentTime, document.querySelector('#fa-video').paused]);
+  await page.evaluate(() => document.querySelector('#fa-audio').play());
+  await page.waitForTimeout(1500);
+  const [at1, vt1, vp1] = await sync();
+  console.log(`file video: sound ${at1.toFixed(2)} s, video ${vt1.toFixed(2)} s, ${vp1 ? 'paused' : 'playing'}`);
+  assert.ok(!vp1 && at1 > 0.8 && Math.abs(at1 - vt1) < 0.5, 'the video plays with the sound');
+  await page.evaluate(() => {
+    const a = document.querySelector('#fa-audio');
+    a.pause();
+    a.currentTime = 0.5;
+  });
+  await page.waitForTimeout(800);
+  const [at2, vt2, vp2] = await sync();
+  assert.ok(vp2 && Math.abs(at2 - 0.5) < 0.05 && Math.abs(vt2 - 0.5) < 0.3, `and jumps with it: ${at2} ${vt2}`);
+  await shot(page, 'file-video', true);
+  const vBytes = await exportFile(page, page.locator('[data-act=fa-export]'), 'video');
   const isMp4 = vBytes.subarray(4, 8).toString() === 'ftyp';
   const isWebm = vBytes.readUInt32BE(0) === 0x1a45dfa3;
-  console.log(`video: ${vText}, ${vBytes.length} bytes, ${isMp4 ? 'MP4' : isWebm ? 'WebM' : 'unknown'}`);
+  console.log(`video: ${vBytes.length} bytes, ${isMp4 ? 'MP4' : isWebm ? 'WebM' : 'unknown'}`);
   assert.ok(vBytes.length > 20000 && (isMp4 || isWebm), 'a playable video file');
   if (SHOTS) fs.writeFileSync(path.join(SHOTS, `video.${isMp4 ? 'mp4' : 'webm'}`), vBytes);
   if (HAVE_FFMPEG) {
@@ -1015,13 +1121,29 @@ async function cursorDb(page, hz) {
     console.log(`video frame: camera ${inCam}, graph ${graph}`);
     assert.ok(inCam.reduce((a, v, i) => a + Math.abs(v - graph[i]), 0) > 60, 'the camera picture is in the video');
   }
-  await page.waitForSelector('dialog.sheet', { state: 'detached' });
-  assert.ok(await page.locator('#a-cam').isVisible(), 'the camera window stays open for the next video');
-  assert.equal(await page.locator('#a-rec-cap').textContent(), '녹화');
-  await page.getByRole('button', { name: '카메라 창 닫기' }).click();
-  await page.waitForSelector('#a-cam', { state: 'hidden' });
-  assert.equal(await page.locator('#a-cam video').evaluate((v) => v.srcObject), null, 'the camera is off');
-  assert.equal(await page.locator('#a-rec-cap').textContent(), '녹음', 'and the red button records sound again');
+  // Excel straight from the file analysis: the recording's levels with clock times
+  const fileBook = readXlsx(await exportFile(page, page.locator('[data-act=fa-export]'), 'xlsx'));
+  assert.deepEqual(Object.keys(fileBook), ['요약', '시간별 레벨', '주파수', '1／3 옥타브 시간별', '1／3 옥타브']);
+  assert.ok(fileBook['시간별 레벨'].length > 20 && fileBook['시간별 레벨'][1][0] > 40000, 'rows with the clock time of the recording');
+  // kept as a record with its video; sent from there as a record file (for the PC check below)
+  await page.getByRole('button', { name: '기록에 저장' }).click();
+  await page.locator('dialog.sheet').getByRole('button', { name: '저장' }).click();
+  await page.waitForSelector('#toast:not([hidden])');
+  await page.locator('.tabbar a[data-tab=history]').click();
+  await page.locator('.record-row').first().click();
+  await page.waitForSelector('#rec-video');
+  await page.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
+  const recShare = page.getByRole('button', { name: '결과 보내기' });
+  await recShare.click();
+  assert.deepEqual(await page.locator('dialog.sheet [data-x]').evaluateAll((bs) => bs.map((b) => b.dataset.x)), ['image', 'xlsx', 'nmb', 'wav', 'video']);
+  await page.locator('dialog.sheet').getByRole('button', { name: '닫기' }).click();
+  fs.writeFileSync(path.join(tmp, 'video-record.nmb'), await exportFile(page, recShare, 'nmb'));
+  // (taken out again so the record counts below stay as they were)
+  await page.getByRole('button', { name: '이 기록 삭제' }).click();
+  await page.getByRole('button', { name: '한 번 더 누르면 삭제됩니다' }).click();
+  await page.waitForSelector('.record-row');
+  await page.locator('.tabbar a[data-tab=home]').click();
+  await running(page);
 
   // attached file: 3 s of 1 kHz (77.0 dB(A)) then 3 s of 100 Hz (71.9 dB(A))
   // (passed as a buffer: Playwright here cannot attach files from non-ASCII paths, and the Korean name
@@ -1096,13 +1218,35 @@ async function cursorDb(page, hz) {
   await office.locator('.record-row').filter({ hasText: '차량 미입력' }).filter({ hasText: '5초 측정' }).click();
   await office.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
   assert.match(await office.locator('.meta dt:has-text("휴대폰") + dd').textContent(), /정비팀 1호 \(\d{4}\.\d\d\.\d\d 백업에서 넣음\)/);
-  assert.ok(await office.getByRole('button', { name: '소리 파일 보내기' }).isVisible(), 'the sound came along');
+  assert.ok(await office.locator('#rec-audio').isVisible(), 'the sound came along');
   await office.evaluate(() => (location.hash = '#/history'));
   await office.waitForSelector('.record-row');
   await office.setInputFiles('#f-backup', { name: 'backup.nmb', mimeType: 'application/octet-stream', buffer: fs.readFileSync(bakPath) });
   await office.waitForFunction(() => /새 기록이 없습니다 \(3건 모두 이미 있음\)/.test(document.querySelector('#toast')?.textContent || ''));
   assert.equal(await office.locator('.record-row').count(), 3);
   await office.context().close();
+
+  // a PC: record files sent by drivers (one record each, one with its video), put in at once in a desktop
+  // browser, looked at there and turned into Excel raw data
+  const pc = await newPage(browser, base, errors, { viewport: { width: 1366, height: 820 }, mic: false, desktop: true });
+  await pc.evaluate(() => (location.hash = '#/history'));
+  await pc.waitForSelector('.empty-hint');
+  await pc.setInputFiles('#f-backup', ['one-record.nmb', 'video-record.nmb'].map((name) => ({ name, mimeType: 'application/octet-stream', buffer: fs.readFileSync(path.join(tmp, name)) })));
+  await pc.waitForFunction(() => /기록 2건을 넣었습니다/.test(document.querySelector('#toast')?.textContent || ''));
+  assert.equal(await pc.locator('.record-row').count(), 2);
+  await pc.locator('.record-row').filter({ hasText: '녹음_' }).click();
+  await pc.waitForSelector('#rec-video');
+  await pc.waitForSelector('#rec-gram-wait', { state: 'detached', timeout: 10000 });
+  await pc.evaluate(() => document.querySelector('#rec-audio').play());
+  await pc.waitForTimeout(1200);
+  const pcSync = await pc.evaluate(() => [document.querySelector('#rec-audio').currentTime, document.querySelector('#rec-video').currentTime, document.querySelector('#rec-video').paused]);
+  assert.ok(!pcSync[2] && Math.abs(pcSync[0] - pcSync[1]) < 0.5, `the video plays with the sound on the PC: ${pcSync}`);
+  assert.match(await pc.locator('#rec-legend').textContent(), /재생 위치/);
+  await shot(pc, 'pc-record');
+  const pcBook = readXlsx(await exportFile(pc, pc.getByRole('button', { name: '결과 보내기' }), 'xlsx'));
+  assert.deepEqual(Object.keys(pcBook), ['요약', '시간별 레벨', '주파수', '1／3 옥타브 시간별', '1／3 옥타브']);
+  console.log(`PC raw data: ${Object.entries(pcBook).map(([n, rows]) => `${n} ${rows.length - 1}`).join(', ')}`);
+  await pc.context().close();
   await browser.close();
 
   // Run 3: cabin-like noise, screenshots in both orientations

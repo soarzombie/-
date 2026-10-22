@@ -2,25 +2,32 @@
 // and another phone takes in the ones it does not have yet (same record id = same record).
 //
 // File layout: "NOISEBK1", the header's length in bytes (8 hex digits), the header (JSON: format, app
-// version, phone name, export time, the records without their sound and where each sound sits), then
-// the sounds one after another. Building it only joins Blobs, so the sound is never copied in memory.
+// version, phone name, export time, the records without their sound and video and where each sits),
+// then the sounds and videos one after another. One record alone in such a file is how a record is
+// sent to a PC (opened in the app there). Building it only joins Blobs, so the sound is never copied
+// in memory.
 
 const MAGIC = 'NOISEBK1';
 const LEAD = MAGIC.length + 8;
+const BLOBS = ['audio', 'video']; // a record's sound, and the video of a recording made with the camera on
 
 export function backupBlob(records, { device = '', app = '' } = {}) {
-  const sounds = [];
+  const parts = [];
   let offset = 0;
   const list = records.map((r) => {
-    const { audio, ...rest } = r;
-    if (!(audio instanceof Blob) || !audio.size) return rest;
-    sounds.push(audio);
-    const place = { offset, size: audio.size, type: audio.type };
-    offset += audio.size;
-    return { ...rest, audio: place };
+    const out = { ...r };
+    for (const key of BLOBS) {
+      const b = r[key];
+      delete out[key];
+      if (!(b instanceof Blob) || !b.size) continue;
+      parts.push(b);
+      out[key] = { offset, size: b.size, type: b.type };
+      offset += b.size;
+    }
+    return out;
   });
   const header = new TextEncoder().encode(JSON.stringify({ format: 1, app, device, exported: Date.now(), records: list }));
-  return new Blob([MAGIC, header.length.toString(16).padStart(8, '0'), header, ...sounds], { type: 'application/octet-stream' });
+  return new Blob([MAGIC, header.length.toString(16).padStart(8, '0'), header, ...parts], { type: 'application/octet-stream' });
 }
 
 // The header with each record's sound as a Blob (a slice of the file). Throws a Korean message.
@@ -40,10 +47,13 @@ export async function readBackup(file) {
   const records = header.records
     .filter((r) => r && typeof r.id === 'string' && r.spectrum && Number.isFinite(r.ts))
     .map((r) => {
-      const a = r.audio;
-      if (!a || !Number.isFinite(a.offset) || !Number.isFinite(a.size)) return { ...r, audio: undefined };
-      if (base + a.offset + a.size > file.size) return { ...r, audio: undefined }; // sound cut off: keep the rest
-      return { ...r, audio: file.slice(base + a.offset, base + a.offset + a.size, a.type) };
+      const out = { ...r };
+      for (const key of BLOBS) {
+        const a = r[key];
+        const whole = a && Number.isFinite(a.offset) && Number.isFinite(a.size) && base + a.offset + a.size <= file.size;
+        out[key] = whole ? file.slice(base + a.offset, base + a.offset + a.size, a.type) : undefined; // cut off: keep the rest
+      }
+      return out;
     });
   return { ...header, records };
 }
